@@ -1,0 +1,29 @@
+[package]
+name = "emulator"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Virtual TTY and radio emulator for TS-570D"
+rust-version.workspace = true
+
+[[bin]]
+name = "emulator"
+path = "src/main.rs"
+
+[dependencies]
+# Error handling
+thiserror = { workspace = true }
+
+# PTY creation and management
+serialport = "4.0"
+
+# Signal handling for standalone binary
+ctrlc = "3.0"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+mockall = { workspace = true }
+
+[features]
+default = []

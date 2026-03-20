@@ -1,0 +1,39 @@
+[package]
+name = "radio"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Kenwood TS-570D protocol handling"
+rust-version.workspace = true
+
+[dependencies]
+# Local dependencies
+serial = { path = "../serial" }
+
+# Runtime
+monoio = { workspace = true }
+
+# Async traits
+async-trait = "0.1"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Utilities
+bytes = { workspace = true }
+futures = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+mockall = { workspace = true }
+
+[features]
+default = []

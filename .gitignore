@@ -1,0 +1,23 @@
+# Build directories
+target/
+Cargo.lock
+
+# Misc planning files
+**/task_plan.md
+**/findings.md
+**/progress.md
+*_SUMMARY.md
+IMPLEMENTATION_PLAN.md
+
+# IDE
+.idea/
+node_modules/
+
+# Planning directories (agent working files)
+planning/
+
+# Temporary files
+*.swp
+*.swo
+*~
+.DS_Store

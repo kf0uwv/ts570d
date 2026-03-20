@@ -1,0 +1,117 @@
+[workspace]
+members = [
+    "framework",
+    "serial",
+    "radio", 
+    "ui",
+    "emulator",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Matt Franklin <radiombf@gmail.com>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/kf0uwv/ts570d"
+repository = "https://github.com/kf0uwv/ts570d"
+description = "Kenwood TS-570D Radio Control with io_uring"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Async runtime (io_uring-based, Linux-only)
+monoio = { version = "0.2.3" }
+local-sync = "0.1.1"
+
+# Terminal UI
+ratatui = { version = "0.26.3", features = ["crossterm"] }
+crossterm = { version = "0.27.0", features = ["event-stream"] }
+
+# Error handling
+thiserror = "1.0.61"
+
+# Serialization (for radio commands/protocols)
+serde = { version = "1.0.203", features = ["derive"] }
+serde_json = "1.0.117"
+
+# Logging
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+
+# Utilities
+bytes = "1.6.0"
+futures = "0.3.30"
+
+# Linux-specific
+libc = "0.2.153"
+nix = "0.27.1"
+
+# Testing
+tempfile = "3.10.1"
+mockall = "0.12.1"
+
+[package]
+name = "ts570d"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ts570d"
+path = "src/main.rs"
+
+[dependencies]
+monoio = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+libc = { workspace = true }
+nix = { workspace = true }
+
+# Local workspace crates
+framework = { path = "framework" }
+serial = { path = "serial" }
+radio = { path = "radio" }
+ui = { path = "ui" }
+emulator = { path = "emulator" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+mockall = { workspace = true }
+
+[features]
+default = []
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+debug = true
+
+# Platform-specific configuration
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux-specific dependencies for io_uring and serial handling
+# libc is already included above
+
+# Metadata for documentation and packaging
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true
+
+# Build requirements documentation
+[package.metadata.build]
+# Note: This application requires Linux kernel 5.1+ for io_uring support
+# Build command: cargo build --release
+# Test command: cargo test
+# Lint command: cargo clippy && cargo fmt

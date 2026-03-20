@@ -1,0 +1,40 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Ratatui terminal interface for TS-570D"
+rust-version.workspace = true
+
+[dependencies]
+# Local dependencies
+serial = { path = "../serial" }
+radio = { path = "../radio" }
+
+# Async runtime
+monoio = { workspace = true }
+
+# Async traits
+async-trait = "0.1"
+
+# Error handling
+thiserror = { workspace = true }
+
+# Utilities
+bytes = { workspace = true }
+futures = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Terminal UI (for framework interface definitions only)
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+mockall = { workspace = true }
+
+[features]
+default = []
