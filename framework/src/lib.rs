@@ -7,6 +7,7 @@
 //! - **Channels** - monoio-based channel helpers for passing messages
 //! - **State machine** - Application state management and transitions
 //! - **Error types** - Common error handling
+//! - **Transport trait** - Byte-level I/O interface decoupling radio from serial
 //!
 //! ## Architecture
 //!
@@ -66,17 +67,20 @@ pub mod channels;
 pub mod errors;
 pub mod messages;
 pub mod state_machine;
+pub mod transport;
 
 // Re-export main framework components
 pub use channels::{
     create_bounded_message_channel, create_message_channel, BoundedMessageReceiver,
     BoundedMessageSender, MessageReceiver, MessageSender,
 };
-pub use errors::{FrameworkError, FrameworkResult};
+pub use errors::{FrameworkError, FrameworkResult, TransportError};
+pub use state_machine::{ApplicationStateMachine, State};
 pub use messages::{
     ComponentStatus, EmulatorMessage, LogLevel, Message, MessageTypes, RadioMessage,
     SerialMessage, SystemMessage, UIMessage,
 };
+pub use transport::Transport;
 // Re-export commonly used local-sync channel types
 pub use local_sync::mpsc::bounded::{Rx as BoundedRx, Tx as BoundedTx};
 pub use local_sync::mpsc::unbounded::{Rx as UnboundedRx, Tx as UnboundedTx};

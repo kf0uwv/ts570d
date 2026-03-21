@@ -12,6 +12,9 @@ rust-version.workspace = true
 monoio = { workspace = true }
 local-sync = { workspace = true }
 
+# Async trait support (compatible with !Send futures for monoio)
+async-trait = { workspace = true }
+
 # Error handling
 thiserror = { workspace = true }
 

@@ -27,3 +27,18 @@ pub enum FrameworkError {
 
 /// Result type for framework operations
 pub type FrameworkResult<T> = Result<T, FrameworkError>;
+
+/// Errors from Transport implementations (serial port I/O).
+#[derive(Debug, thiserror::Error)]
+pub enum TransportError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Port not open")]
+    NotOpen,
+    #[error("Write timeout")]
+    WriteTimeout,
+    #[error("Read timeout")]
+    ReadTimeout,
+    #[error("Transport error: {0}")]
+    Other(String),
+}

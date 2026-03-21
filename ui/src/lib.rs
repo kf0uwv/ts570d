@@ -1,10 +1,16 @@
-//! UI framework crate for TS-570D
+//! TS-570D Terminal UI
 //!
-//! Provides framework interfaces and abstractions for user interface operations.
-//! UI implementation details are handled by specialized agents.
+//! Provides the ratatui-based terminal interface for the radio controller.
 
-// Framework modules - pub
-// Re-export framework types
+pub mod layout;
+pub mod terminal;
 
-// NOTE: Terminal implementation (UI components, layouts, rendering)
-// should be implemented by @ui agent using these interfaces
+pub use terminal::run_ui;
+
+#[derive(Debug, thiserror::Error)]
+pub enum UiError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+pub type UiResult<T> = Result<T, UiError>;

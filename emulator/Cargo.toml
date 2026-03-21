@@ -15,8 +15,8 @@ path = "src/main.rs"
 # Error handling
 thiserror = { workspace = true }
 
-# PTY creation and management
-serialport = "4.0"
+# PTY creation and management (nix provides openpty/ttyname; serialport does not support PTY)
+nix = { workspace = true, features = ["term"] }
 
 # Signal handling for standalone binary
 ctrlc = "3.0"

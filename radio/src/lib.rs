@@ -8,6 +8,8 @@
 //! # Architecture
 //!
 //! - `commands`: Command table with metadata for all TS-570D CAT commands
+//! - `error`: Error types for protocol operations
+//! - `protocol`: Core protocol types (`Mode`, `Frequency`)
 //!
 //! # Usage
 //!
@@ -21,3 +23,8 @@
 //! ```
 
 pub mod commands;
+pub mod error;
+pub mod protocol;
+
+pub use error::{RadioError, RadioResult};
+pub use protocol::{Frequency, Mode};
