@@ -35,6 +35,15 @@ Your role is unique: you create **test infrastructure**, not production code. Th
    - Can be used by integration tests
    - Supports both virtual and physical serial ports
 
+## Architectural Decisions (MANDATORY — DO NOT DEVIATE)
+
+Decisions recorded in `./planning/` files are **binding**. You MUST implement exactly what is specified. You may NOT substitute a different approach, library, or design pattern because you think it is simpler or better.
+
+- If the plan says use `serialport-rs`, use `serialport-rs`. Do NOT substitute `nix::pty::openpty` or any other library.
+- If you encounter a technical obstacle, STOP and report it. Do NOT work around it by changing the design.
+- Before writing any code, re-read the relevant planning files and confirm your approach matches them exactly.
+- If anything in the task prompt contradicts the planning files, surface the conflict and ask for clarification before proceeding.
+
 ## Project Constraints
 
 - **Dependencies**: Use `serialport` crate (different from production code)

@@ -15,8 +15,8 @@ path = "src/main.rs"
 # Error handling
 thiserror = { workspace = true }
 
-# PTY creation and management (nix provides openpty/ttyname; serialport does not support PTY)
-nix = { workspace = true, features = ["term"] }
+# PTY creation via serialport-rs (TTYPort::pair() creates a pseudo-terminal pair)
+serialport = "4"
 
 # Signal handling for standalone binary
 ctrlc = "3.0"
@@ -24,6 +24,7 @@ ctrlc = "3.0"
 [dev-dependencies]
 tempfile = { workspace = true }
 mockall = { workspace = true }
+libc = { workspace = true }
 
 [features]
 default = []

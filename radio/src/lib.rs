@@ -7,6 +7,7 @@
 //!
 //! # Architecture
 //!
+//! - `client`: Generic `RadioClient<T: Transport>` for sending commands and reading responses
 //! - `commands`: Command table with metadata for all TS-570D CAT commands
 //! - `error`: Error types for protocol operations
 //! - `protocol`: Core protocol types (`Mode`, `Frequency`)
@@ -22,9 +23,11 @@
 //! assert!(fa_cmd.supports_write);
 //! ```
 
+pub mod client;
 pub mod commands;
 pub mod error;
 pub mod protocol;
 
+pub use client::RadioClient;
 pub use error::{RadioError, RadioResult};
 pub use protocol::{Frequency, Mode};

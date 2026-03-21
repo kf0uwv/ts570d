@@ -11,6 +11,12 @@ rust-version.workspace = true
 # Core runtime
 monoio = { workspace = true }
 
+# Framework Transport trait
+framework = { path = "../framework" }
+
+# Async trait support (compatible with !Send futures for monoio)
+async-trait = { workspace = true }
+
 # Error handling
 thiserror = { workspace = true }
 
@@ -20,7 +26,7 @@ futures = { workspace = true }
 
 # Linux-specific
 libc = { workspace = true }
-nix = { workspace = true }
+nix = { workspace = true, features = ["term"] }
 
 # Logging
 tracing = { workspace = true }
@@ -28,6 +34,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 mockall = { workspace = true }
+emulator = { path = "../emulator" }
 
 [features]
 default = []

@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 # Local dependencies
+framework = { path = "../framework" }
 serial = { path = "../serial" }
 
 # Runtime
