@@ -1,8 +1,24 @@
 {
   "permissions": {
     "allow": [
+      "Edit",
       "Write",
       "Bash"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "agent",
+            "prompt": "A file was just modified in the TS-570D radio control project (Rust). The hook input is: $ARGUMENTS\n\nExtract the file_path from tool_input. If the file does not end in .rs, exit immediately with no output.\n\nOtherwise, read the file and perform a focused code review checking ONLY for blocking issues:\n1. tokio usage (banned — monoio only)\n2. Crate boundary violations: radio importing serial, ui importing radio or serial\n3. Send/Sync bounds on async traits (must be ?Send for monoio)\n4. Missing thiserror on error types\n\nIf no blocking issues found, output nothing. If blocking issues exist, output a brief bulleted list prefixed with 'CODE REVIEW:' for each issue with the line number.",
+            "timeout": 60,
+            "statusMessage": "Code review..."
+          }
+        ]
+      }
     ]
   }
 }

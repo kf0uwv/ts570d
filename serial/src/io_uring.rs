@@ -4,7 +4,8 @@
 //! using Linux io_uring interface for zero-copy operations via monoio.
 
 use std::fmt;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::io::ErrorKind;
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream as StdUnixStream;
 
@@ -13,7 +14,8 @@ use monoio::buf::VecBuf;
 use monoio::io::{AsyncReadRent, AsyncWriteRent};
 use monoio::net::UnixStream;
 use nix::sys::termios::{
-    cfmakeraw, cfsetispeed, cfsetospeed, tcgetattr, tcsetattr, BaudRate, SetArg,
+    cfmakeraw, cfsetispeed, cfsetospeed, tcgetattr, tcsetattr, tcdrain, BaudRate, ControlFlags,
+    InputFlags, SetArg,
 };
 
 use framework::errors::TransportError;
@@ -76,17 +78,68 @@ fn baud_rate_from_u32(baud: u32) -> Result<BaudRate, SerialError> {
     }
 }
 
-/// Configure a file descriptor for raw serial communication (8N1, no flow control).
+/// Configure a file descriptor for raw serial communication according to `config`.
 ///
-/// Applies: raw mode (cfmakeraw), correct baud rate, applies with TCSANOW.
-fn configure_termios(fd: &OwnedFd, baud: u32) -> Result<(), SerialError> {
-    let baud_rate = baud_rate_from_u32(baud)?;
+/// Applies: raw mode (cfmakeraw), data bits, stop bits, parity, flow control,
+/// correct baud rate, and commits with TCSANOW.
+fn configure_termios(fd: &OwnedFd, config: &SerialConfig) -> Result<(), SerialError> {
+    let baud_rate = baud_rate_from_u32(config.baud_rate)?;
 
     let mut termios = tcgetattr(fd)
         .map_err(|e| SerialError::InvalidConfig(format!("tcgetattr failed: {}", e)))?;
 
-    // Raw mode: disable all special processing (canonical mode, echo, signals, flow ctrl)
+    // Raw mode: disable all special processing (canonical mode, echo, signals, flow ctrl).
+    // cfmakeraw clears CSIZE and sets CS8 among other things; we apply our own data-bits
+    // setting afterwards to override.
     cfmakeraw(&mut termios);
+
+    // --- data bits (character size) ---
+    // Clear the CSIZE mask first, then set the requested width.
+    termios.control_flags &= !ControlFlags::CSIZE;
+    let cs = match config.data_bits {
+        5 => ControlFlags::CS5,
+        6 => ControlFlags::CS6,
+        7 => ControlFlags::CS7,
+        _ => ControlFlags::CS8, // 8 is the default and most common
+    };
+    termios.control_flags |= cs;
+
+    // --- stop bits ---
+    if config.stop_bits >= 2 {
+        termios.control_flags |= ControlFlags::CSTOPB;
+    } else {
+        termios.control_flags &= !ControlFlags::CSTOPB;
+    }
+
+    // --- parity ---
+    match config.parity {
+        Parity::None => {
+            termios.control_flags &= !(ControlFlags::PARENB | ControlFlags::PARODD);
+        }
+        Parity::Even => {
+            termios.control_flags |= ControlFlags::PARENB;
+            termios.control_flags &= !ControlFlags::PARODD;
+        }
+        Parity::Odd => {
+            termios.control_flags |= ControlFlags::PARENB | ControlFlags::PARODD;
+        }
+    }
+
+    // --- flow control ---
+    match config.flow_control {
+        FlowControl::None => {
+            termios.control_flags &= !ControlFlags::CRTSCTS;
+            termios.input_flags &= !(InputFlags::IXON | InputFlags::IXOFF);
+        }
+        FlowControl::Hardware => {
+            termios.control_flags |= ControlFlags::CRTSCTS;
+            termios.input_flags &= !(InputFlags::IXON | InputFlags::IXOFF);
+        }
+        FlowControl::Software => {
+            termios.control_flags &= !ControlFlags::CRTSCTS;
+            termios.input_flags |= InputFlags::IXON | InputFlags::IXOFF;
+        }
+    }
 
     // Set input and output baud rate
     cfsetispeed(&mut termios, baud_rate)
@@ -114,12 +167,22 @@ fn configure_termios(fd: &OwnedFd, baud: u32) -> Result<(), SerialError> {
 ///
 /// ## Implementation Notes
 ///
-/// I/O is performed via `writev`/`readv` on `monoio::net::UnixStream`, which
-/// translate to `IORING_OP_WRITEV`/`IORING_OP_READV` io_uring operations.
-/// Unlike `IORING_OP_SEND`/`IORING_OP_RECV` (socket-only), the vectored variants
-/// work on any file descriptor including serial ports and PTY devices.
+/// The fd is wrapped in `monoio::net::UnixStream` via `StdUnixStream::from_raw_fd`.
+/// This is **sound** because:
+/// - The fd is a valid, open, readable/writable file descriptor (serial port or PTY).
+/// - I/O is performed exclusively via `writev`/`readv`, which submit
+///   `IORING_OP_WRITEV`/`IORING_OP_READV` to io_uring.  These operations are
+///   fd-type-agnostic — the kernel only requires that the fd is open and
+///   supports vectored I/O, which both serial ports and PTY devices do.
+/// - `IORING_OP_SEND`/`IORING_OP_RECV` (socket-only) are **never** used.
+/// - The `UnixStream` type is used solely as a handle that exposes the
+///   `AsyncReadRent` / `AsyncWriteRent` interface backed by readv/writev;
+///   no Unix-domain-socket semantics are exercised.
 pub struct SerialPort {
-    /// monoio streaming I/O wrapper around the real file descriptor
+    /// monoio streaming I/O wrapper around the real file descriptor.
+    ///
+    /// Held as `UnixStream` for its `AsyncReadRent` / `AsyncWriteRent` impls
+    /// (backed by IORING_OP_READV / IORING_OP_WRITEV, which are fd-type-agnostic).
     stream: UnixStream,
     /// Device path, kept for diagnostics
     path: String,
@@ -135,13 +198,16 @@ impl fmt::Debug for SerialPort {
 }
 
 impl SerialPort {
-    /// Open a serial device at `path` with the given `baud` rate.
+    /// Open a serial device at `path` with the given `config`.
     ///
     /// Must be called within an active monoio runtime context — the fd registration
     /// with io_uring happens inside `UnixStream::from_std`.
     ///
-    /// Configures the port for 8N1 raw mode with no flow control via termios.
-    pub fn open(path: &str, baud: u32) -> crate::SerialResult<Self> {
+    /// Configures the port for raw mode according to all fields of `config`:
+    /// baud rate, data bits (5–8), stop bits (1–2), parity, and flow control.
+    ///
+    /// `SerialConfig::default()` gives 9600 baud, 8N1, no flow control.
+    pub fn open(path: &str, config: SerialConfig) -> crate::SerialResult<Self> {
         // Open the device:
         // O_NOCTTY: don't become controlling terminal
         // O_NONBLOCK: avoid blocking if no carrier detect (DCD) signal
@@ -164,16 +230,19 @@ impl SerialPort {
         // termios must be configured before handing the fd to monoio.
         let owned_fd: OwnedFd = std_file.into();
 
-        // Configure termios (raw mode, 8N1, no flow control, correct baud)
-        configure_termios(&owned_fd, baud)?;
+        // Configure termios with all SerialConfig fields.
+        configure_termios(&owned_fd, &config)?;
 
         // Wrap in monoio::net::UnixStream for AsyncReadRent + AsyncWriteRent.
-        // We use writev/readv (IORING_OP_WRITEV / IORING_OP_READV) which work
-        // on any fd type — serial port, PTY, pipe, etc.
-        // UnixStream::from_std registers the fd with the active io_uring driver,
-        // so this call must happen within a monoio runtime.
-        // SAFETY: owned_fd is a valid open file descriptor.
-        let std_unix: StdUnixStream = unsafe { StdUnixStream::from_raw_fd(owned_fd.into_raw_fd()) };
+        //
+        // SAFETY: `owned_fd` is a valid open file descriptor (serial port or PTY).
+        // We consume it via `into_raw_fd()` (preventing double-close) and hand
+        // the raw fd to `StdUnixStream::from_raw_fd`.  The stream is then used
+        // exclusively with `writev`/`readv` (IORING_OP_WRITEV / IORING_OP_READV),
+        // which are fd-type-agnostic and do not require a Unix domain socket.
+        // `UnixStream::from_std` registers the fd with the active io_uring driver.
+        let raw_fd = owned_fd.into_raw_fd();
+        let std_unix: StdUnixStream = unsafe { StdUnixStream::from_raw_fd(raw_fd) };
         std_unix.set_nonblocking(true).map_err(SerialError::Io)?;
         let stream = UnixStream::from_std(std_unix).map_err(SerialError::Io)?;
 
@@ -207,24 +276,52 @@ impl Transport for SerialPort {
     ///
     /// Uses `IORING_OP_READV` (via `readv`) which works on any fd type,
     /// unlike `IORING_OP_RECV` which is socket-only.
+    ///
+    /// ## Non-blocking behaviour
+    ///
+    /// The fd is opened with `O_NONBLOCK`.  When no data is available, io_uring
+    /// completes the `readv` immediately with `EAGAIN`, which surfaces as
+    /// `ErrorKind::WouldBlock`.  This method maps that to `Ok(0)` — the standard
+    /// non-blocking read contract meaning "no data yet, try again later".
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         // Build a single-segment VecBuf for readv; initialize with zeros so iov_len is correct
         let read_buf: VecBuf = vec![vec![0u8; buf.len()]].into();
         let (result, read_buf) = self.stream.readv(read_buf).await;
-        let n = result?;
-        // Extract the raw buffers back and copy data to caller
-        let vecs: Vec<Vec<u8>> = read_buf.into();
-        if n > 0 {
-            buf[..n].copy_from_slice(&vecs[0][..n]);
+        match result {
+            Ok(n) => {
+                // Extract the raw buffers back and copy data to caller
+                let vecs: Vec<Vec<u8>> = read_buf.into();
+                if n > 0 {
+                    buf[..n].copy_from_slice(&vecs[0][..n]);
+                }
+                Ok(n)
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                // EAGAIN: fd is non-blocking and no data is available yet.
+                // Return 0 — caller should retry.
+                Ok(0)
+            }
+            Err(e) => Err(TransportError::Io(e)),
         }
-        Ok(n)
     }
 
     /// Flush the serial port output buffer.
     ///
-    /// For io_uring-backed serial ports, writes are submitted directly to the
-    /// kernel; there is no userspace buffer to drain. Returns `Ok(())`.
+    /// Calls `tcdrain(2)` which blocks until all output queued in the kernel
+    /// serial driver has been physically transmitted.  For PTY devices this
+    /// returns immediately (the kernel has no transmit queue to drain).
+    ///
+    /// Note: `tcdrain` is a synchronous syscall.  It only blocks during the
+    /// flush path, which is intentionally short — this is acceptable in an
+    /// async context where callers invoke `flush` deliberately.
     async fn flush(&mut self) -> Result<(), TransportError> {
+        let raw_fd = self.stream.as_raw_fd();
+        // SAFETY: raw_fd is valid for the lifetime of self.stream.
+        // BorrowedFd::borrow_raw does not take ownership; we hold the fd
+        // alive via self.stream for the duration of this call.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+        tcdrain(borrowed)
+            .map_err(|e| TransportError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
         Ok(())
     }
 }
@@ -278,7 +375,8 @@ mod tests {
         let slave = pair.slave_path().to_string();
 
         make_runtime().block_on(async {
-            let port = SerialPort::open(&slave, 9600).expect("SerialPort::open failed");
+            let port = SerialPort::open(&slave, SerialConfig::default())
+                .expect("SerialPort::open failed");
             assert_eq!(port.path(), slave);
         });
     }
@@ -294,7 +392,8 @@ mod tests {
         write_to_master(pair.master_raw_fd(), expected);
 
         let result = make_runtime().block_on(async {
-            let mut port = SerialPort::open(&slave, 9600).expect("SerialPort::open failed");
+            let mut port = SerialPort::open(&slave, SerialConfig::default())
+                .expect("SerialPort::open failed");
             let mut buf = vec![0u8; 64];
             let n = port.read(&mut buf).await.expect("Transport::read failed");
             buf.truncate(n);
@@ -313,7 +412,8 @@ mod tests {
 
         // Write from SerialPort (slave side) via async Transport::write
         make_runtime().block_on(async {
-            let mut port = SerialPort::open(&slave, 9600).expect("SerialPort::open failed");
+            let mut port = SerialPort::open(&slave, SerialConfig::default())
+                .expect("SerialPort::open failed");
             let n = port.write(expected).await.expect("Transport::write failed");
             assert_eq!(n, expected.len());
         });
@@ -339,12 +439,55 @@ mod tests {
         // Device-not-found happens before UnixStream::from_std, so we still need
         // a runtime (open() may call from_std if path exists), but here the path
         // doesn't exist so the error occurs in OpenOptions::open before that.
-        let err =
-            make_runtime().block_on(async { SerialPort::open("/dev/ttyDOESNOTEXIST99999", 9600) });
+        let err = make_runtime().block_on(async {
+            SerialPort::open("/dev/ttyDOESNOTEXIST99999", SerialConfig::default())
+        });
         assert!(
             matches!(err, Err(SerialError::DeviceNotFound(_))),
             "Expected DeviceNotFound, got {:?}",
             err
+        );
+    }
+
+    /// Full-duplex roundtrip test: write from slave via Transport, read from master;
+    /// then write from master, read from slave via Transport.
+    #[test]
+    fn test_transport_roundtrip() {
+        let pair = PtyPair::new().expect("PTY creation failed");
+        let slave = pair.slave_path().to_string();
+        let master_fd = pair.master_raw_fd();
+
+        // --- slave → master direction ---
+        let slave_to_master_msg = b"FA;";
+        make_runtime().block_on(async {
+            let mut port = SerialPort::open(&slave, SerialConfig::default())
+                .expect("SerialPort::open failed");
+            let n = port
+                .write(slave_to_master_msg)
+                .await
+                .expect("Transport::write failed");
+            assert_eq!(n, slave_to_master_msg.len(), "write returned wrong byte count");
+        });
+        let received_on_master = read_from_master(master_fd, 64);
+        assert_eq!(
+            &received_on_master, slave_to_master_msg,
+            "master did not receive slave's write"
+        );
+
+        // --- master → slave direction ---
+        let master_to_slave_msg = b"FA00014000000;";
+        write_to_master(master_fd, master_to_slave_msg);
+        let received_on_slave = make_runtime().block_on(async {
+            let mut port = SerialPort::open(&slave, SerialConfig::default())
+                .expect("SerialPort::open failed");
+            let mut buf = vec![0u8; 64];
+            let n = port.read(&mut buf).await.expect("Transport::read failed");
+            buf.truncate(n);
+            buf
+        });
+        assert_eq!(
+            &received_on_slave, master_to_slave_msg,
+            "slave did not receive master's write"
         );
     }
 }

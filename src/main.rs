@@ -7,7 +7,7 @@
 use tracing::info;
 
 use radio::Ts570d;
-use serial::SerialPort;
+use serial::{SerialConfig, SerialPort};
 
 /// Entry point.  Uses monoio's io_uring runtime (single-threaded, !Send).
 #[monoio::main(timer_enabled = true)]
@@ -38,7 +38,14 @@ async fn main() {
     //    SerialPort::open must be called inside an active monoio runtime
     //    because UnixStream::from_std registers the fd with io_uring.
     // -----------------------------------------------------------------------
-    let port = SerialPort::open(&slave_path, 9600).expect("serial open failed");
+    let port = SerialPort::open(
+        &slave_path,
+        SerialConfig {
+            baud_rate: 9600,
+            ..SerialConfig::default()
+        },
+    )
+    .expect("serial open failed");
 
     info!("Serial port opened: {}", slave_path);
 

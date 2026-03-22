@@ -2,8 +2,8 @@
 //!
 //! Provides the ratatui-based terminal interface for the radio controller.
 
-pub mod layout;
-pub mod terminal;
+pub(crate) mod layout;
+mod terminal;
 
 pub use terminal::run;
 
