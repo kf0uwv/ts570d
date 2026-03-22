@@ -3,6 +3,7 @@ pub mod emulator;
 pub mod io;
 pub mod pty;
 pub mod radio_state;
+pub mod tui;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmulatorError {

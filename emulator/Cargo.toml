@@ -21,6 +21,10 @@ serialport = "4"
 # Signal handling for standalone binary
 ctrlc = "3.0"
 
+# Terminal UI for LCD-style display
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 mockall = { workspace = true }
