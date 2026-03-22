@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod emulator;
 pub mod io;
+pub mod port;
 pub mod pty;
 pub mod radio_state;
 pub mod tui;

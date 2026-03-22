@@ -1,15 +1,37 @@
 use emulator::emulator::Emulator;
+use emulator::port::{self, PortMode};
 
 fn main() {
-    let tui = std::env::args().any(|a| a == "--tui");
+    let args: Vec<String> = std::env::args().collect();
+    let tui = args.iter().any(|a| a == "--tui");
 
-    let mut emu = match Emulator::new() {
-        Ok(e) => e,
+    // Determine port mode from --port argument.
+    let mode = port::parse_port_arg(args.into_iter());
+
+    // Open the port and print status.
+    let (serial_port, slave_path_opt) = match port::open_port(&mode) {
+        Ok(pair) => pair,
         Err(err) => {
-            eprintln!("Failed to start emulator: {err}");
+            eprintln!("Failed to open port: {err}");
             std::process::exit(1);
         }
     };
+
+    let slave_path = match (&mode, slave_path_opt) {
+        (PortMode::Virtual, Some(ref path)) => {
+            println!("PTY slave: {path}");
+            path.clone()
+        }
+        (PortMode::Physical(ref path), None) => {
+            println!("Connected to {path}");
+            path.clone()
+        }
+        // Fallback (should not occur).
+        (_, Some(path)) => path,
+        (_, None) => String::new(),
+    };
+
+    let mut emu = Emulator::from_port(serial_port, slave_path);
 
     // Set up Ctrl-C handler for graceful shutdown.
     ctrlc::set_handler(|| {

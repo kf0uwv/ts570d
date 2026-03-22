@@ -2,6 +2,7 @@ use std::io::stdout;
 
 use crossterm::{execute, terminal};
 use ratatui::{backend::CrosstermBackend, Terminal};
+use serialport::SerialPort;
 
 use crate::commands;
 use crate::io::EmulatorIo;
@@ -16,7 +17,8 @@ use crate::EmulatorError;
 /// the slave path so clients (tests, the main application) can connect.
 pub struct Emulator {
     /// Held to keep the slave PTY alive (prevents EIO on the master).
-    _pty: PtyPair,
+    /// `None` when the emulator was created with a physical serial port.
+    _pty: Option<PtyPair>,
     /// Cached slave device path.
     slave_path: String,
     io: EmulatorIo,
@@ -35,11 +37,26 @@ impl Emulator {
         let io = EmulatorIo::from_port(master);
         let state = RadioState::default();
         Ok(Emulator {
-            _pty: pty,
+            _pty: Some(pty),
             slave_path,
             io,
             state,
         })
+    }
+
+    /// Create an emulator from an already-opened port (virtual PTY master or physical serial).
+    ///
+    /// `slave_path` should be `Some(path)` for virtual PTY mode and `None` for physical mode.
+    /// The caller is responsible for printing status before calling this.
+    pub fn from_port(port: Box<dyn SerialPort>, slave_path: String) -> Self {
+        let io = EmulatorIo::from_port(port);
+        let state = RadioState::default();
+        Emulator {
+            _pty: None,
+            slave_path,
+            io,
+            state,
+        }
     }
 
     /// Return the slave PTY path (e.g. `/dev/pts/5`).
