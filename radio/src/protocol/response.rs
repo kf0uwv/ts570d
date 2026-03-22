@@ -1,10 +1,12 @@
 //! Typed response variants for the TS-570D CAT protocol.
 //!
 //! The [`Response`] enum wraps every distinct response the radio can emit.
-//! [`InformationResponse`] represents the composite `IF` response that
-//! packs the full radio state into a single message.
+//! [`InformationResponse`] is defined in `framework::radio` and re-exported
+//! here for convenience.
 
-use crate::protocol::{Frequency, Mode};
+pub use framework::radio::InformationResponse;
+
+use framework::radio::{Frequency, Mode};
 
 /// A parsed response from the TS-570D radio.
 ///
@@ -28,72 +30,76 @@ pub enum Response {
     AfGain(u8, u8),
     /// RG — RF gain level (0–255)
     RfGain(u8),
-    /// SQ — squelch level.  Fields: (main_sub selector 0/1, level 0–255)
-    Squelch(u8, u8),
+    /// SQ — squelch level (0–255)
+    Squelch(u8),
     /// PC — transmit power (5–100 W)
     Power(u8),
-    /// TX/RX — transmit/receive status.  `true` = transmitting
-    TxRxStatus(bool),
-    /// AI — auto-information mode enabled
-    AutoInfo(bool),
+    /// NB — noise blanker on/off
+    NoiseBlanker(bool),
+    /// NR — noise reduction level (0=off, 1=NR1, 2=NR2)
+    NoiseReduction(u8),
+    /// PA — pre-amplifier on/off
+    Preamp(bool),
+    /// RA — attenuator on/off (00=off, 01=on)
+    Attenuator(bool),
+    /// MG — microphone gain (0–100)
+    MicGain(u8),
+    /// GT — AGC time constant (002=fast, 004=slow)
+    Agc(u8),
+    /// RT — RIT on/off
+    Rit(bool),
+    /// XT — XIT on/off
+    Xit(bool),
+    /// SC — scan on/off
+    Scan(bool),
+    /// VX — VOX on/off
+    Vox(bool),
+    /// VG — VOX gain (001–009)
+    VoxGain(u8),
+    /// VD — VOX delay in ms (0–3000)
+    VoxDelay(u16),
+    /// FR — receiver VFO/memory selection (0=VFO A, 1=VFO B, 2=Memory)
+    RxVfo(u8),
+    /// FT — transmitter VFO/memory selection (0=VFO A, 1=VFO B, 2=Memory)
+    TxVfo(u8),
+    /// LK — frequency lock on/off
+    FrequencyLock(bool),
+    /// PS — power on/off
+    PowerOn(bool),
+    /// BY — busy indicator (0=not busy, 1=busy)
+    Busy(bool),
+    /// PR — speech processor on/off
+    SpeechProcessor(bool),
+    /// MC — memory channel (00–99)
+    MemoryChannel(u8),
+    /// AN — antenna selection (1=ANT1, 2=ANT2)
+    Antenna(u8),
+    /// CN — CTCSS tone number (01–39)
+    CtcssTone(u8),
+    /// CT — CTCSS on/off
+    Ctcss(bool),
+    /// TN — tone number (01–39)
+    ToneNumber(u8),
+    /// TO — tone on/off
+    Tone(bool),
+    /// BC — beat cancel (0=off, 1=on, 2=enhanced)
+    BeatCancel(u8),
+    /// IS — IF shift (direction char, frequency)
+    IfShift(char, u16),
+    /// KS — keyer speed in WPM (10–60)
+    KeyerSpeed(u8),
+    /// PT — CW pitch (00–12)
+    CwPitch(u8),
+    /// RM — meter reading (meter_type, value)
+    Meter(u8, u16),
+    /// SD — semi break-in delay in ms (0–1000)
+    SemiBreakInDelay(u16),
+    /// CA — CW auto zero-beat on/off
+    CwAutoZerobeat(bool),
+    /// FS — fine step on/off
+    FineStep(bool),
     /// `?;` error response
     Error,
-}
-
-/// Composite response to the `IF` (Information) query.
-///
-/// The TS-570D packs the full operational state into a single 37-character
-/// payload (plus command code and terminator).
-///
-/// Wire layout (chars after `IF`, before `;`):
-/// ```text
-/// Pos  Len  Field
-///   0   11  frequency (Hz, zero-padded)
-///  11    4  step (Hz, 4-digit, not always used)
-///  15    5  RIT/XIT offset (-9999 to +9999 Hz, signed, leading sign)
-///  20    1  RIT enabled (0/1)
-///  21    1  XIT enabled (0/1)
-///  22    2  memory bank (00–09, or spaces if in VFO mode)
-///  24    2  memory channel (00–99)
-///  26    1  TX/RX status (0=RX, 1=TX)
-///  27    1  mode (1–9)
-///  28    1  VFO/memory (0=VFO, 1=Memory)
-///  29    1  scan status (0=off, 1=on)
-///  30    1  split (0=off, 1=on)
-///  31    2  CTCSS tone number (00–42)
-///  33    2  tone number (00–42)
-///  35    1  offset (not used on TS-570D, always 0)
-/// ```
-#[derive(Debug, Clone, PartialEq)]
-pub struct InformationResponse {
-    /// Current VFO frequency in Hz
-    pub frequency: Frequency,
-    /// Tuning step in Hz
-    pub step: u32,
-    /// RIT/XIT offset in Hz (signed)
-    pub rit_xit_offset: i32,
-    /// RIT enabled
-    pub rit_enabled: bool,
-    /// XIT enabled
-    pub xit_enabled: bool,
-    /// Memory bank (0–9; 0 when in VFO mode)
-    pub memory_bank: u8,
-    /// Memory channel (0–99; 0 when in VFO mode)
-    pub memory_channel: u8,
-    /// `true` = transmitting
-    pub tx_rx: bool,
-    /// Operating mode
-    pub mode: Mode,
-    /// `0` = VFO mode, `1` = memory mode
-    pub vfo_memory: u8,
-    /// Scan status (`0` = off, `1` = scanning)
-    pub scan_status: u8,
-    /// Split operation enabled
-    pub split: bool,
-    /// CTCSS tone number (0–42)
-    pub ctcss_tone: u8,
-    /// Tone number (0–42)
-    pub tone_number: u8,
 }
 
 #[cfg(test)]
@@ -148,32 +154,14 @@ mod tests {
 
     #[test]
     fn test_response_squelch() {
-        let r = Response::Squelch(0, 50);
-        assert_eq!(r, Response::Squelch(0, 50));
+        let r = Response::Squelch(50);
+        assert_eq!(r, Response::Squelch(50));
     }
 
     #[test]
     fn test_response_power() {
         let r = Response::Power(100);
         assert_eq!(r, Response::Power(100));
-    }
-
-    #[test]
-    fn test_response_txrx_status_rx() {
-        let r = Response::TxRxStatus(false);
-        assert_eq!(r, Response::TxRxStatus(false));
-    }
-
-    #[test]
-    fn test_response_txrx_status_tx() {
-        let r = Response::TxRxStatus(true);
-        assert_eq!(r, Response::TxRxStatus(true));
-    }
-
-    #[test]
-    fn test_response_auto_info() {
-        let r = Response::AutoInfo(true);
-        assert_eq!(r, Response::AutoInfo(true));
     }
 
     #[test]

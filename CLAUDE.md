@@ -40,10 +40,53 @@
 - Lint: `cargo clippy` / `cargo fmt`
 - Emulator: `cargo run --bin emulator`
 
+## Crate Dependency Model (MANDATORY — ALL AGENTS MUST FOLLOW)
+
+This project uses strict dependency inversion. Crates depend on **traits**, never on concrete implementations.
+
+```
+framework  (no local crate dependencies)
+  └── defines: Transport trait, Radio trait
+  └── defines: TransportError, RadioError, RadioResult, domain types (Frequency, Mode, etc.)
+
+serial  (depends on: framework only)
+  └── implements: Transport trait for SerialPort
+
+radio  (depends on: framework only)
+  └── implements: Radio trait for Ts570d<T: Transport>
+  └── Ts570d is generic over T: Transport — never imports serial directly
+
+ui  (depends on: framework only)
+  └── uses: Radio trait abstraction (ui::run<R: Radio>(radio: &mut R))
+  └── NEVER imports from radio or serial crates
+
+emulator  (depends on: nix, serial internals for PTY — test infrastructure only)
+
+app/src/main.rs  (depends on: all crates — the wiring layer only)
+  └── creates Ts570d<SerialPort> and passes &mut radio to ui::run()
+```
+
+### Rules (violation is a blocking issue)
+1. **`framework`** has NO local crate dependencies. It defines traits and types only.
+2. **`radio`** NEVER imports from `serial`. Transport is injected by the app via generics.
+3. **`ui`** NEVER imports from `radio` or `serial`. It uses the `Radio` trait from `framework`.
+4. **`app/main.rs`** is the ONLY place concrete types are wired together.
+5. Unit tests use **mock/fake implementations** of the trait — never the real impl from another crate.
+   - `radio` tests use an in-crate `FakeTransport` (not `serial::SerialPort`)
+   - `ui` tests use an in-crate `MockRadio` impl of the `Radio` trait
+
+### Radio trait scope
+The `Radio` trait in `framework` contains **abstract radio concepts** applicable to any transceiver:
+frequency control, mode, PTT, meters, gain controls, power, scan, RIT/XIT, noise blanker,
+memory channels, squelch, preamplifier, attenuator, VOX, etc.
+
+TS-570D-specific features (keyer, voice synthesizer, antenna tuner, menu access) live in the
+`radio` crate as inherent methods on `Ts570d`, NOT in the `Radio` trait.
+
 ## Architecture
 - serial/: Custom io_uring RS-232 implementation
-- radio/: TS-570D protocol handling
-- ui/: Ratatui terminal interface
+- radio/: TS-570D protocol handling + Radio trait implementation
+- ui/: Ratatui terminal interface (depends only on framework)
 - emulator/: Virtual TTY and radio emulator
 
 ## Code Style

@@ -25,13 +25,9 @@
 
 pub mod client;
 pub mod commands;
-pub mod error;
 pub mod protocol;
 pub mod ts570d;
 
 pub use client::RadioClient;
-pub use error::{RadioError, RadioResult};
-pub use protocol::{
-    Frequency, InformationResponse, Mode, Response, ResponseFramer, ResponseParser,
-};
+pub use protocol::{Response, ResponseFramer, ResponseParser};
 pub use ts570d::Ts570d;

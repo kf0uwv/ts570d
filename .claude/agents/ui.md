@@ -32,6 +32,12 @@ Decisions recorded in `./planning/` files are **binding**. You MUST implement ex
 - Import ordering: std -> external -> local
 - Naming: snake_case for functions/variables, PascalCase for types
 
+## Dependency Rules (MANDATORY)
+- `ui` depends on `framework` ONLY — NEVER import from `radio` or `serial`
+- Use the `Radio` trait from `framework::radio::Radio` for all radio interaction
+- Concrete radio types are injected by the app — ui only sees the trait
+- Unit tests use a `MockRadio` struct implementing the `Radio` trait, defined in the test module
+
 ## Planning Requirements (MANDATORY)
 - Create and maintain planning files in `./planning/ui/` directory ONLY
 - Planning files: `task_plan.md`, `findings.md`, `progress.md`

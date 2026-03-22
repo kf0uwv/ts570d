@@ -245,7 +245,8 @@ mod tests {
 
     /// Helper: write bytes to a raw fd (master side of PTY) synchronously.
     fn write_to_master(master_fd: std::os::fd::RawFd, data: &[u8]) {
-        let written = unsafe { libc::write(master_fd, data.as_ptr() as *const libc::c_void, data.len()) };
+        let written =
+            unsafe { libc::write(master_fd, data.as_ptr() as *const libc::c_void, data.len()) };
         assert!(written > 0, "write to master failed: errno={}", unsafe {
             *libc::__errno_location()
         });

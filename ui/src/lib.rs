@@ -5,7 +5,7 @@
 pub mod layout;
 pub mod terminal;
 
-pub use terminal::{cleanup_terminal, draw_frame, init_terminal, run_ui};
+pub use terminal::run;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UiError {

@@ -20,20 +20,11 @@ async-trait = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 
-# Utilities
-bytes = { workspace = true }
-futures = { workspace = true }
-
 # Linux-specific
 libc = { workspace = true }
 nix = { workspace = true, features = ["term"] }
 
-# Logging
-tracing = { workspace = true }
-
 [dev-dependencies]
-tempfile = { workspace = true }
-mockall = { workspace = true }
 emulator = { path = "../emulator" }
 
 [features]

@@ -32,6 +32,13 @@ Decisions recorded in `./planning/` files are **binding**. You MUST implement ex
 - Import ordering: std -> external -> local
 - Naming: snake_case for functions/variables, PascalCase for types
 
+## Dependency Rules (MANDATORY)
+- `radio` depends on `framework` ONLY — NEVER import from `serial`
+- Transport is always injected via generics (`T: Transport`) — never a concrete serial type
+- Unit tests use a `FakeTransport` defined in the test module, never `serial::SerialPort`
+- The `Radio` trait lives in `framework` — keep it abstract (any transceiver, not TS-570D-specific)
+- TS-570D-specific features (keyer, antenna tuner, voice, menu) are inherent methods on `Ts570d`, not trait methods
+
 ## Planning Requirements (MANDATORY)
 - Create and maintain planning files in `./planning/kenwood/` directory ONLY
 - Planning files: `task_plan.md`, `findings.md`, `progress.md`

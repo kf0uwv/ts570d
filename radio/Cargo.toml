@@ -10,7 +10,6 @@ rust-version.workspace = true
 [dependencies]
 # Local dependencies
 framework = { path = "../framework" }
-serial = { path = "../serial" }
 
 # Runtime
 monoio = { workspace = true }
@@ -18,19 +17,8 @@ monoio = { workspace = true }
 # Async traits
 async-trait = "0.1"
 
-# Serialization
-serde = { workspace = true }
-serde_json = { workspace = true }
-
 # Error handling
 thiserror = { workspace = true }
-
-# Utilities
-bytes = { workspace = true }
-futures = { workspace = true }
-
-# Logging
-tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

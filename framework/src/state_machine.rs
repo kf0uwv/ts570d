@@ -2,22 +2,8 @@
 //!
 //! Provides application state management and state transitions.
 
-use thiserror::Error;
-
-use crate::errors::FrameworkResult;
 use crate::errors::FrameworkError;
-
-/// Errors specific to state machine operations
-#[derive(Error, Debug)]
-pub enum StateMachineError {
-    /// Attempted an invalid state transition
-    #[error("Invalid state transition from {from:?} to {to:?}")]
-    InvalidTransition { from: String, to: String },
-
-    /// State machine has not been initialized
-    #[error("State machine not initialized")]
-    NotInitialized,
-}
+use crate::errors::FrameworkResult;
 
 /// Application states
 #[derive(Debug, Clone, PartialEq)]

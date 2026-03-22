@@ -3,9 +3,8 @@
 //! [`ResponseParser`] converts raw semicolon-terminated strings (as returned
 //! by the radio) into typed [`Response`] values.
 
-use crate::error::{RadioError, RadioResult};
+use framework::radio::{Frequency, Mode, RadioError, RadioResult};
 use crate::protocol::response::{InformationResponse, Response};
-use crate::protocol::{Frequency, Mode};
 
 /// Parses raw TS-570D response strings into typed [`Response`] values.
 ///
@@ -49,9 +48,38 @@ impl ResponseParser {
             "RG" => Self::parse_rf_gain(params),
             "SQ" => Self::parse_squelch(params),
             "PC" => Self::parse_power(params),
-            "TX" => Ok(Response::TxRxStatus(true)),
-            "RX" => Ok(Response::TxRxStatus(false)),
-            "AI" => Self::parse_auto_info(params),
+            "NB" => Self::parse_one_digit_bool(params).map(Response::NoiseBlanker),
+            "NR" => Self::parse_one_digit_u8(params).map(Response::NoiseReduction),
+            "PA" => Self::parse_one_digit_bool(params).map(Response::Preamp),
+            "RA" => Self::parse_two_digit_bool(params).map(Response::Attenuator),
+            "MG" => Self::parse_three_digit_u8(params).map(Response::MicGain),
+            "GT" => Self::parse_three_digit_u8(params).map(Response::Agc),
+            "RT" => Self::parse_one_digit_bool(params).map(Response::Rit),
+            "XT" => Self::parse_one_digit_bool(params).map(Response::Xit),
+            "SC" => Self::parse_one_digit_bool(params).map(Response::Scan),
+            "VX" => Self::parse_one_digit_bool(params).map(Response::Vox),
+            "VG" => Self::parse_three_digit_u8(params).map(Response::VoxGain),
+            "VD" => Self::parse_four_digit_u16(params).map(Response::VoxDelay),
+            "FR" => Self::parse_one_digit_u8(params).map(Response::RxVfo),
+            "FT" => Self::parse_one_digit_u8(params).map(Response::TxVfo),
+            "LK" => Self::parse_one_digit_bool(params).map(Response::FrequencyLock),
+            "PS" => Self::parse_one_digit_bool(params).map(Response::PowerOn),
+            "BY" => Self::parse_one_digit_bool(params).map(Response::Busy),
+            "PR" => Self::parse_one_digit_bool(params).map(Response::SpeechProcessor),
+            "MC" => Self::parse_memory_channel(params),
+            "AN" => Self::parse_one_digit_u8(params).map(Response::Antenna),
+            "CN" => Self::parse_two_digit_u8(params).map(Response::CtcssTone),
+            "CT" => Self::parse_one_digit_bool(params).map(Response::Ctcss),
+            "TN" => Self::parse_two_digit_u8(params).map(Response::ToneNumber),
+            "TO" => Self::parse_one_digit_bool(params).map(Response::Tone),
+            "BC" => Self::parse_one_digit_u8(params).map(Response::BeatCancel),
+            "IS" => Self::parse_if_shift(params),
+            "KS" => Self::parse_three_digit_u8(params).map(Response::KeyerSpeed),
+            "PT" => Self::parse_two_digit_u8(params).map(Response::CwPitch),
+            "RM" => Self::parse_meter(params),
+            "SD" => Self::parse_four_digit_u16(params).map(Response::SemiBreakInDelay),
+            "CA" => Self::parse_one_digit_bool(params).map(Response::CwAutoZerobeat),
+            "FS" => Self::parse_one_digit_bool(params).map(Response::FineStep),
             _ => Err(RadioError::InvalidProtocolString(raw.to_string())),
         }
     }
@@ -137,19 +165,15 @@ impl ResponseParser {
 
     /// Parse the `SQ` (squelch) response.
     ///
-    /// Wire format: `SQ<sel><level>` where `<sel>` is 1 digit (0/1) and
-    /// `<level>` is 3 digits (000–255).
+    /// Wire format: `SQ<level>` where `<level>` is 3 digits (000–255).
     fn parse_squelch(params: &str) -> RadioResult<Response> {
-        if params.len() != 4 {
+        if params.len() != 3 {
             return Err(RadioError::InvalidProtocolString(params.to_string()));
         }
-        let sel = params[..1]
+        let level = params
             .parse::<u8>()
             .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
-        let level = params[1..]
-            .parse::<u8>()
-            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
-        Ok(Response::Squelch(sel, level))
+        Ok(Response::Squelch(level))
     }
 
     /// Parse the `PC` (transmit power) response.
@@ -163,19 +187,6 @@ impl ResponseParser {
             .parse::<u8>()
             .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
         Ok(Response::Power(level))
-    }
-
-    /// Parse the `AI` (auto-information) response.
-    ///
-    /// Wire format: `AI<state>` where `<state>` is a single digit (0=off, 1=on).
-    fn parse_auto_info(params: &str) -> RadioResult<Response> {
-        if params.len() != 1 {
-            return Err(RadioError::InvalidProtocolString(params.to_string()));
-        }
-        let state = params
-            .parse::<u8>()
-            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
-        Ok(Response::AutoInfo(state != 0))
     }
 
     /// Parse the composite `IF` (Information) response.
@@ -268,6 +279,124 @@ impl ResponseParser {
         }))
     }
 
+    // -----------------------------------------------------------------------
+    // Generic helper parsers
+    // -----------------------------------------------------------------------
+
+    /// Parse a single-digit (0/1) as bool.
+    fn parse_one_digit_bool(params: &str) -> RadioResult<bool> {
+        if params.len() != 1 {
+            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        }
+        let v = params
+            .parse::<u8>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+        Ok(v != 0)
+    }
+
+    /// Parse a single-digit as u8.
+    fn parse_one_digit_u8(params: &str) -> RadioResult<u8> {
+        if params.len() != 1 {
+            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        }
+        params
+            .parse::<u8>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))
+    }
+
+    /// Parse two digits as u8.
+    fn parse_two_digit_u8(params: &str) -> RadioResult<u8> {
+        if params.len() != 2 {
+            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        }
+        params
+            .parse::<u8>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))
+    }
+
+    /// Parse two digits as bool (00=false, 01=true).
+    fn parse_two_digit_bool(params: &str) -> RadioResult<bool> {
+        if params.len() != 2 {
+            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        }
+        let v = params
+            .parse::<u8>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+        Ok(v != 0)
+    }
+
+    /// Parse three digits as u8.
+    fn parse_three_digit_u8(params: &str) -> RadioResult<u8> {
+        if params.len() != 3 {
+            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        }
+        params
+            .parse::<u8>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))
+    }
+
+    /// Parse four digits as u16.
+    fn parse_four_digit_u16(params: &str) -> RadioResult<u16> {
+        if params.len() != 4 {
+            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        }
+        params
+            .parse::<u16>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))
+    }
+
+    /// Parse the `MC` (memory channel) response.
+    ///
+    /// Wire format: `MC <NN>` where a space may or may not be present.
+    /// We accept 2 or 3 chars (with or without leading space).
+    fn parse_memory_channel(params: &str) -> RadioResult<Response> {
+        let trimmed = params.trim();
+        if trimmed.is_empty() || trimmed.len() > 3 {
+            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        }
+        let ch = trimmed
+            .parse::<u8>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+        Ok(Response::MemoryChannel(ch))
+    }
+
+    /// Parse the `IS` (IF shift) response.
+    ///
+    /// Wire format: `IS<direction><freq:04>` where direction is `+` or `-` and
+    /// freq is 4 digits.
+    fn parse_if_shift(params: &str) -> RadioResult<Response> {
+        if params.len() != 5 {
+            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        }
+        let direction = params
+            .chars()
+            .next()
+            .ok_or_else(|| RadioError::InvalidProtocolString(params.to_string()))?;
+        if direction != '+' && direction != '-' {
+            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        }
+        let freq = params[1..]
+            .parse::<u16>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+        Ok(Response::IfShift(direction, freq))
+    }
+
+    /// Parse the `RM` (meter) response.
+    ///
+    /// Wire format: `RM<type><value:04>` where type is 1 digit and value is 4 digits.
+    fn parse_meter(params: &str) -> RadioResult<Response> {
+        if params.len() != 5 {
+            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        }
+        let meter_type = params[..1]
+            .parse::<u8>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+        let value = params[1..]
+            .parse::<u16>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+        Ok(Response::Meter(meter_type, value))
+    }
+
     /// Parse a signed 5-character offset string, e.g. `"+0500"` or `"-0500"`.
     fn parse_signed_offset(s: &str) -> RadioResult<i32> {
         if s.len() != 5 {
@@ -293,7 +422,6 @@ impl ResponseParser {
 mod tests {
     use super::*;
     use crate::protocol::response::{InformationResponse, Response};
-    use crate::protocol::{Frequency, Mode};
 
     // -----------------------------------------------------------------------
     // Error response
@@ -459,15 +587,21 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_parse_sq_main() {
-        let resp = ResponseParser::parse("SQ0050;").unwrap();
-        assert_eq!(resp, Response::Squelch(0, 50));
+    fn test_parse_sq_level() {
+        let resp = ResponseParser::parse("SQ050;").unwrap();
+        assert_eq!(resp, Response::Squelch(50));
     }
 
     #[test]
-    fn test_parse_sq_sub() {
-        let resp = ResponseParser::parse("SQ1100;").unwrap();
-        assert_eq!(resp, Response::Squelch(1, 100));
+    fn test_parse_sq_max() {
+        let resp = ResponseParser::parse("SQ255;").unwrap();
+        assert_eq!(resp, Response::Squelch(255));
+    }
+
+    #[test]
+    fn test_parse_sq_zero() {
+        let resp = ResponseParser::parse("SQ000;").unwrap();
+        assert_eq!(resp, Response::Squelch(0));
     }
 
     // -----------------------------------------------------------------------
@@ -484,38 +618,6 @@ mod tests {
     fn test_parse_pc_min() {
         let resp = ResponseParser::parse("PC005;").unwrap();
         assert_eq!(resp, Response::Power(5));
-    }
-
-    // -----------------------------------------------------------------------
-    // TX / RX — TX/RX status
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_parse_tx() {
-        let resp = ResponseParser::parse("TX;").unwrap();
-        assert_eq!(resp, Response::TxRxStatus(true));
-    }
-
-    #[test]
-    fn test_parse_rx() {
-        let resp = ResponseParser::parse("RX;").unwrap();
-        assert_eq!(resp, Response::TxRxStatus(false));
-    }
-
-    // -----------------------------------------------------------------------
-    // AI — auto-information
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_parse_ai_on() {
-        let resp = ResponseParser::parse("AI1;").unwrap();
-        assert_eq!(resp, Response::AutoInfo(true));
-    }
-
-    #[test]
-    fn test_parse_ai_off() {
-        let resp = ResponseParser::parse("AI0;").unwrap();
-        assert_eq!(resp, Response::AutoInfo(false));
     }
 
     // -----------------------------------------------------------------------
@@ -667,6 +769,422 @@ mod tests {
     fn test_parse_if_too_short() {
         let result = ResponseParser::parse("IF0001423000;");
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // NB — noise blanker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_nb_on() {
+        let resp = ResponseParser::parse("NB1;").unwrap();
+        assert_eq!(resp, Response::NoiseBlanker(true));
+    }
+
+    #[test]
+    fn test_parse_nb_off() {
+        let resp = ResponseParser::parse("NB0;").unwrap();
+        assert_eq!(resp, Response::NoiseBlanker(false));
+    }
+
+    // -----------------------------------------------------------------------
+    // NR — noise reduction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_nr_off() {
+        let resp = ResponseParser::parse("NR0;").unwrap();
+        assert_eq!(resp, Response::NoiseReduction(0));
+    }
+
+    #[test]
+    fn test_parse_nr1() {
+        let resp = ResponseParser::parse("NR1;").unwrap();
+        assert_eq!(resp, Response::NoiseReduction(1));
+    }
+
+    #[test]
+    fn test_parse_nr2() {
+        let resp = ResponseParser::parse("NR2;").unwrap();
+        assert_eq!(resp, Response::NoiseReduction(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // PA — pre-amplifier
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_pa_on() {
+        let resp = ResponseParser::parse("PA1;").unwrap();
+        assert_eq!(resp, Response::Preamp(true));
+    }
+
+    #[test]
+    fn test_parse_pa_off() {
+        let resp = ResponseParser::parse("PA0;").unwrap();
+        assert_eq!(resp, Response::Preamp(false));
+    }
+
+    // -----------------------------------------------------------------------
+    // RA — attenuator
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_ra_off() {
+        let resp = ResponseParser::parse("RA00;").unwrap();
+        assert_eq!(resp, Response::Attenuator(false));
+    }
+
+    #[test]
+    fn test_parse_ra_on() {
+        let resp = ResponseParser::parse("RA01;").unwrap();
+        assert_eq!(resp, Response::Attenuator(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // MG — mic gain
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_mg() {
+        let resp = ResponseParser::parse("MG050;").unwrap();
+        assert_eq!(resp, Response::MicGain(50));
+    }
+
+    // -----------------------------------------------------------------------
+    // GT — AGC
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_gt_fast() {
+        let resp = ResponseParser::parse("GT002;").unwrap();
+        assert_eq!(resp, Response::Agc(2));
+    }
+
+    #[test]
+    fn test_parse_gt_slow() {
+        let resp = ResponseParser::parse("GT004;").unwrap();
+        assert_eq!(resp, Response::Agc(4));
+    }
+
+    // -----------------------------------------------------------------------
+    // RT — RIT
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_rt_on() {
+        let resp = ResponseParser::parse("RT1;").unwrap();
+        assert_eq!(resp, Response::Rit(true));
+    }
+
+    #[test]
+    fn test_parse_rt_off() {
+        let resp = ResponseParser::parse("RT0;").unwrap();
+        assert_eq!(resp, Response::Rit(false));
+    }
+
+    // -----------------------------------------------------------------------
+    // XT — XIT
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_xt_on() {
+        let resp = ResponseParser::parse("XT1;").unwrap();
+        assert_eq!(resp, Response::Xit(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // SC — scan
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_sc_on() {
+        let resp = ResponseParser::parse("SC1;").unwrap();
+        assert_eq!(resp, Response::Scan(true));
+    }
+
+    #[test]
+    fn test_parse_sc_off() {
+        let resp = ResponseParser::parse("SC0;").unwrap();
+        assert_eq!(resp, Response::Scan(false));
+    }
+
+    // -----------------------------------------------------------------------
+    // VX — VOX
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_vx_on() {
+        let resp = ResponseParser::parse("VX1;").unwrap();
+        assert_eq!(resp, Response::Vox(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // VG — VOX gain
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_vg() {
+        let resp = ResponseParser::parse("VG005;").unwrap();
+        assert_eq!(resp, Response::VoxGain(5));
+    }
+
+    // -----------------------------------------------------------------------
+    // VD — VOX delay
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_vd() {
+        let resp = ResponseParser::parse("VD1500;").unwrap();
+        assert_eq!(resp, Response::VoxDelay(1500));
+    }
+
+    #[test]
+    fn test_parse_vd_zero() {
+        let resp = ResponseParser::parse("VD0000;").unwrap();
+        assert_eq!(resp, Response::VoxDelay(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // FR — RX VFO
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_fr_vfo_a() {
+        let resp = ResponseParser::parse("FR0;").unwrap();
+        assert_eq!(resp, Response::RxVfo(0));
+    }
+
+    #[test]
+    fn test_parse_fr_vfo_b() {
+        let resp = ResponseParser::parse("FR1;").unwrap();
+        assert_eq!(resp, Response::RxVfo(1));
+    }
+
+    // -----------------------------------------------------------------------
+    // FT — TX VFO
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_ft_vfo_a() {
+        let resp = ResponseParser::parse("FT0;").unwrap();
+        assert_eq!(resp, Response::TxVfo(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // LK — frequency lock
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_lk_on() {
+        let resp = ResponseParser::parse("LK1;").unwrap();
+        assert_eq!(resp, Response::FrequencyLock(true));
+    }
+
+    #[test]
+    fn test_parse_lk_off() {
+        let resp = ResponseParser::parse("LK0;").unwrap();
+        assert_eq!(resp, Response::FrequencyLock(false));
+    }
+
+    // -----------------------------------------------------------------------
+    // PS — power on/off
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_ps_on() {
+        let resp = ResponseParser::parse("PS1;").unwrap();
+        assert_eq!(resp, Response::PowerOn(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // BY — busy
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_by_busy() {
+        let resp = ResponseParser::parse("BY1;").unwrap();
+        assert_eq!(resp, Response::Busy(true));
+    }
+
+    #[test]
+    fn test_parse_by_not_busy() {
+        let resp = ResponseParser::parse("BY0;").unwrap();
+        assert_eq!(resp, Response::Busy(false));
+    }
+
+    // -----------------------------------------------------------------------
+    // PR — speech processor
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_pr_on() {
+        let resp = ResponseParser::parse("PR1;").unwrap();
+        assert_eq!(resp, Response::SpeechProcessor(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // MC — memory channel
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_mc_channel_5() {
+        let resp = ResponseParser::parse("MC 05;").unwrap();
+        assert_eq!(resp, Response::MemoryChannel(5));
+    }
+
+    #[test]
+    fn test_parse_mc_channel_99() {
+        let resp = ResponseParser::parse("MC99;").unwrap();
+        assert_eq!(resp, Response::MemoryChannel(99));
+    }
+
+    // -----------------------------------------------------------------------
+    // AN — antenna
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_an_ant1() {
+        let resp = ResponseParser::parse("AN1;").unwrap();
+        assert_eq!(resp, Response::Antenna(1));
+    }
+
+    #[test]
+    fn test_parse_an_ant2() {
+        let resp = ResponseParser::parse("AN2;").unwrap();
+        assert_eq!(resp, Response::Antenna(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // CN — CTCSS tone number
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_cn() {
+        let resp = ResponseParser::parse("CN07;").unwrap();
+        assert_eq!(resp, Response::CtcssTone(7));
+    }
+
+    // -----------------------------------------------------------------------
+    // CT — CTCSS on/off
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_ct_on() {
+        let resp = ResponseParser::parse("CT1;").unwrap();
+        assert_eq!(resp, Response::Ctcss(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // TN — tone number
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_tn() {
+        let resp = ResponseParser::parse("TN03;").unwrap();
+        assert_eq!(resp, Response::ToneNumber(3));
+    }
+
+    // -----------------------------------------------------------------------
+    // TO — tone on/off
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_to_on() {
+        let resp = ResponseParser::parse("TO1;").unwrap();
+        assert_eq!(resp, Response::Tone(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // BC — beat cancel
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_bc_off() {
+        let resp = ResponseParser::parse("BC0;").unwrap();
+        assert_eq!(resp, Response::BeatCancel(0));
+    }
+
+    #[test]
+    fn test_parse_bc_enhanced() {
+        let resp = ResponseParser::parse("BC2;").unwrap();
+        assert_eq!(resp, Response::BeatCancel(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // IS — IF shift
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_is_positive() {
+        let resp = ResponseParser::parse("IS+0500;").unwrap();
+        assert_eq!(resp, Response::IfShift('+', 500));
+    }
+
+    #[test]
+    fn test_parse_is_negative() {
+        let resp = ResponseParser::parse("IS-0200;").unwrap();
+        assert_eq!(resp, Response::IfShift('-', 200));
+    }
+
+    // -----------------------------------------------------------------------
+    // KS — keyer speed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_ks() {
+        let resp = ResponseParser::parse("KS025;").unwrap();
+        assert_eq!(resp, Response::KeyerSpeed(25));
+    }
+
+    // -----------------------------------------------------------------------
+    // PT — CW pitch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_pt() {
+        let resp = ResponseParser::parse("PT06;").unwrap();
+        assert_eq!(resp, Response::CwPitch(6));
+    }
+
+    // -----------------------------------------------------------------------
+    // RM — meter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_rm_swr() {
+        let resp = ResponseParser::parse("RM10050;").unwrap();
+        assert_eq!(resp, Response::Meter(1, 50));
+    }
+
+    // -----------------------------------------------------------------------
+    // SD — semi break-in delay
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_sd() {
+        let resp = ResponseParser::parse("SD0200;").unwrap();
+        assert_eq!(resp, Response::SemiBreakInDelay(200));
+    }
+
+    // -----------------------------------------------------------------------
+    // CA — CW auto zero-beat
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_ca_on() {
+        let resp = ResponseParser::parse("CA1;").unwrap();
+        assert_eq!(resp, Response::CwAutoZerobeat(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // FS — fine step
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_fs_on() {
+        let resp = ResponseParser::parse("FS1;").unwrap();
+        assert_eq!(resp, Response::FineStep(true));
     }
 
     // -----------------------------------------------------------------------

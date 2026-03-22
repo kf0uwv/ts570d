@@ -30,6 +30,12 @@ Decisions recorded in `./planning/` files are **binding**. You MUST implement ex
 - Import ordering: std -> external -> local
 - Naming: snake_case for functions/variables, PascalCase for types
 
+## Dependency Rules (MANDATORY)
+- `src/main.rs` is the ONLY place concrete types are wired together
+- app depends on: framework, serial, radio, ui, emulator
+- Pass concrete types (e.g. Ts570d<SerialPort>) into ui/other components as trait objects
+- NEVER put business logic in main.rs — delegate to ui::run, radio methods, etc.
+
 ## Planning Requirements (MANDATORY)
 - Create and maintain planning files in `./planning/app/` directory ONLY
 - Planning files: `task_plan.md`, `findings.md`, `progress.md`
