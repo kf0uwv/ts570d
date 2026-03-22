@@ -30,7 +30,7 @@ use crate::error::{RadioError, RadioResult};
 /// All methods validate the command code against [`COMMAND_TABLE`]
 /// before touching the transport.
 pub struct RadioClient<T: Transport> {
-    transport: T,
+    pub(crate) transport: T,
 }
 
 impl<T: Transport> RadioClient<T> {

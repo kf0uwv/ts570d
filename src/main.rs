@@ -1,82 +1,132 @@
 //! TS-570D Radio Control Application
-//! 
-//! Main entry point that coordinates all workspace components using the framework.
+//!
+//! Main entry point: starts the emulator in a background OS thread, then
+//! opens the PTY slave via the io_uring serial driver, creates a typed
+//! Ts570d client, and runs a ratatui UI that polls radio state every 200 ms.
 
-use ts570d::framework::{ApplicationStateMachine, State, FrameworkResult};
-use tracing::{info, warn, error};
+use crossterm::event::{self, Event, KeyCode};
+use tracing::info;
 
-#[monoio::main]
-async fn main() -> FrameworkResult<()> {
-    // Initialize logging
+use radio::Ts570d;
+use serial::SerialPort;
+use ui::{RadioDisplay, UiError};
+
+/// Entry point.  Uses monoio's io_uring runtime (single-threaded, !Send).
+#[monoio::main(timer_enabled = true)]
+async fn main() {
+    // Initialize logging — use RUST_LOG env var to control verbosity.
     tracing_subscriber::fmt()
         .with_env_filter("info")
         .init();
 
     info!("Starting TS-570D Radio Control Application");
 
-    // Create and initialize application state machine
-    let mut state_machine = ApplicationStateMachine::new();
-    state_machine.initialize()?;
+    // -----------------------------------------------------------------------
+    // 1. Start emulator in a dedicated OS thread (blocking I/O loop).
+    // -----------------------------------------------------------------------
+    let mut emulator = emulator::emulator::Emulator::new()
+        .expect("emulator init failed");
+    let slave_path = emulator.slave_path().to_string();
 
-    // Start the application
-    state_machine.start()?;
-    info!("Application state: {}", state_machine.machine().get_state()?.as_string());
+    std::thread::spawn(move || {
+        emulator.run().expect("emulator run failed");
+    });
 
-    // TODO: Initialize and start all workspace components
-    // This will be implemented by other agents:
-    // - Serial communication (@serial agent)
-    // - Radio protocol (@kenwood agent) 
-    // - User interface (@ui agent)
-    // - Emulator (@ui agent with emulator focus)
+    // -----------------------------------------------------------------------
+    // 2. Brief pause so the emulator's read loop is ready before we connect.
+    // -----------------------------------------------------------------------
+    monoio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    // Main application loop
-    run_application_loop(&state_machine).await?;
+    // -----------------------------------------------------------------------
+    // 3. Open the PTY slave via the io_uring serial driver.
+    //
+    //    SerialPort::open must be called inside an active monoio runtime
+    //    because UnixStream::from_std registers the fd with io_uring.
+    // -----------------------------------------------------------------------
+    let port = SerialPort::open(&slave_path, 9600)
+        .expect("serial open failed");
 
-    // Stop the application
-    state_machine.stop()?;
-    info!("Application stopped successfully");
+    info!("Serial port opened: {}", slave_path);
 
-    Ok(())
-}
+    // -----------------------------------------------------------------------
+    // 4. Wrap in the typed TS-570D client.
+    // -----------------------------------------------------------------------
+    let mut radio = Ts570d::new(port);
 
-/// Main application coordination loop
-async fn run_application_loop(state_machine: &ApplicationStateMachine) -> FrameworkResult<()> {
-    info!("Entering main application loop");
-
-    loop {
-        // Check current state
-        let current_state = state_machine.machine().get_state()?;
-        
-        match current_state {
-            State::Running => {
-                // TODO: Process messages and coordinate components
-                // This will handle inter-crate communication via framework
-                monoio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-            State::Paused => {
-                info!("Application paused - waiting for resume");
-                monoio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-            State::Stopping => {
-                info!("Application stopping - breaking loop");
-                break;
-            }
-            State::Error(ref msg) => {
-                error!("Application in error state: {}", msg);
-                break;
-            }
-            _ => {
-                warn!("Unexpected state in main loop: {:?}", current_state);
-                break;
-            }
-        }
-
-        // Update state machine
-        if let Err(e) = state_machine.machine().update() {
-            error!("State machine update error: {:?}", e);
-            break;
-        }
+    // -----------------------------------------------------------------------
+    // 5. Run the radio + UI event loop.
+    // -----------------------------------------------------------------------
+    if let Err(e) = run_radio_ui(&mut radio).await {
+        eprintln!("UI error: {}", e);
+        std::process::exit(1);
     }
 
-    Ok(())
+    info!("Application stopped");
+}
+
+/// Combined radio polling + UI render loop.
+///
+/// - Polls the radio every 200 ms for VFO A frequency, mode, and S-meter.
+/// - Draws the ratatui UI after each poll.
+/// - Exits immediately when 'q' is pressed.
+///
+/// Terminal setup / teardown is handled here so that the cleanup path runs
+/// even if any radio query returns an error.
+async fn run_radio_ui<T: framework::transport::Transport>(
+    radio: &mut Ts570d<T>,
+) -> Result<(), UiError> {
+    let mut terminal = ui::init_terminal()?;
+    let mut state = RadioDisplay::default();
+
+    let result = radio_ui_loop(radio, &mut terminal, &mut state).await;
+
+    // Always restore the terminal, regardless of how the loop ended.
+    ui::cleanup_terminal()?;
+    result
+}
+
+/// Inner loop — separated so cleanup runs on all exit paths.
+async fn radio_ui_loop<T: framework::transport::Transport>(
+    radio: &mut Ts570d<T>,
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    state: &mut RadioDisplay,
+) -> Result<(), UiError> {
+    loop {
+        // -- Poll radio state ------------------------------------------------
+        // Each query sends a CAT command and reads back the response.
+        // Errors are soft — we keep whatever values we had on failure.
+        if let Ok(freq) = radio.get_vfo_a().await {
+            state.vfo_a_hz = freq.hz();
+        }
+        if let Ok(mode) = radio.get_mode().await {
+            state.mode = mode.name().to_string();
+        }
+        if let Ok(smeter) = radio.get_smeter().await {
+            state.smeter = smeter;
+        }
+
+        // -- Render the UI ---------------------------------------------------
+        ui::draw_frame(terminal, state)?;
+
+        // -- Wait 200 ms, checking for 'q' every ~10 ms ---------------------
+        //
+        // crossterm::event::poll(Duration::ZERO) is synchronous and
+        // non-blocking, safe to call from inside a monoio task.
+        let mut elapsed = std::time::Duration::ZERO;
+        let poll_interval = std::time::Duration::from_millis(200);
+        let check_step = std::time::Duration::from_millis(10);
+
+        while elapsed < poll_interval {
+            // Non-blocking check for keyboard input.
+            if event::poll(std::time::Duration::ZERO).map_err(UiError::Io)? {
+                if let Event::Key(key) = event::read().map_err(UiError::Io)? {
+                    if key.code == KeyCode::Char('q') {
+                        return Ok(());
+                    }
+                }
+            }
+            monoio::time::sleep(check_step).await;
+            elapsed += check_step;
+        }
+    }
 }

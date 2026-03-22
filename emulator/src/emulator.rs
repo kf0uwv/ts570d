@@ -56,10 +56,17 @@ impl Emulator {
                     }
                 }
                 Err(EmulatorError::Io(ref e))
+                    if e.kind() == std::io::ErrorKind::TimedOut
+                        || e.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    // No data yet — retry.
+                    continue;
+                }
+                Err(EmulatorError::Io(ref e))
                     if e.kind() == std::io::ErrorKind::UnexpectedEof
                         || e.kind() == std::io::ErrorKind::BrokenPipe =>
                 {
-                    // Client disconnected — normal shutdown path.
+                    // Client disconnected — normal shutdown.
                     break;
                 }
                 Err(e) => return Err(e),
