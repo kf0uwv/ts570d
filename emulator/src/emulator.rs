@@ -88,7 +88,9 @@ impl Emulator {
                 Ok(cmds) => {
                     for cmd in cmds {
                         let (response, _changes) = commands::handle(&cmd, &mut self.state);
-                        self.io.write_response(&response)?;
+                        if !response.is_empty() {
+                            self.io.write_response(&response)?;
+                        }
                     }
                 }
                 Err(EmulatorError::Io(ref e))
@@ -129,7 +131,9 @@ impl Emulator {
                 Ok(cmds) => {
                     for cmd in cmds {
                         let (response, changes) = commands::handle(&cmd, &mut self.state);
-                        self.io.write_response(&response)?;
+                        if !response.is_empty() {
+                            self.io.write_response(&response)?;
+                        }
 
                         // Log the raw command + response.
                         let cmd_event = LogEvent::Command {
@@ -237,8 +241,10 @@ impl Emulator {
                         let (response, _changes) = commands::handle(&cmd, &mut self.state);
                         // 5. Append to command log.
                         self.log_entry(&cmd, &response);
-                        // 6. Write response.
-                        self.io.write_response(&response)?;
+                        // 6. Write response (silent for SET commands).
+                        if !response.is_empty() {
+                            self.io.write_response(&response)?;
+                        }
                     }
                 }
                 Err(EmulatorError::Io(ref e))

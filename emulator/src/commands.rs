@@ -12,11 +12,12 @@ pub fn handle(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>) {
 }
 
 fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>) {
-    // Helper macro: return a mutation result with one changed field.
-    macro_rules! changed {
-        ($resp:expr, $field:expr, $value:expr) => {
+    // Helper macro: SET command — silent (no response), one state change.
+    // Kenwood CAT protocol: SET commands produce no response from the radio.
+    macro_rules! set_ok {
+        ($field:expr, $value:expr) => {
             (
-                $resp,
+                String::new(), // no response — SET is silent per Kenwood protocol
                 vec![StateChange {
                     field: $field,
                     value: $value.to_string(),
@@ -25,11 +26,11 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         };
     }
 
-    // Helper macro: mutation with two changed fields.
-    macro_rules! changed2 {
-        ($resp:expr, $f1:expr, $v1:expr, $f2:expr, $v2:expr) => {
+    // Helper macro: SET command — silent, two state changes.
+    macro_rules! set_ok2 {
+        ($f1:expr, $v1:expr, $f2:expr, $v2:expr) => {
             (
-                $resp,
+                String::new(),
                 vec![
                     StateChange {
                         field: $f1,
@@ -68,14 +69,10 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 // Query
                 query!(format!("FA{:011};", state.vfo_a_hz))
             } else if params.len() == 11 {
-                // Set
+                // Set — silent per Kenwood protocol
                 if let Ok(hz) = params.parse::<u64>() {
                     state.vfo_a_hz = hz;
-                    changed!(
-                        format!("FA{:011};", state.vfo_a_hz),
-                        "vfo_a_hz",
-                        state.vfo_a_hz
-                    )
+                    set_ok!("vfo_a_hz", state.vfo_a_hz)
                 } else {
                     query!("?;".to_string())
                 }
@@ -93,11 +90,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 11 {
                 if let Ok(hz) = params.parse::<u64>() {
                     state.vfo_b_hz = hz;
-                    changed!(
-                        format!("FB{:011};", state.vfo_b_hz),
-                        "vfo_b_hz",
-                        state.vfo_b_hz
-                    )
+                    set_ok!("vfo_b_hz", state.vfo_b_hz)
                 } else {
                     query!("?;".to_string())
                 }
@@ -117,7 +110,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                     // Valid modes: 1–7 and 9
                     if matches!(m, 1..=7 | 9) {
                         state.mode = m;
-                        changed!(format!("MD{};", state.mode), "mode", state.mode)
+                        set_ok!("mode", state.mode)
                     } else {
                         query!("?;".to_string())
                     }
@@ -140,26 +133,18 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 // Query: respond with selector 0 (main receiver) + 3-digit level
                 query!(format!("AG0{:03};", state.af_gain))
             } else if params.len() == 4 {
-                // Set with selector prefix (e.g. "0200")
+                // Set with selector prefix (e.g. "0200") — silent
                 if let Ok(v) = params[1..].parse::<u8>() {
                     state.af_gain = v;
-                    changed!(
-                        format!("AG0{:03};", state.af_gain),
-                        "af_gain",
-                        state.af_gain
-                    )
+                    set_ok!("af_gain", state.af_gain)
                 } else {
                     query!("?;".to_string())
                 }
             } else if params.len() == 3 {
-                // Set without selector prefix (legacy/simplified)
+                // Set without selector prefix (legacy/simplified) — silent
                 if let Ok(v) = params.parse::<u8>() {
                     state.af_gain = v;
-                    changed!(
-                        format!("AG0{:03};", state.af_gain),
-                        "af_gain",
-                        state.af_gain
-                    )
+                    set_ok!("af_gain", state.af_gain)
                 } else {
                     query!("?;".to_string())
                 }
@@ -177,7 +162,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 3 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.rf_gain = v;
-                    changed!(format!("RG{:03};", state.rf_gain), "rf_gain", state.rf_gain)
+                    set_ok!("rf_gain", state.rf_gain)
                 } else {
                     query!("?;".to_string())
                 }
@@ -195,7 +180,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 3 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.squelch = v;
-                    changed!(format!("SQ{:03};", state.squelch), "squelch", state.squelch)
+                    set_ok!("squelch", state.squelch)
                 } else {
                     query!("?;".to_string())
                 }
@@ -214,11 +199,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if v <= 100 {
                         state.power_control = v;
-                        changed!(
-                            format!("PC{:03};", state.power_control),
-                            "power_control",
-                            state.power_control
-                        )
+                        set_ok!("power_control", state.power_control)
                     } else {
                         query!("?;".to_string())
                     }
@@ -235,7 +216,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         // ------------------------------------------------------------------
         "TX" => {
             state.tx = true;
-            changed!("TX;".to_string(), "tx", true)
+            set_ok!("tx", true)
         }
 
         // ------------------------------------------------------------------
@@ -243,7 +224,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         // ------------------------------------------------------------------
         "RX" => {
             state.tx = false;
-            changed!("RX;".to_string(), "tx", false)
+            set_ok!("tx", false)
         }
 
         // ------------------------------------------------------------------
@@ -306,11 +287,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if v <= 1 {
                         state.auto_info = v;
-                        changed!(
-                            format!("AI{};", state.auto_info),
-                            "auto_info",
-                            state.auto_info
-                        )
+                        set_ok!("auto_info", state.auto_info)
                     } else {
                         query!("?;".to_string())
                     }
@@ -341,11 +318,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.noise_blanker = v != 0;
-                    changed!(
-                        format!("NB{};", u8::from(state.noise_blanker)),
-                        "noise_blanker",
-                        state.noise_blanker
-                    )
+                    set_ok!("noise_blanker", state.noise_blanker)
                 } else {
                     query!("?;".to_string())
                 }
@@ -364,11 +337,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if v <= 2 {
                         state.noise_reduction = v;
-                        changed!(
-                            format!("NR{};", state.noise_reduction),
-                            "noise_reduction",
-                            state.noise_reduction
-                        )
+                        set_ok!("noise_reduction", state.noise_reduction)
                     } else {
                         query!("?;".to_string())
                     }
@@ -389,11 +358,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.preamp = v != 0;
-                    changed!(
-                        format!("PA{};", u8::from(state.preamp)),
-                        "preamp",
-                        state.preamp
-                    )
+                    set_ok!("preamp", state.preamp)
                 } else {
                     query!("?;".to_string())
                 }
@@ -411,11 +376,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 2 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.attenuator = v != 0;
-                    changed!(
-                        format!("RA{:02};", u8::from(state.attenuator)),
-                        "attenuator",
-                        state.attenuator
-                    )
+                    set_ok!("attenuator", state.attenuator)
                 } else {
                     query!("?;".to_string())
                 }
@@ -433,11 +394,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 3 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.mic_gain = v;
-                    changed!(
-                        format!("MG{:03};", state.mic_gain),
-                        "mic_gain",
-                        state.mic_gain
-                    )
+                    set_ok!("mic_gain", state.mic_gain)
                 } else {
                     query!("?;".to_string())
                 }
@@ -456,7 +413,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if v <= 4 {
                         state.agc = v;
-                        changed!(format!("GT{:03};", state.agc), "agc", state.agc)
+                        set_ok!("agc", state.agc)
                     } else {
                         query!("?;".to_string())
                     }
@@ -477,7 +434,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.rit = v != 0;
-                    changed!(format!("RT{};", u8::from(state.rit)), "rit", state.rit)
+                    set_ok!("rit", state.rit)
                 } else {
                     query!("?;".to_string())
                 }
@@ -495,7 +452,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.xit = v != 0;
-                    changed!(format!("XT{};", u8::from(state.xit)), "xit", state.xit)
+                    set_ok!("xit", state.xit)
                 } else {
                     query!("?;".to_string())
                 }
@@ -505,19 +462,19 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // RC — RIT/XIT clear (write-only, no params)
+        // RC — RIT/XIT clear (write-only, no params, silent)
         // ------------------------------------------------------------------
-        "RC" => query!("RC;".to_string()),
+        "RC" => (String::new(), vec![]),
 
         // ------------------------------------------------------------------
-        // RU — RIT/XIT up step (write-only)
+        // RU — RIT/XIT up step (write-only, silent)
         // ------------------------------------------------------------------
-        "RU" => query!("RU;".to_string()),
+        "RU" => (String::new(), vec![]),
 
         // ------------------------------------------------------------------
-        // RD — RIT/XIT down step (write-only)
+        // RD — RIT/XIT down step (write-only, silent)
         // ------------------------------------------------------------------
-        "RD" => query!("RD;".to_string()),
+        "RD" => (String::new(), vec![]),
 
         // ------------------------------------------------------------------
         // SC — Scan on/off (0=off, 1=on)
@@ -528,7 +485,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.scan = v != 0;
-                    changed!(format!("SC{};", u8::from(state.scan)), "scan", state.scan)
+                    set_ok!("scan", state.scan)
                 } else {
                     query!("?;".to_string())
                 }
@@ -546,7 +503,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.vox = v != 0;
-                    changed!(format!("VX{};", u8::from(state.vox)), "vox", state.vox)
+                    set_ok!("vox", state.vox)
                 } else {
                     query!("?;".to_string())
                 }
@@ -564,11 +521,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 3 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.vox_gain = v;
-                    changed!(
-                        format!("VG{:03};", state.vox_gain),
-                        "vox_gain",
-                        state.vox_gain
-                    )
+                    set_ok!("vox_gain", state.vox_gain)
                 } else {
                     query!("?;".to_string())
                 }
@@ -587,11 +540,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u16>() {
                     if v <= 1000 {
                         state.vox_delay = v;
-                        changed!(
-                            format!("VD{:04};", state.vox_delay),
-                            "vox_delay",
-                            state.vox_delay
-                        )
+                        set_ok!("vox_delay", state.vox_delay)
                     } else {
                         query!("?;".to_string())
                     }
@@ -613,7 +562,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if v <= 2 {
                         state.rx_vfo = v;
-                        changed!(format!("FR{};", state.rx_vfo), "rx_vfo", state.rx_vfo)
+                        set_ok!("rx_vfo", state.rx_vfo)
                     } else {
                         query!("?;".to_string())
                     }
@@ -635,7 +584,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if v <= 1 {
                         state.tx_vfo = v;
-                        changed!(format!("FT{};", state.tx_vfo), "tx_vfo", state.tx_vfo)
+                        set_ok!("tx_vfo", state.tx_vfo)
                     } else {
                         query!("?;".to_string())
                     }
@@ -656,11 +605,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.freq_lock = v != 0;
-                    changed!(
-                        format!("LK{};", u8::from(state.freq_lock)),
-                        "freq_lock",
-                        state.freq_lock
-                    )
+                    set_ok!("freq_lock", state.freq_lock)
                 } else {
                     query!("?;".to_string())
                 }
@@ -678,11 +623,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.power_on = v != 0;
-                    changed!(
-                        format!("PS{};", u8::from(state.power_on)),
-                        "power_on",
-                        state.power_on
-                    )
+                    set_ok!("power_on", state.power_on)
                 } else {
                     query!("?;".to_string())
                 }
@@ -705,7 +646,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.proc = v != 0;
-                    changed!(format!("PR{};", u8::from(state.proc)), "proc", state.proc)
+                    set_ok!("proc", state.proc)
                 } else {
                     query!("?;".to_string())
                 }
@@ -725,11 +666,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = trimmed.parse::<u8>() {
                     if v <= 99 {
                         state.mem_channel = v;
-                        changed!(
-                            format!("MC{:02};", state.mem_channel),
-                            "mem_channel",
-                            state.mem_channel
-                        )
+                        set_ok!("mem_channel", state.mem_channel)
                     } else {
                         query!("?;".to_string())
                     }
@@ -749,7 +686,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if matches!(v, 1 | 2) {
                         state.antenna = v;
-                        changed!(format!("AN{};", state.antenna), "antenna", state.antenna)
+                        set_ok!("antenna", state.antenna)
                     } else {
                         query!("?;".to_string())
                     }
@@ -771,11 +708,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if (3..=60).contains(&v) {
                         state.keyer_speed = v;
-                        changed!(
-                            format!("KS{:03};", state.keyer_speed),
-                            "keyer_speed",
-                            state.keyer_speed
-                        )
+                        set_ok!("keyer_speed", state.keyer_speed)
                     } else {
                         query!("?;".to_string())
                     }
@@ -788,9 +721,9 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // KY — CW Keying (write-only, params = message text)
+        // KY — CW Keying (write-only, silent)
         // ------------------------------------------------------------------
-        "KY" => query!("KY;".to_string()),
+        "KY" => (String::new(), vec![]),
 
         // ------------------------------------------------------------------
         // PT — CW Pitch (00–12, 2 digits)
@@ -802,11 +735,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if v <= 12 {
                         state.cw_pitch = v;
-                        changed!(
-                            format!("PT{:02};", state.cw_pitch),
-                            "cw_pitch",
-                            state.cw_pitch
-                        )
+                        set_ok!("cw_pitch", state.cw_pitch)
                     } else {
                         query!("?;".to_string())
                     }
@@ -827,11 +756,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.cw_auto_zerobeat = v != 0;
-                    changed!(
-                        format!("CA{};", u8::from(state.cw_auto_zerobeat)),
-                        "cw_auto_zerobeat",
-                        state.cw_auto_zerobeat
-                    )
+                    set_ok!("cw_auto_zerobeat", state.cw_auto_zerobeat)
                 } else {
                     query!("?;".to_string())
                 }
@@ -852,7 +777,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 3 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.ac_mode = v;
-                    changed!(format!("AC{:03};", state.ac_mode), "ac_mode", state.ac_mode)
+                    set_ok!("ac_mode", state.ac_mode)
                 } else {
                     query!("?;".to_string())
                 }
@@ -871,7 +796,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if v <= 10 {
                         state.sh = v;
-                        changed!(format!("SH{:02};", state.sh), "sh", state.sh)
+                        set_ok!("sh", state.sh)
                     } else {
                         query!("?;".to_string())
                     }
@@ -893,7 +818,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if v <= 10 {
                         state.sl = v;
-                        changed!(format!("SL{:02};", state.sl), "sl", state.sl)
+                        set_ok!("sl", state.sl)
                     } else {
                         query!("?;".to_string())
                     }
@@ -917,13 +842,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                     if let Ok(freq) = params[1..].parse::<u16>() {
                         state.is_direction = direction;
                         state.is_freq = freq;
-                        changed2!(
-                            format!("IS{}{:04};", state.is_direction, state.is_freq),
-                            "is_direction",
-                            state.is_direction,
-                            "is_freq",
-                            state.is_freq
-                        )
+                        set_ok2!("is_direction", state.is_direction, "is_freq", state.is_freq)
                     } else {
                         query!("?;".to_string())
                     }
@@ -945,11 +864,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if v <= 39 {
                         state.ctcss_tone = v;
-                        changed!(
-                            format!("CN{:02};", state.ctcss_tone),
-                            "ctcss_tone",
-                            state.ctcss_tone
-                        )
+                        set_ok!("ctcss_tone", state.ctcss_tone)
                     } else {
                         query!("?;".to_string())
                     }
@@ -970,11 +885,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.ctcss = v != 0;
-                    changed!(
-                        format!("CT{};", u8::from(state.ctcss)),
-                        "ctcss",
-                        state.ctcss
-                    )
+                    set_ok!("ctcss", state.ctcss)
                 } else {
                     query!("?;".to_string())
                 }
@@ -993,11 +904,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u8>() {
                     if v <= 39 {
                         state.tone_number = v;
-                        changed!(
-                            format!("TN{:02};", state.tone_number),
-                            "tone_number",
-                            state.tone_number
-                        )
+                        set_ok!("tone_number", state.tone_number)
                     } else {
                         query!("?;".to_string())
                     }
@@ -1019,11 +926,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.subtone = v != 0;
-                    changed!(
-                        format!("TO{};", u8::from(state.subtone)),
-                        "subtone",
-                        state.subtone
-                    )
+                    set_ok!("subtone", state.subtone)
                 } else {
                     query!("?;".to_string())
                 }
@@ -1044,8 +947,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                         state.beat_cancel_mode = v;
                         // Also sync the bool field used by TUI
                         state.beat_cancel = v != 0;
-                        changed2!(
-                            format!("BC{};", state.beat_cancel_mode),
+                        set_ok2!(
                             "beat_cancel_mode",
                             state.beat_cancel_mode,
                             "beat_cancel",
@@ -1088,11 +990,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
                     state.fine_step = v != 0;
-                    changed!(
-                        format!("FS{};", u8::from(state.fine_step)),
-                        "fine_step",
-                        state.fine_step
-                    )
+                    set_ok!("fine_step", state.fine_step)
                 } else {
                     query!("?;".to_string())
                 }
@@ -1111,11 +1009,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let Ok(v) = params.parse::<u16>() {
                     if v <= 1000 {
                         state.semi_break_in_delay = v;
-                        changed!(
-                            format!("SD{:04};", state.semi_break_in_delay),
-                            "semi_break_in_delay",
-                            state.semi_break_in_delay
-                        )
+                        set_ok!("semi_break_in_delay", state.semi_break_in_delay)
                     } else {
                         query!("?;".to_string())
                     }
@@ -1132,7 +1026,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         // ------------------------------------------------------------------
         "UP" => {
             state.vfo_a_hz = state.vfo_a_hz.saturating_add(10);
-            changed!("UP;".to_string(), "vfo_a_hz", state.vfo_a_hz)
+            set_ok!("vfo_a_hz", state.vfo_a_hz)
         }
 
         // ------------------------------------------------------------------
@@ -1140,18 +1034,18 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         // ------------------------------------------------------------------
         "DN" => {
             state.vfo_a_hz = state.vfo_a_hz.saturating_sub(10);
-            changed!("DN;".to_string(), "vfo_a_hz", state.vfo_a_hz)
+            set_ok!("vfo_a_hz", state.vfo_a_hz)
         }
 
         // ------------------------------------------------------------------
         // VR — Voice Recall (write-only, no-op)
         // ------------------------------------------------------------------
-        "VR" => query!("VR;".to_string()),
+        "VR" => (String::new(), vec![]),
 
         // ------------------------------------------------------------------
         // SR — System Reset (write-only, no-op)
         // ------------------------------------------------------------------
-        "SR" => query!("SR;".to_string()),
+        "SR" => (String::new(), vec![]),
 
         // ------------------------------------------------------------------
         // FV — Firmware Version (read-only)
@@ -1193,7 +1087,7 @@ mod tests {
     fn test_fa_set_and_query() {
         let mut s = default_state();
         let (resp, changes) = handle("FA00014250000", &mut s);
-        assert_eq!(resp, "FA00014250000;");
+        assert_eq!(resp, "", "FA set should be silent");
         assert_eq!(s.vfo_a_hz, 14_250_000);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].field, "vfo_a_hz");
@@ -1213,7 +1107,7 @@ mod tests {
     fn test_md_set() {
         let mut s = default_state();
         let (resp, changes) = handle("MD1", &mut s);
-        assert_eq!(resp, "MD1;");
+        assert_eq!(resp, "", "MD set should be silent");
         assert_eq!(s.mode, 1);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].field, "mode");
@@ -1223,13 +1117,13 @@ mod tests {
     fn test_tx_rx() {
         let mut s = default_state();
         let (resp, changes) = handle("TX", &mut s);
-        assert_eq!(resp, "TX;");
+        assert_eq!(resp, "", "TX should be silent");
         assert!(s.tx);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].field, "tx");
 
         let (resp2, changes2) = handle("RX", &mut s);
-        assert_eq!(resp2, "RX;");
+        assert_eq!(resp2, "", "RX should be silent");
         assert!(!s.tx);
         assert_eq!(changes2.len(), 1);
         assert_eq!(changes2[0].field, "tx");
