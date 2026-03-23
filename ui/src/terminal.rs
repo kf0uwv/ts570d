@@ -1,7 +1,8 @@
 use std::io::{self, Stdout};
+use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event},
+    event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -164,271 +165,1001 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
     });
 }
 
-/// Run all diagnostic commands and return the full result log.
+// ---------------------------------------------------------------------------
+// Diagnostic helpers
+// ---------------------------------------------------------------------------
+
+/// Check whether [Esc] has been pressed (non-blocking).
+fn check_esc() -> bool {
+    if event::poll(Duration::ZERO).unwrap_or(false) {
+        if let Ok(Event::Key(k)) = event::read() {
+            if k.code == KeyCode::Esc {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+macro_rules! diag_set_get {
+    // set then get, compare with ==
+    ($results:expr, $label:expr, $round:expr, $set_expr:expr, $get_expr:expr, $target:expr) => {{
+        let (passed, detail) = match $set_expr.await {
+            Err(e) => (false, format!("set failed: {}", e)),
+            Ok(()) => match $get_expr.await {
+                Err(e) => (false, format!("get failed: {}", e)),
+                Ok(v) if v != $target => (
+                    false,
+                    format!("mismatch: got {:?} expected {:?}", v, $target),
+                ),
+                Ok(_) => (true, "ok".to_string()),
+            },
+        };
+        $results.push(DiagResult {
+            label: $label,
+            round: $round,
+            passed,
+            detail,
+        });
+    }};
+}
+
+macro_rules! diag_action {
+    ($results:expr, $label:expr, $round:expr, $expr:expr) => {{
+        let (passed, detail) = match $expr.await {
+            Ok(()) => (true, "ok".to_string()),
+            Err(e) => (false, format!("failed: {}", e)),
+        };
+        $results.push(DiagResult {
+            label: $label,
+            round: $round,
+            passed,
+            detail,
+        });
+    }};
+}
+
+macro_rules! diag_get {
+    ($results:expr, $label:expr, $round:expr, $expr:expr) => {{
+        let (passed, detail) = match $expr.await {
+            Ok(_) => (true, "ok".to_string()),
+            Err(e) => (false, format!("get failed: {}", e)),
+        };
+        $results.push(DiagResult {
+            label: $label,
+            round: $round,
+            passed,
+            detail,
+        });
+    }};
+}
+
+// Each step is (label, closure returning future).  We collect them as a
+// sequence of closures so we can update the Running state before each one.
+// Since futures are not object-safe we instead encode the step list as a
+// static slice of labels and drive the execution in a plain match below.
+
+/// Total number of unique diagnostic steps (commands, not rounds).
+pub(crate) const DIAG_STEP_COUNT: usize = 64;
+
+/// Run all diagnostic commands with live UI updates.
 ///
-/// Each of the 12 commands is run `DIAG_ROUNDS` times. The radio state is
-/// SET then GET-checked; some commands also cross-check against `get_information()`.
-async fn run_diagnostics<R: Radio>(radio: &mut R) -> Vec<DiagResult> {
+/// The control state is mutated in-place so the terminal can render progress
+/// as each step executes.  Pressing [Esc] between steps aborts the run.
+async fn run_diagnostics<R: Radio>(
+    radio: &mut R,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    radio_state: &mut RadioDisplay,
+    control: &mut ControlState,
+) -> UiResult<()> {
     let mut results: Vec<DiagResult> = Vec::new();
 
-    for round in 1..=DIAG_ROUNDS {
-        // 1. set_vfo_a(14_195_000) → get_vfo_a() → get_information() frequency
-        {
-            let label = "set_vfo_a / get_vfo_a";
-            let target_hz: u64 = 14_195_000;
-            let set_result = match Frequency::new(target_hz) {
-                Ok(f) => radio.set_vfo_a(f).await,
-                Err(e) => Err(e),
-            };
-            let (passed, detail) = if let Err(e) = set_result {
-                (false, format!("set failed: {}", e))
-            } else {
-                match radio.get_vfo_a().await {
-                    Err(e) => (false, format!("get failed: {}", e)),
-                    Ok(f) if f.hz() != target_hz => (
-                        false,
-                        format!("mismatch: got {} expected {}", f.hz(), target_hz),
-                    ),
-                    Ok(_) => {
-                        // cross-check IF
-                        match radio.get_information().await {
-                            Err(e) => (false, format!("IF failed: {}", e)),
-                            Ok(info) if info.frequency.hz() != target_hz => (
+    // The step labels, in the order they are executed.  They are defined here
+    // so that draw_diag_panel can display them in the Running state.
+    const LABELS: &[&str] = &[
+        // SET+GET round-trips
+        "set_vfo_a/get_vfo_a",
+        "set_vfo_b/get_vfo_b",
+        "set_mode(USB)/get_mode",
+        "set_mode(LSB)/get_mode",
+        "set_mode(CW)/get_mode",
+        "set_af_gain/get_af_gain",
+        "set_rf_gain/get_rf_gain",
+        "set_squelch/get_squelch",
+        "set_mic_gain/get_mic_gain",
+        "set_power/get_power",
+        "set_agc(Slow)/get_agc",
+        "set_noise_blanker/get_noise_blanker",
+        "set_noise_reduction/get_noise_reduction",
+        "set_preamp/get_preamp",
+        "set_attenuator/get_attenuator",
+        "set_rit(on)/get_rit",
+        "set_rit(off)/get_rit",
+        "set_xit(on)/get_xit",
+        "set_xit(off)/get_xit",
+        "set_scan/get_scan",
+        "set_vox/get_vox",
+        "set_vox_gain/get_vox_gain",
+        "set_vox_delay/get_vox_delay",
+        "set_rx_vfo/get_rx_vfo",
+        "set_tx_vfo/get_tx_vfo",
+        "set_frequency_lock/get_frequency_lock",
+        "set_fine_step/get_fine_step",
+        "set_power_on/get_power_on",
+        "set_speech_processor/get_speech_processor",
+        "set_memory_channel/get_memory_channel",
+        "set_antenna(1)/get_antenna",
+        "set_antenna(2)/get_antenna",
+        "set_keyer_speed/get_keyer_speed",
+        "set_cw_pitch/get_cw_pitch",
+        "set_high_cutoff/get_high_cutoff",
+        "set_low_cutoff/get_low_cutoff",
+        "set_ctcss_tone_number/get_ctcss_tone_number",
+        "set_ctcss/get_ctcss",
+        "set_tone_number/get_tone_number",
+        "set_tone/get_tone",
+        "set_beat_cancel/get_beat_cancel",
+        "set_if_shift/get_if_shift",
+        "set_semi_break_in_delay/get_semi_break_in_delay",
+        "set_cw_auto_zerobeat/get_cw_auto_zerobeat",
+        // IF cross-checks
+        "if_crosscheck:set_vfo_a",
+        "if_crosscheck:set_mode(USB)",
+        // GET-only
+        "get_smeter",
+        "get_id",
+        "get_information",
+        "is_busy",
+        "get_meter(RM1)",
+        // ACTION-only
+        "transmit+receive",
+        "receive",
+        "clear_rit",
+        "rit_up",
+        "rit_down",
+        "mic_up",
+        "mic_down",
+        "send_cw(TEST)",
+        "set_antenna_tuner_thru",
+        "start_antenna_tuning",
+        "set_auto_info(0)",
+        "voice_recall",
+        "reset",
+    ];
+
+    'outer: for round in 1..=DIAG_ROUNDS {
+        for (step_idx, &label) in LABELS.iter().enumerate() {
+            // Abort check
+            if check_esc() {
+                // Mark remaining as skipped
+                let remaining = (LABELS.len() - step_idx) + (DIAG_ROUNDS - round) * LABELS.len();
+                for _ in 0..remaining {
+                    // Don't push — just stop
+                }
+                break 'outer;
+            }
+
+            // Update Running state with current step info
+            *control = ControlState::Diagnostic(DiagState::Running {
+                current_label: label,
+                current_round: round,
+                results: results.clone(),
+            });
+            draw_frame(terminal, radio_state, control)?;
+
+            // Execute the step
+            match step_idx {
+                // set_vfo_a/get_vfo_a
+                0 => {
+                    let target_hz: u64 = 14_195_000;
+                    let (passed, detail) = match Frequency::new(target_hz) {
+                        Err(e) => (false, format!("freq invalid: {}", e)),
+                        Ok(f) => match radio.set_vfo_a(f).await {
+                            Err(e) => (false, format!("set failed: {}", e)),
+                            Ok(()) => match radio.get_vfo_a().await {
+                                Err(e) => (false, format!("get failed: {}", e)),
+                                Ok(v) if v.hz() != target_hz => (
+                                    false,
+                                    format!("mismatch: got {} expected {}", v.hz(), target_hz),
+                                ),
+                                Ok(_) => (true, "ok".to_string()),
+                            },
+                        },
+                    };
+                    results.push(DiagResult {
+                        label,
+                        round,
+                        passed,
+                        detail,
+                    });
+                }
+
+                // set_vfo_b/get_vfo_b
+                1 => {
+                    let target_hz: u64 = 7_100_000;
+                    let (passed, detail) = match Frequency::new(target_hz) {
+                        Err(e) => (false, format!("freq invalid: {}", e)),
+                        Ok(f) => match radio.set_vfo_b(f).await {
+                            Err(e) => (false, format!("set failed: {}", e)),
+                            Ok(()) => match radio.get_vfo_b().await {
+                                Err(e) => (false, format!("get failed: {}", e)),
+                                Ok(v) if v.hz() != target_hz => (
+                                    false,
+                                    format!("mismatch: got {} expected {}", v.hz(), target_hz),
+                                ),
+                                Ok(_) => (true, "ok".to_string()),
+                            },
+                        },
+                    };
+                    results.push(DiagResult {
+                        label,
+                        round,
+                        passed,
+                        detail,
+                    });
+                }
+
+                // set_mode(USB)/get_mode
+                2 => {
+                    let target = Mode::Usb;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_mode(target),
+                        radio.get_mode(),
+                        target
+                    );
+                }
+
+                // set_mode(LSB)/get_mode
+                3 => {
+                    let target = Mode::Lsb;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_mode(target),
+                        radio.get_mode(),
+                        target
+                    );
+                }
+
+                // set_mode(CW)/get_mode
+                4 => {
+                    let target = Mode::Cw;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_mode(target),
+                        radio.get_mode(),
+                        target
+                    );
+                }
+
+                // set_af_gain/get_af_gain
+                5 => {
+                    let target: u8 = 128;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_af_gain(target),
+                        radio.get_af_gain(),
+                        target
+                    );
+                }
+
+                // set_rf_gain/get_rf_gain
+                6 => {
+                    let target: u8 = 200;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_rf_gain(target),
+                        radio.get_rf_gain(),
+                        target
+                    );
+                }
+
+                // set_squelch/get_squelch
+                7 => {
+                    let target: u8 = 30;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_squelch(target),
+                        radio.get_squelch(),
+                        target
+                    );
+                }
+
+                // set_mic_gain/get_mic_gain
+                8 => {
+                    let target: u8 = 50;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_mic_gain(target),
+                        radio.get_mic_gain(),
+                        target
+                    );
+                }
+
+                // set_power/get_power
+                9 => {
+                    let target: u8 = 75;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_power(target),
+                        radio.get_power(),
+                        target
+                    );
+                }
+
+                // set_agc(Slow)/get_agc
+                10 => {
+                    let target: u8 = 1;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_agc(target),
+                        radio.get_agc(),
+                        target
+                    );
+                }
+
+                // set_noise_blanker/get_noise_blanker
+                11 => {
+                    let target = true;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_noise_blanker(target),
+                        radio.get_noise_blanker(),
+                        target
+                    );
+                }
+
+                // set_noise_reduction/get_noise_reduction
+                12 => {
+                    let target: u8 = 1;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_noise_reduction(target),
+                        radio.get_noise_reduction(),
+                        target
+                    );
+                }
+
+                // set_preamp/get_preamp
+                13 => {
+                    let target = true;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_preamp(target),
+                        radio.get_preamp(),
+                        target
+                    );
+                }
+
+                // set_attenuator/get_attenuator
+                14 => {
+                    let target = false;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_attenuator(target),
+                        radio.get_attenuator(),
+                        target
+                    );
+                }
+
+                // set_rit(on)/get_rit
+                15 => {
+                    let target = true;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_rit(target),
+                        radio.get_rit(),
+                        target
+                    );
+                }
+
+                // set_rit(off)/get_rit
+                16 => {
+                    let target = false;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_rit(target),
+                        radio.get_rit(),
+                        target
+                    );
+                }
+
+                // set_xit(on)/get_xit
+                17 => {
+                    let target = true;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_xit(target),
+                        radio.get_xit(),
+                        target
+                    );
+                }
+
+                // set_xit(off)/get_xit
+                18 => {
+                    let target = false;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_xit(target),
+                        radio.get_xit(),
+                        target
+                    );
+                }
+
+                // set_scan/get_scan
+                19 => {
+                    let target = false;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_scan(target),
+                        radio.get_scan(),
+                        target
+                    );
+                }
+
+                // set_vox/get_vox
+                20 => {
+                    let target = false;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_vox(target),
+                        radio.get_vox(),
+                        target
+                    );
+                }
+
+                // set_vox_gain/get_vox_gain
+                21 => {
+                    let target: u8 = 50;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_vox_gain(target),
+                        radio.get_vox_gain(),
+                        target
+                    );
+                }
+
+                // set_vox_delay/get_vox_delay
+                22 => {
+                    let target: u16 = 300;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_vox_delay(target),
+                        radio.get_vox_delay(),
+                        target
+                    );
+                }
+
+                // set_rx_vfo/get_rx_vfo
+                23 => {
+                    let target: u8 = 0;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_rx_vfo(target),
+                        radio.get_rx_vfo(),
+                        target
+                    );
+                }
+
+                // set_tx_vfo/get_tx_vfo
+                24 => {
+                    let target: u8 = 0;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_tx_vfo(target),
+                        radio.get_tx_vfo(),
+                        target
+                    );
+                }
+
+                // set_frequency_lock/get_frequency_lock
+                25 => {
+                    let target = false;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_frequency_lock(target),
+                        radio.get_frequency_lock(),
+                        target
+                    );
+                }
+
+                // set_fine_step/get_fine_step
+                26 => {
+                    let target = false;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_fine_step(target),
+                        radio.get_fine_step(),
+                        target
+                    );
+                }
+
+                // set_power_on/get_power_on
+                27 => {
+                    let target = true;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_power_on(target),
+                        radio.get_power_on(),
+                        target
+                    );
+                }
+
+                // set_speech_processor/get_speech_processor
+                28 => {
+                    let target = false;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_speech_processor(target),
+                        radio.get_speech_processor(),
+                        target
+                    );
+                }
+
+                // set_memory_channel/get_memory_channel
+                29 => {
+                    let target: u8 = 1;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_memory_channel(target),
+                        radio.get_memory_channel(),
+                        target
+                    );
+                }
+
+                // set_antenna(1)/get_antenna
+                30 => {
+                    let target: u8 = 1;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_antenna(target),
+                        radio.get_antenna(),
+                        target
+                    );
+                }
+
+                // set_antenna(2)/get_antenna
+                31 => {
+                    let target: u8 = 2;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_antenna(target),
+                        radio.get_antenna(),
+                        target
+                    );
+                }
+
+                // set_keyer_speed/get_keyer_speed
+                32 => {
+                    let target: u8 = 20;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_keyer_speed(target),
+                        radio.get_keyer_speed(),
+                        target
+                    );
+                }
+
+                // set_cw_pitch/get_cw_pitch
+                33 => {
+                    // The protocol uses an index 00-12, not Hz.
+                    // Index 7 = 600 Hz (approximately), use index 7.
+                    let target: u8 = 7;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_cw_pitch(target),
+                        radio.get_cw_pitch(),
+                        target
+                    );
+                }
+
+                // set_high_cutoff/get_high_cutoff
+                34 => {
+                    // High cutoff is an index 00-20; use index 14 (~2800 Hz region)
+                    let target: u8 = 14;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_high_cutoff(target),
+                        radio.get_high_cutoff(),
+                        target
+                    );
+                }
+
+                // set_low_cutoff/get_low_cutoff
+                35 => {
+                    // Low cutoff is an index 00-20; use index 3 (~300 Hz region)
+                    let target: u8 = 3;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_low_cutoff(target),
+                        radio.get_low_cutoff(),
+                        target
+                    );
+                }
+
+                // set_ctcss_tone_number/get_ctcss_tone_number
+                36 => {
+                    let target: u8 = 1;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_ctcss_tone_number(target),
+                        radio.get_ctcss_tone_number(),
+                        target
+                    );
+                }
+
+                // set_ctcss/get_ctcss
+                37 => {
+                    let target = false;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_ctcss(target),
+                        radio.get_ctcss(),
+                        target
+                    );
+                }
+
+                // set_tone_number/get_tone_number
+                38 => {
+                    let target: u8 = 1;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_tone_number(target),
+                        radio.get_tone_number(),
+                        target
+                    );
+                }
+
+                // set_tone/get_tone
+                39 => {
+                    let target = false;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_tone(target),
+                        radio.get_tone(),
+                        target
+                    );
+                }
+
+                // set_beat_cancel/get_beat_cancel
+                40 => {
+                    let target: u8 = 0;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_beat_cancel(target),
+                        radio.get_beat_cancel(),
+                        target
+                    );
+                }
+
+                // set_if_shift/get_if_shift
+                41 => {
+                    let target_dir = ' ';
+                    let target_freq: u16 = 0;
+                    let (passed, detail) = match radio.set_if_shift(target_dir, target_freq).await {
+                        Err(e) => (false, format!("set failed: {}", e)),
+                        Ok(()) => match radio.get_if_shift().await {
+                            Err(e) => (false, format!("get failed: {}", e)),
+                            Ok((dir, freq)) if dir != target_dir || freq != target_freq => (
                                 false,
                                 format!(
-                                    "IF mismatch: got {} expected {}",
-                                    info.frequency.hz(),
-                                    target_hz
+                                    "mismatch: got ({:?},{}) expected ({:?},{})",
+                                    dir, freq, target_dir, target_freq
                                 ),
                             ),
                             Ok(_) => (true, "ok".to_string()),
-                        }
-                    }
+                        },
+                    };
+                    results.push(DiagResult {
+                        label,
+                        round,
+                        passed,
+                        detail,
+                    });
                 }
-            };
-            results.push(DiagResult { label, round, passed, detail });
-        }
 
-        // 2. set_mode(Usb) → get_mode() → get_information() mode
-        {
-            let label = "set_mode / get_mode";
-            let target = Mode::Usb;
-            let (passed, detail) = match radio.set_mode(target).await {
-                Err(e) => (false, format!("set failed: {}", e)),
-                Ok(()) => match radio.get_mode().await {
-                    Err(e) => (false, format!("get failed: {}", e)),
-                    Ok(m) if m != target => (
-                        false,
-                        format!("mismatch: got {} expected {}", m, target),
-                    ),
-                    Ok(_) => match radio.get_information().await {
-                        Err(e) => (false, format!("IF failed: {}", e)),
-                        Ok(info) if info.mode != target => (
-                            false,
-                            format!(
-                                "IF mismatch: got {} expected {}",
-                                info.mode, target
+                // set_semi_break_in_delay/get_semi_break_in_delay
+                42 => {
+                    let target: u16 = 50;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_semi_break_in_delay(target),
+                        radio.get_semi_break_in_delay(),
+                        target
+                    );
+                }
+
+                // set_cw_auto_zerobeat/get_cw_auto_zerobeat
+                43 => {
+                    let target = false;
+                    diag_set_get!(
+                        results,
+                        label,
+                        round,
+                        radio.set_cw_auto_zerobeat(target),
+                        radio.get_cw_auto_zerobeat(),
+                        target
+                    );
+                }
+
+                // IF cross-check: after set_vfo_a → verify get_information().frequency
+                44 => {
+                    let target_hz: u64 = 14_195_000;
+                    let (passed, detail) = match Frequency::new(target_hz) {
+                        Err(e) => (false, format!("freq invalid: {}", e)),
+                        Ok(f) => match radio.set_vfo_a(f).await {
+                            Err(e) => (false, format!("set_vfo_a failed: {}", e)),
+                            Ok(()) => match radio.get_information().await {
+                                Err(e) => (false, format!("IF failed: {}", e)),
+                                Ok(info) if info.frequency.hz() != target_hz => (
+                                    false,
+                                    format!(
+                                        "IF mismatch: got {} expected {}",
+                                        info.frequency.hz(),
+                                        target_hz
+                                    ),
+                                ),
+                                Ok(_) => (true, "ok".to_string()),
+                            },
+                        },
+                    };
+                    results.push(DiagResult {
+                        label,
+                        round,
+                        passed,
+                        detail,
+                    });
+                }
+
+                // IF cross-check: after set_mode(USB) → verify get_information().mode
+                45 => {
+                    let target = Mode::Usb;
+                    let (passed, detail) = match radio.set_mode(target).await {
+                        Err(e) => (false, format!("set_mode failed: {}", e)),
+                        Ok(()) => match radio.get_information().await {
+                            Err(e) => (false, format!("IF failed: {}", e)),
+                            Ok(info) if info.mode != target => (
+                                false,
+                                format!("IF mismatch: got {} expected {}", info.mode, target),
                             ),
-                        ),
+                            Ok(_) => (true, "ok".to_string()),
+                        },
+                    };
+                    results.push(DiagResult {
+                        label,
+                        round,
+                        passed,
+                        detail,
+                    });
+                }
+
+                // get_smeter — GET-only, verify Ok, value 0..=30
+                46 => {
+                    let (passed, detail) = match radio.get_smeter().await {
+                        Err(e) => (false, format!("get failed: {}", e)),
+                        Ok(v) if v > 30 => (false, format!("out of range: {} > 30", v)),
                         Ok(_) => (true, "ok".to_string()),
-                    },
-                },
-            };
-            results.push(DiagResult { label, round, passed, detail });
-        }
+                    };
+                    results.push(DiagResult {
+                        label,
+                        round,
+                        passed,
+                        detail,
+                    });
+                }
 
-        // 3. set_af_gain(128) → get_af_gain()
-        {
-            let label = "set_af_gain / get_af_gain";
-            let target: u8 = 128;
-            let (passed, detail) = match radio.set_af_gain(target).await {
-                Err(e) => (false, format!("set failed: {}", e)),
-                Ok(()) => match radio.get_af_gain().await {
-                    Err(e) => (false, format!("get failed: {}", e)),
-                    Ok(v) if v != target => (
-                        false,
-                        format!("mismatch: got {} expected {}", v, target),
-                    ),
-                    Ok(_) => (true, "ok".to_string()),
-                },
-            };
-            results.push(DiagResult { label, round, passed, detail });
-        }
-
-        // 4. set_rf_gain(200) → get_rf_gain()
-        {
-            let label = "set_rf_gain / get_rf_gain";
-            let target: u8 = 200;
-            let (passed, detail) = match radio.set_rf_gain(target).await {
-                Err(e) => (false, format!("set failed: {}", e)),
-                Ok(()) => match radio.get_rf_gain().await {
-                    Err(e) => (false, format!("get failed: {}", e)),
-                    Ok(v) if v != target => (
-                        false,
-                        format!("mismatch: got {} expected {}", v, target),
-                    ),
-                    Ok(_) => (true, "ok".to_string()),
-                },
-            };
-            results.push(DiagResult { label, round, passed, detail });
-        }
-
-        // 5. set_squelch(30) → get_squelch()
-        {
-            let label = "set_squelch / get_squelch";
-            let target: u8 = 30;
-            let (passed, detail) = match radio.set_squelch(target).await {
-                Err(e) => (false, format!("set failed: {}", e)),
-                Ok(()) => match radio.get_squelch().await {
-                    Err(e) => (false, format!("get failed: {}", e)),
-                    Ok(v) if v != target => (
-                        false,
-                        format!("mismatch: got {} expected {}", v, target),
-                    ),
-                    Ok(_) => (true, "ok".to_string()),
-                },
-            };
-            results.push(DiagResult { label, round, passed, detail });
-        }
-
-        // 6. set_power(75) → get_power()
-        {
-            let label = "set_power / get_power";
-            let target: u8 = 75;
-            let (passed, detail) = match radio.set_power(target).await {
-                Err(e) => (false, format!("set failed: {}", e)),
-                Ok(()) => match radio.get_power().await {
-                    Err(e) => (false, format!("get failed: {}", e)),
-                    Ok(v) if v != target => (
-                        false,
-                        format!("mismatch: got {} expected {}", v, target),
-                    ),
-                    Ok(_) => (true, "ok".to_string()),
-                },
-            };
-            results.push(DiagResult { label, round, passed, detail });
-        }
-
-        // 7. set_preamp(true) → get_preamp()
-        {
-            let label = "set_preamp / get_preamp";
-            let target = true;
-            let (passed, detail) = match radio.set_preamp(target).await {
-                Err(e) => (false, format!("set failed: {}", e)),
-                Ok(()) => match radio.get_preamp().await {
-                    Err(e) => (false, format!("get failed: {}", e)),
-                    Ok(v) if v != target => (
-                        false,
-                        format!("mismatch: got {} expected {}", v, target),
-                    ),
-                    Ok(_) => (true, "ok".to_string()),
-                },
-            };
-            results.push(DiagResult { label, round, passed, detail });
-        }
-
-        // 8. set_attenuator(false) → get_attenuator()
-        {
-            let label = "set_attenuator / get_attenuator";
-            let target = false;
-            let (passed, detail) = match radio.set_attenuator(target).await {
-                Err(e) => (false, format!("set failed: {}", e)),
-                Ok(()) => match radio.get_attenuator().await {
-                    Err(e) => (false, format!("get failed: {}", e)),
-                    Ok(v) if v != target => (
-                        false,
-                        format!("mismatch: got {} expected {}", v, target),
-                    ),
-                    Ok(_) => (true, "ok".to_string()),
-                },
-            };
-            results.push(DiagResult { label, round, passed, detail });
-        }
-
-        // 9. set_noise_blanker(true) → get_noise_blanker()
-        {
-            let label = "set_noise_blanker / get_noise_blanker";
-            let target = true;
-            let (passed, detail) = match radio.set_noise_blanker(target).await {
-                Err(e) => (false, format!("set failed: {}", e)),
-                Ok(()) => match radio.get_noise_blanker().await {
-                    Err(e) => (false, format!("get failed: {}", e)),
-                    Ok(v) if v != target => (
-                        false,
-                        format!("mismatch: got {} expected {}", v, target),
-                    ),
-                    Ok(_) => (true, "ok".to_string()),
-                },
-            };
-            results.push(DiagResult { label, round, passed, detail });
-        }
-
-        // 10. set_agc(1) → get_agc()
-        {
-            let label = "set_agc / get_agc";
-            let target: u8 = 1; // Slow
-            let (passed, detail) = match radio.set_agc(target).await {
-                Err(e) => (false, format!("set failed: {}", e)),
-                Ok(()) => match radio.get_agc().await {
-                    Err(e) => (false, format!("get failed: {}", e)),
-                    Ok(v) if v != target => (
-                        false,
-                        format!("mismatch: got {} expected {}", v, target),
-                    ),
-                    Ok(_) => (true, "ok".to_string()),
-                },
-            };
-            results.push(DiagResult { label, round, passed, detail });
-        }
-
-        // 11. set_rit(false) → get_rit() → get_information() rit_enabled
-        {
-            let label = "set_rit / get_rit";
-            let target = false;
-            let (passed, detail) = match radio.set_rit(target).await {
-                Err(e) => (false, format!("set failed: {}", e)),
-                Ok(()) => match radio.get_rit().await {
-                    Err(e) => (false, format!("get failed: {}", e)),
-                    Ok(v) if v != target => (
-                        false,
-                        format!("mismatch: got {} expected {}", v, target),
-                    ),
-                    Ok(_) => match radio.get_information().await {
-                        Err(e) => (false, format!("IF failed: {}", e)),
-                        Ok(info) if info.rit_enabled != target => (
-                            false,
-                            format!(
-                                "IF mismatch: rit_enabled={} expected {}",
-                                info.rit_enabled, target
-                            ),
-                        ),
+                // get_id — GET-only, verify Ok, non-zero
+                47 => {
+                    let (passed, detail) = match radio.get_id().await {
+                        Err(e) => (false, format!("get failed: {}", e)),
+                        Ok(0) => (false, "id returned 0".to_string()),
                         Ok(_) => (true, "ok".to_string()),
-                    },
-                },
-            };
-            results.push(DiagResult { label, round, passed, detail });
-        }
+                    };
+                    results.push(DiagResult {
+                        label,
+                        round,
+                        passed,
+                        detail,
+                    });
+                }
 
-        // 12. set_vox(false) → get_vox()
-        {
-            let label = "set_vox / get_vox";
-            let target = false;
-            let (passed, detail) = match radio.set_vox(target).await {
-                Err(e) => (false, format!("set failed: {}", e)),
-                Ok(()) => match radio.get_vox().await {
-                    Err(e) => (false, format!("get failed: {}", e)),
-                    Ok(v) if v != target => (
-                        false,
-                        format!("mismatch: got {} expected {}", v, target),
-                    ),
-                    Ok(_) => (true, "ok".to_string()),
-                },
-            };
-            results.push(DiagResult { label, round, passed, detail });
+                // get_information — GET-only, verify Ok
+                48 => {
+                    diag_get!(results, label, round, radio.get_information());
+                }
+
+                // is_busy — GET-only, verify Ok
+                49 => {
+                    diag_get!(results, label, round, radio.is_busy());
+                }
+
+                // get_meter(RM1) — GET-only, Ok or Err accepted (some emulators don't support)
+                50 => {
+                    let (passed, detail) = match radio.get_meter(1).await {
+                        Ok(_) => (true, "ok".to_string()),
+                        Err(e) => (false, format!("failed: {}", e)),
+                    };
+                    results.push(DiagResult {
+                        label,
+                        round,
+                        passed,
+                        detail,
+                    });
+                }
+
+                // transmit+receive — action pair
+                51 => {
+                    let (passed, detail) = match radio.transmit().await {
+                        Err(e) => (false, format!("transmit failed: {}", e)),
+                        Ok(()) => match radio.receive().await {
+                            Err(e) => (false, format!("receive failed: {}", e)),
+                            Ok(()) => (true, "ok".to_string()),
+                        },
+                    };
+                    results.push(DiagResult {
+                        label,
+                        round,
+                        passed,
+                        detail,
+                    });
+                }
+
+                // receive — standalone action
+                52 => {
+                    diag_action!(results, label, round, radio.receive());
+                }
+
+                // clear_rit
+                53 => {
+                    diag_action!(results, label, round, radio.clear_rit());
+                }
+
+                // rit_up
+                54 => {
+                    diag_action!(results, label, round, radio.rit_up());
+                }
+
+                // rit_down
+                55 => {
+                    diag_action!(results, label, round, radio.rit_down());
+                }
+
+                // mic_up
+                56 => {
+                    diag_action!(results, label, round, radio.mic_up());
+                }
+
+                // mic_down
+                57 => {
+                    diag_action!(results, label, round, radio.mic_down());
+                }
+
+                // send_cw("TEST")
+                58 => {
+                    diag_action!(results, label, round, radio.send_cw("TEST"));
+                }
+
+                // set_antenna_tuner_thru
+                59 => {
+                    diag_action!(results, label, round, radio.set_antenna_tuner_thru(true));
+                }
+
+                // start_antenna_tuning
+                60 => {
+                    diag_action!(results, label, round, radio.start_antenna_tuning());
+                }
+
+                // set_auto_info(0)
+                61 => {
+                    diag_action!(results, label, round, radio.set_auto_info(0));
+                }
+
+                // voice_recall
+                62 => {
+                    diag_action!(results, label, round, radio.voice_recall(1));
+                }
+
+                // reset
+                63 => {
+                    diag_action!(results, label, round, radio.reset(false));
+                }
+
+                _ => {
+                    // Should not happen; defensive
+                    results.push(DiagResult {
+                        label,
+                        round,
+                        passed: false,
+                        detail: "unimplemented step".to_string(),
+                    });
+                }
+            }
         }
     }
 
-    results
+    *control = ControlState::Diagnostic(DiagState::Done { results });
+    draw_frame(terminal, radio_state, control)?;
+    Ok(())
 }
 
 async fn run_radio_loop<R: Radio>(
@@ -463,9 +1194,7 @@ async fn run_radio_loop<R: Radio>(
                         KeyResult::StartDiag => {
                             // Show "Running" state immediately, then run diagnostics
                             draw_frame(terminal, state, control)?;
-                            let results = run_diagnostics(radio).await;
-                            *control = ControlState::Diagnostic(DiagState::Done { results });
-                            draw_frame(terminal, state, control)?;
+                            run_diagnostics(radio, terminal, state, control).await?;
                         }
                         KeyResult::Execute(action) => {
                             let (desc, result) = execute_action(radio, action).await;

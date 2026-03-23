@@ -10,7 +10,7 @@ pub(crate) const DIAG_ROUNDS: usize = 3;
 /// Result of a single diagnostic step (one command, one round).
 #[derive(Debug, Clone)]
 pub(crate) struct DiagResult {
-    /// Short label, e.g. `"set_vfo_a / get_vfo_a"`.
+    /// Short label, e.g. `"set_vfo_a/get_vfo_a"`.
     pub(crate) label: &'static str,
     /// Round index, 1..=DIAG_ROUNDS.
     pub(crate) round: usize,
@@ -23,12 +23,17 @@ pub(crate) struct DiagResult {
 /// Diagnostic run lifecycle.
 pub(crate) enum DiagState {
     /// Not yet started (or reset). Shows "Press [D] to run diagnostics".
+    #[allow(dead_code)]
     Idle,
-    /// Actively running: `current` is the index of the step in progress.
+    /// Actively running.
     Running {
-        current: usize,
+        /// Label of the command currently being tested.
+        current_label: &'static str,
+        /// Round currently in progress (1..=DIAG_ROUNDS).
+        current_round: usize,
+        /// Results accumulated so far.
         results: Vec<DiagResult>,
     },
-    /// All steps finished. `results` contains the full log.
+    /// All steps finished (or aborted). `results` contains the full log.
     Done { results: Vec<DiagResult> },
 }

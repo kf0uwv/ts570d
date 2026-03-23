@@ -531,7 +531,8 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState) -> KeyResult {
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 *state = ControlState::Diagnostic(DiagState::Running {
-                    current: 0,
+                    current_label: "starting…",
+                    current_round: 1,
                     results: Vec::new(),
                 });
                 KeyResult::StartDiag
