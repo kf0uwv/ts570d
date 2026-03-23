@@ -121,25 +121,28 @@ pub fn draw(f: &mut Frame, state: &RadioState, port: &str, log: &[String]) {
     let inner = outer_block.inner(area);
     f.render_widget(outer_block, area);
 
-    // ── Three-column split ──────────────────────────────────────────────────
+    // ── Four-column split (meter | spacer | LCD | command) ─────────────────
     let total_w = inner.width;
     let meter_w: u16 = 22;
-    let remaining = total_w.saturating_sub(meter_w);
+    let spacer: u16 = 1;
+    let remaining = total_w.saturating_sub(meter_w).saturating_sub(spacer);
     let cmd_w: u16 = ((total_w as u32 * 45 / 100) as u16).min(remaining);
     let lcd_w: u16 = remaining.saturating_sub(cmd_w);
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(meter_w),
-            Constraint::Length(lcd_w),
-            Constraint::Length(cmd_w),
+            Constraint::Length(meter_w), // meters
+            Constraint::Length(spacer),  // spacer
+            Constraint::Length(lcd_w),   // LCD
+            Constraint::Length(cmd_w),   // command panel
         ])
         .split(inner);
 
     let meter_area = cols[0];
-    let lcd_area = cols[1];
-    let cmd_area = cols[2];
+    // cols[1] is the spacer — render nothing there
+    let lcd_area = cols[2];
+    let cmd_area = cols[3];
 
     draw_meter_col(f, meter_area, state);
     draw_lcd_main(f, lcd_area, state);
@@ -229,14 +232,14 @@ fn draw_rx_smeter(f: &mut Frame, area: Rect, state: &RadioState) {
 
     // Row 1: tick mark labels at computed positions
     // smeter scale: 0–30, map ticks to character positions in [0..width]
+    // Use single-char digit labels (S1→"1", S3→"3", etc.) to avoid overlap at 22 chars wide.
     let ticks: Vec<(usize, &str)> = [
-        (3usize, "S1"),
-        (7, "S3"),
-        (11, "S5"),
-        (15, "S7"),
-        (19, "S9"),
+        (3usize, "1"),
+        (7, "3"),
+        (11, "5"),
+        (15, "7"),
+        (19, "9"),
         (25, "+20"),
-        (30, "+60"),
     ]
     .iter()
     .map(|&(v, lbl)| (v * width / 30, lbl))
@@ -299,13 +302,20 @@ fn draw_tx_meters(f: &mut Frame, area: Rect, state: &RadioState) {
     };
     let pwr_value = format!("{}W", state.power_control);
     let pwr_pad = width.saturating_sub("PWR".len() + pwr_value.len());
+    let pwr_value_color = if pwr_ratio <= 0.5 {
+        Color::Green
+    } else if pwr_ratio <= 0.8 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
     let pwr_label_line = Line::from(vec![
         Span::styled("PWR", Style::default().fg(Color::DarkGray)),
         Span::raw(" ".repeat(pwr_pad)),
         Span::styled(
             pwr_value,
             Style::default()
-                .fg(Color::White)
+                .fg(pwr_value_color)
                 .add_modifier(Modifier::BOLD),
         ),
     ]);
@@ -314,12 +324,12 @@ fn draw_tx_meters(f: &mut Frame, area: Rect, state: &RadioState) {
         pwr_bar_str,
         Style::default().fg(pwr_bar_color),
     ));
-    // PWR tick labels at 25%, 50%, 75%, 100%
+    // PWR tick labels at 25%, 50%, 75%, 100% — include "W" units for clarity
     let pwr_ticks: &[(usize, &str)] = &[
-        (width / 4, "25"),
-        (width / 2, "50"),
-        (width * 3 / 4, "75"),
-        (width.saturating_sub(3), "100"),
+        (width / 4, "25W"),
+        (width / 2, "50W"),
+        (width * 3 / 4, "75W"),
+        (width.saturating_sub(4), "100W"),
     ];
     let pwr_tick_str = tick_label_line(width, pwr_ticks);
 
@@ -334,10 +344,10 @@ fn draw_tx_meters(f: &mut Frame, area: Rect, state: &RadioState) {
     let swr_bar_str = bargraph(swr_ratio, width.max(1));
     let swr_bar_line = Line::from(Span::styled(swr_bar_str, Style::default().fg(Color::Green)));
     let swr_ticks: &[(usize, &str)] = &[
-        (0, "1"),
-        (width / 4, "1.5"),
-        (width / 2, "2"),
-        (width * 3 / 4, "3"),
+        (0, "1.0"),
+        (width / 3, "1.5"),
+        (width * 2 / 3, "2.0"),
+        (width.saturating_sub(3), "3.0"),
     ];
     let swr_tick_str = tick_label_line(width, swr_ticks);
 
