@@ -158,80 +158,222 @@ fn draw_meter_col(f: &mut Frame, area: Rect, state: &RadioState) {
     }
 }
 
+/// Build a tick-label line of exactly `width` chars.
+/// `ticks`: list of (position 0..width, label &str) sorted by position.
+/// Labels are placed left-to-right; if a label would overlap the previous one, it is skipped.
+fn tick_label_line(width: usize, ticks: &[(usize, &str)]) -> String {
+    let mut buf = vec![b' '; width];
+    let mut next_free = 0usize;
+    for &(pos, label) in ticks {
+        let label_bytes = label.as_bytes();
+        let start = pos.min(width.saturating_sub(label_bytes.len()));
+        if start >= next_free && start + label_bytes.len() <= width {
+            buf[start..start + label_bytes.len()].copy_from_slice(label_bytes);
+            next_free = start + label_bytes.len() + 1; // +1 gap
+        }
+    }
+    String::from_utf8(buf).unwrap_or_default()
+}
+
+/// Map an S-meter value (0–30) to a human-readable label.
+fn smeter_label(v: u16) -> &'static str {
+    match v {
+        0..=2 => "S0",
+        3..=4 => "S1",
+        5..=6 => "S2",
+        7..=8 => "S3",
+        9..=10 => "S4",
+        11..=12 => "S5",
+        13..=14 => "S6",
+        15..=16 => "S7",
+        17..=18 => "S8",
+        19..=20 => "S9",
+        21..=24 => "S9+10",
+        25..=28 => "S9+20",
+        _ => "S9+30",
+    }
+}
+
 fn draw_rx_smeter(f: &mut Frame, area: Rect, state: &RadioState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // scale label
+            Constraint::Length(1), // title + current value
+            Constraint::Length(1), // tick labels
             Constraint::Length(1), // bargraph
-            Constraint::Min(0),    // padding
+            Constraint::Length(1), // blank padding
+            Constraint::Min(0),    // filler
         ])
         .split(area);
 
-    // 22-char scale: S1 at col 2, S3~4, S5~6, S7~8, S9~10, +20~13, +40~17, +60~21
-    let scale = Paragraph::new(Span::styled(
-        "S1 3 5 7 9  20  40 60",
-        Style::default().fg(Color::DarkGray),
-    ));
+    let width = area.width as usize;
 
-    // smeter: 0=S0, 9=S9, 30=S9+60dB
+    // Row 0: title left, current S-unit label right-aligned
+    let label = smeter_label(state.smeter);
+    let title = "S-METER";
+    let pad = width.saturating_sub(title.len() + label.len());
+    let title_line = Line::from(vec![
+        Span::styled(title, Style::default().fg(Color::DarkGray)),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(
+            label,
+            if state.smeter <= 10 {
+                Style::default().fg(Color::Green)
+            } else if state.smeter <= 20 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            },
+        ),
+    ]);
+
+    // Row 1: tick mark labels at computed positions
+    // smeter scale: 0–30, map ticks to character positions in [0..width]
+    let ticks: Vec<(usize, &str)> = [
+        (3usize, "S1"),
+        (7, "S3"),
+        (11, "S5"),
+        (15, "S7"),
+        (19, "S9"),
+        (25, "+20"),
+        (30, "+60"),
+    ]
+    .iter()
+    .map(|&(v, lbl)| (v * width / 30, lbl))
+    .collect();
+    let tick_str = tick_label_line(width, &ticks);
+
+    // Row 2: bargraph, color based on fill ratio
     let ratio = state.smeter as f64 / 30.0;
-    let bar_w = area.width as usize;
-    let bar_str = bargraph(ratio, bar_w.max(1));
-    let bar_line = Line::from(Span::styled(bar_str, Style::default().fg(Color::Yellow)));
+    let bar_color = if ratio <= 0.5 {
+        Color::Green
+    } else if ratio <= 0.75 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+    let bar_str = bargraph(ratio, width.max(1));
+    let bar_line = Line::from(Span::styled(bar_str, Style::default().fg(bar_color)));
 
     if rows[0].height > 0 {
-        f.render_widget(scale, rows[0]);
+        f.render_widget(Paragraph::new(title_line), rows[0]);
     }
     if rows[1].height > 0 {
-        f.render_widget(Paragraph::new(bar_line), rows[1]);
+        f.render_widget(
+            Paragraph::new(Span::styled(tick_str, Style::default().fg(Color::DarkGray))),
+            rows[1],
+        );
     }
+    if rows[2].height > 0 {
+        f.render_widget(Paragraph::new(bar_line), rows[2]);
+    }
+    // rows[3] is blank padding — render nothing
 }
 
 fn draw_tx_meters(f: &mut Frame, area: Rect, state: &RadioState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // PWR scale
-            Constraint::Length(1), // PWR bar
-            Constraint::Length(1), // SWR scale
-            Constraint::Length(1), // SWR bar
-            Constraint::Length(1), // COMP scale
-            Constraint::Length(1), // COMP bar
-            Constraint::Length(1), // ALC scale
-            Constraint::Length(1), // ALC bar
-            Constraint::Min(0),    // padding
+            Constraint::Length(1), // PWR label + value
+            Constraint::Length(1), // PWR bargraph
+            Constraint::Length(1), // PWR tick labels
+            Constraint::Length(1), // blank separator
+            Constraint::Length(1), // SWR label + value
+            Constraint::Length(1), // SWR bargraph
+            Constraint::Length(1), // SWR tick labels
+            Constraint::Length(1), // blank padding
+            Constraint::Min(0),    // filler
         ])
         .split(area);
 
-    let bar_w = area.width as usize;
+    let width = area.width as usize;
 
-    // PWR: power_control 0–100 → ratio 0.0–1.0
+    // ── PWR meter ────────────────────────────────────────────────────────────
     let pwr_ratio = state.power_control as f64 / 100.0;
-    // SWR: emulator always returns good SWR (1.0 = perfect); show fixed low value
-    let swr_ratio = 0.05_f64;
-    // COMP: speech processor off by default → 0.0
-    let comp_ratio = 0.0_f64;
-    // ALC: 0.0 when not transmitting hard
-    let alc_ratio = 0.0_f64;
-
-    let render_pair = |f: &mut Frame, scale_row: Rect, bar_row: Rect, label: &str, ratio: f64| {
-        let scale = Paragraph::new(Span::styled(label, Style::default().fg(Color::DarkGray)));
-        let bar_str = bargraph(ratio, bar_w.max(1));
-        let bar_line = Line::from(Span::styled(bar_str, Style::default().fg(Color::Yellow)));
-        if scale_row.height > 0 {
-            f.render_widget(scale, scale_row);
-        }
-        if bar_row.height > 0 {
-            f.render_widget(Paragraph::new(bar_line), bar_row);
-        }
+    let pwr_bar_color = if pwr_ratio <= 0.5 {
+        Color::Green
+    } else if pwr_ratio <= 0.8 {
+        Color::Yellow
+    } else {
+        Color::Red
     };
+    let pwr_value = format!("{}W", state.power_control);
+    let pwr_pad = width.saturating_sub("PWR".len() + pwr_value.len());
+    let pwr_label_line = Line::from(vec![
+        Span::styled("PWR", Style::default().fg(Color::DarkGray)),
+        Span::raw(" ".repeat(pwr_pad)),
+        Span::styled(
+            pwr_value,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    let pwr_bar_str = bargraph(pwr_ratio, width.max(1));
+    let pwr_bar_line = Line::from(Span::styled(
+        pwr_bar_str,
+        Style::default().fg(pwr_bar_color),
+    ));
+    // PWR tick labels at 25%, 50%, 75%, 100%
+    let pwr_ticks: &[(usize, &str)] = &[
+        (width / 4, "25"),
+        (width / 2, "50"),
+        (width * 3 / 4, "75"),
+        (width.saturating_sub(3), "100"),
+    ];
+    let pwr_tick_str = tick_label_line(width, pwr_ticks);
 
-    // Scale strings match real TS-570D label + tick positions (~22 chars wide)
-    render_pair(f, rows[0], rows[1], "PWR 10  25  50  100%", pwr_ratio);
-    render_pair(f, rows[2], rows[3], "SWR 1  1.5  2   3", swr_ratio);
-    render_pair(f, rows[4], rows[5], "COMP 5  10  15  20dB", comp_ratio);
-    render_pair(f, rows[6], rows[7], "ALC", alc_ratio);
+    // ── SWR meter ────────────────────────────────────────────────────────────
+    // Emulator always returns perfect SWR (1.0)
+    let swr_ratio = 0.05_f64;
+    let swr_label_line = Line::from(vec![
+        Span::styled("SWR", Style::default().fg(Color::DarkGray)),
+        Span::raw(" ".repeat(width.saturating_sub("SWR".len() + "1.0".len()))),
+        Span::styled("1.0", Style::default().fg(Color::Green)),
+    ]);
+    let swr_bar_str = bargraph(swr_ratio, width.max(1));
+    let swr_bar_line = Line::from(Span::styled(swr_bar_str, Style::default().fg(Color::Green)));
+    let swr_ticks: &[(usize, &str)] = &[
+        (0, "1"),
+        (width / 4, "1.5"),
+        (width / 2, "2"),
+        (width * 3 / 4, "3"),
+    ];
+    let swr_tick_str = tick_label_line(width, swr_ticks);
+
+    // ── Render ───────────────────────────────────────────────────────────────
+    if rows[0].height > 0 {
+        f.render_widget(Paragraph::new(pwr_label_line), rows[0]);
+    }
+    if rows[1].height > 0 {
+        f.render_widget(Paragraph::new(pwr_bar_line), rows[1]);
+    }
+    if rows[2].height > 0 {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                pwr_tick_str,
+                Style::default().fg(Color::DarkGray),
+            )),
+            rows[2],
+        );
+    }
+    // rows[3]: blank separator — render nothing
+    if rows[4].height > 0 {
+        f.render_widget(Paragraph::new(swr_label_line), rows[4]);
+    }
+    if rows[5].height > 0 {
+        f.render_widget(Paragraph::new(swr_bar_line), rows[5]);
+    }
+    if rows[6].height > 0 {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                swr_tick_str,
+                Style::default().fg(Color::DarkGray),
+            )),
+            rows[6],
+        );
+    }
+    // rows[7]: blank padding — render nothing
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
