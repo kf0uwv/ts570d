@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::control::{group_command_labels, ControlState};
+use crate::diag::{DiagResult, DiagState, DIAG_ROUNDS};
 use crate::RadioDisplay;
 
 /// Format a frequency in Hz as "M.KKK.HHH MHz".
@@ -459,6 +460,11 @@ pub fn draw_ui(f: &mut Frame, area: Rect, state: &RadioDisplay) {
 
 /// Draw the interactive control panel.
 pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
+    if let ControlState::Diagnostic(diag_state) = state {
+        draw_diag_panel(f, area, diag_state);
+        return;
+    }
+
     let outer_block = Block::default().title(" Controls ").borders(Borders::ALL);
     let inner = outer_block.inner(area);
     f.render_widget(outer_block, area);
@@ -590,7 +596,135 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
             );
             f.render_widget(Paragraph::new("Press any key to continue"), lines[2]);
         }
+        // Diagnostic is handled by the early-return above.
+        ControlState::Diagnostic(_) => {}
     }
+}
+
+// ---------------------------------------------------------------------------
+// draw_diag_panel — diagnostic results panel
+// ---------------------------------------------------------------------------
+
+/// Draw the diagnostic results panel (replaces control panel during diag mode).
+///
+/// - `Idle`: prompt to press [D]
+/// - `Running`: progress indicator + results so far (scroll to bottom)
+/// - `Done`: full results list with pass/fail indicators and summary
+pub fn draw_diag_panel(f: &mut Frame, area: Rect, diag: &DiagState) {
+    let outer_block = Block::default()
+        .title(" Diagnostics ")
+        .borders(Borders::ALL);
+    let inner = outer_block.inner(area);
+    f.render_widget(outer_block, area);
+
+    match diag {
+        DiagState::Idle => {
+            let hint = Paragraph::new(Line::from(vec![
+                Span::styled("Press ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "[D]",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " to run diagnostics",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            f.render_widget(hint, inner);
+        }
+
+        DiagState::Running { current, results } => {
+            let total_steps = 12 * DIAG_ROUNDS;
+            let done = results.len();
+            let lines = build_result_lines(results);
+            let mut all_lines = lines;
+            all_lines.push(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "Running step {}/{} ...",
+                        done + 1,
+                        total_steps
+                    ),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("  (command {})", current + 1),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            let height = inner.height as usize;
+            let start = all_lines.len().saturating_sub(height);
+            let visible: Vec<Line> = all_lines.into_iter().skip(start).collect();
+            f.render_widget(Paragraph::new(visible), inner);
+        }
+
+        DiagState::Done { results } => {
+            let passed = results.iter().filter(|r| r.passed).count();
+            let total = results.len();
+            let mut lines = build_result_lines(results);
+
+            // Summary line
+            let summary_style = if passed == total {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{}/{} passed", passed, total),
+                summary_style,
+            )));
+
+            // [Esc] hint
+            lines.push(Line::from(vec![
+                Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    " return to menu",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+
+            let height = inner.height as usize;
+            let start = lines.len().saturating_sub(height);
+            let visible: Vec<Line> = lines.into_iter().skip(start).collect();
+            f.render_widget(Paragraph::new(visible), inner);
+        }
+    }
+}
+
+/// Convert a list of `DiagResult`s into ratatui `Line`s with coloured markers.
+fn build_result_lines(results: &[DiagResult]) -> Vec<Line<'static>> {
+    results
+        .iter()
+        .map(|r| {
+            let (marker, marker_style) = if r.passed {
+                (
+                    "✓",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (
+                    "✗",
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                )
+            };
+            let text = format!("[round {}] {} — {}", r.round, r.label, r.detail);
+            Line::from(vec![
+                Span::styled(marker, marker_style),
+                Span::raw(" "),
+                Span::raw(text),
+            ])
+        })
+        .collect()
 }
 
 #[cfg(test)]

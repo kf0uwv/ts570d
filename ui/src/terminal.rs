@@ -10,7 +10,8 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::{
     control::{handle_key, ControlState, ExecuteAction, KeyResult},
-    layout::{draw_control_panel, draw_errors, draw_header, draw_ui, split_areas},
+    diag::{DiagResult, DiagState, DIAG_ROUNDS},
+    layout::{draw_control_panel, draw_diag_panel, draw_errors, draw_header, draw_ui, split_areas},
     RadioDisplay, UiError, UiResult,
 };
 
@@ -44,7 +45,11 @@ pub(crate) fn draw_frame(
         draw_header(f, header_area);
         draw_ui(f, status_area, state);
         draw_errors(f, errors_area, state);
-        draw_control_panel(f, ctrl_area, control);
+        if let ControlState::Diagnostic(diag) = control {
+            draw_diag_panel(f, ctrl_area, diag);
+        } else {
+            draw_control_panel(f, ctrl_area, control);
+        }
     })?;
     Ok(())
 }
@@ -159,6 +164,273 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
     });
 }
 
+/// Run all diagnostic commands and return the full result log.
+///
+/// Each of the 12 commands is run `DIAG_ROUNDS` times. The radio state is
+/// SET then GET-checked; some commands also cross-check against `get_information()`.
+async fn run_diagnostics<R: Radio>(radio: &mut R) -> Vec<DiagResult> {
+    let mut results: Vec<DiagResult> = Vec::new();
+
+    for round in 1..=DIAG_ROUNDS {
+        // 1. set_vfo_a(14_195_000) → get_vfo_a() → get_information() frequency
+        {
+            let label = "set_vfo_a / get_vfo_a";
+            let target_hz: u64 = 14_195_000;
+            let set_result = match Frequency::new(target_hz) {
+                Ok(f) => radio.set_vfo_a(f).await,
+                Err(e) => Err(e),
+            };
+            let (passed, detail) = if let Err(e) = set_result {
+                (false, format!("set failed: {}", e))
+            } else {
+                match radio.get_vfo_a().await {
+                    Err(e) => (false, format!("get failed: {}", e)),
+                    Ok(f) if f.hz() != target_hz => (
+                        false,
+                        format!("mismatch: got {} expected {}", f.hz(), target_hz),
+                    ),
+                    Ok(_) => {
+                        // cross-check IF
+                        match radio.get_information().await {
+                            Err(e) => (false, format!("IF failed: {}", e)),
+                            Ok(info) if info.frequency.hz() != target_hz => (
+                                false,
+                                format!(
+                                    "IF mismatch: got {} expected {}",
+                                    info.frequency.hz(),
+                                    target_hz
+                                ),
+                            ),
+                            Ok(_) => (true, "ok".to_string()),
+                        }
+                    }
+                }
+            };
+            results.push(DiagResult { label, round, passed, detail });
+        }
+
+        // 2. set_mode(Usb) → get_mode() → get_information() mode
+        {
+            let label = "set_mode / get_mode";
+            let target = Mode::Usb;
+            let (passed, detail) = match radio.set_mode(target).await {
+                Err(e) => (false, format!("set failed: {}", e)),
+                Ok(()) => match radio.get_mode().await {
+                    Err(e) => (false, format!("get failed: {}", e)),
+                    Ok(m) if m != target => (
+                        false,
+                        format!("mismatch: got {} expected {}", m, target),
+                    ),
+                    Ok(_) => match radio.get_information().await {
+                        Err(e) => (false, format!("IF failed: {}", e)),
+                        Ok(info) if info.mode != target => (
+                            false,
+                            format!(
+                                "IF mismatch: got {} expected {}",
+                                info.mode, target
+                            ),
+                        ),
+                        Ok(_) => (true, "ok".to_string()),
+                    },
+                },
+            };
+            results.push(DiagResult { label, round, passed, detail });
+        }
+
+        // 3. set_af_gain(128) → get_af_gain()
+        {
+            let label = "set_af_gain / get_af_gain";
+            let target: u8 = 128;
+            let (passed, detail) = match radio.set_af_gain(target).await {
+                Err(e) => (false, format!("set failed: {}", e)),
+                Ok(()) => match radio.get_af_gain().await {
+                    Err(e) => (false, format!("get failed: {}", e)),
+                    Ok(v) if v != target => (
+                        false,
+                        format!("mismatch: got {} expected {}", v, target),
+                    ),
+                    Ok(_) => (true, "ok".to_string()),
+                },
+            };
+            results.push(DiagResult { label, round, passed, detail });
+        }
+
+        // 4. set_rf_gain(200) → get_rf_gain()
+        {
+            let label = "set_rf_gain / get_rf_gain";
+            let target: u8 = 200;
+            let (passed, detail) = match radio.set_rf_gain(target).await {
+                Err(e) => (false, format!("set failed: {}", e)),
+                Ok(()) => match radio.get_rf_gain().await {
+                    Err(e) => (false, format!("get failed: {}", e)),
+                    Ok(v) if v != target => (
+                        false,
+                        format!("mismatch: got {} expected {}", v, target),
+                    ),
+                    Ok(_) => (true, "ok".to_string()),
+                },
+            };
+            results.push(DiagResult { label, round, passed, detail });
+        }
+
+        // 5. set_squelch(30) → get_squelch()
+        {
+            let label = "set_squelch / get_squelch";
+            let target: u8 = 30;
+            let (passed, detail) = match radio.set_squelch(target).await {
+                Err(e) => (false, format!("set failed: {}", e)),
+                Ok(()) => match radio.get_squelch().await {
+                    Err(e) => (false, format!("get failed: {}", e)),
+                    Ok(v) if v != target => (
+                        false,
+                        format!("mismatch: got {} expected {}", v, target),
+                    ),
+                    Ok(_) => (true, "ok".to_string()),
+                },
+            };
+            results.push(DiagResult { label, round, passed, detail });
+        }
+
+        // 6. set_power(75) → get_power()
+        {
+            let label = "set_power / get_power";
+            let target: u8 = 75;
+            let (passed, detail) = match radio.set_power(target).await {
+                Err(e) => (false, format!("set failed: {}", e)),
+                Ok(()) => match radio.get_power().await {
+                    Err(e) => (false, format!("get failed: {}", e)),
+                    Ok(v) if v != target => (
+                        false,
+                        format!("mismatch: got {} expected {}", v, target),
+                    ),
+                    Ok(_) => (true, "ok".to_string()),
+                },
+            };
+            results.push(DiagResult { label, round, passed, detail });
+        }
+
+        // 7. set_preamp(true) → get_preamp()
+        {
+            let label = "set_preamp / get_preamp";
+            let target = true;
+            let (passed, detail) = match radio.set_preamp(target).await {
+                Err(e) => (false, format!("set failed: {}", e)),
+                Ok(()) => match radio.get_preamp().await {
+                    Err(e) => (false, format!("get failed: {}", e)),
+                    Ok(v) if v != target => (
+                        false,
+                        format!("mismatch: got {} expected {}", v, target),
+                    ),
+                    Ok(_) => (true, "ok".to_string()),
+                },
+            };
+            results.push(DiagResult { label, round, passed, detail });
+        }
+
+        // 8. set_attenuator(false) → get_attenuator()
+        {
+            let label = "set_attenuator / get_attenuator";
+            let target = false;
+            let (passed, detail) = match radio.set_attenuator(target).await {
+                Err(e) => (false, format!("set failed: {}", e)),
+                Ok(()) => match radio.get_attenuator().await {
+                    Err(e) => (false, format!("get failed: {}", e)),
+                    Ok(v) if v != target => (
+                        false,
+                        format!("mismatch: got {} expected {}", v, target),
+                    ),
+                    Ok(_) => (true, "ok".to_string()),
+                },
+            };
+            results.push(DiagResult { label, round, passed, detail });
+        }
+
+        // 9. set_noise_blanker(true) → get_noise_blanker()
+        {
+            let label = "set_noise_blanker / get_noise_blanker";
+            let target = true;
+            let (passed, detail) = match radio.set_noise_blanker(target).await {
+                Err(e) => (false, format!("set failed: {}", e)),
+                Ok(()) => match radio.get_noise_blanker().await {
+                    Err(e) => (false, format!("get failed: {}", e)),
+                    Ok(v) if v != target => (
+                        false,
+                        format!("mismatch: got {} expected {}", v, target),
+                    ),
+                    Ok(_) => (true, "ok".to_string()),
+                },
+            };
+            results.push(DiagResult { label, round, passed, detail });
+        }
+
+        // 10. set_agc(1) → get_agc()
+        {
+            let label = "set_agc / get_agc";
+            let target: u8 = 1; // Slow
+            let (passed, detail) = match radio.set_agc(target).await {
+                Err(e) => (false, format!("set failed: {}", e)),
+                Ok(()) => match radio.get_agc().await {
+                    Err(e) => (false, format!("get failed: {}", e)),
+                    Ok(v) if v != target => (
+                        false,
+                        format!("mismatch: got {} expected {}", v, target),
+                    ),
+                    Ok(_) => (true, "ok".to_string()),
+                },
+            };
+            results.push(DiagResult { label, round, passed, detail });
+        }
+
+        // 11. set_rit(false) → get_rit() → get_information() rit_enabled
+        {
+            let label = "set_rit / get_rit";
+            let target = false;
+            let (passed, detail) = match radio.set_rit(target).await {
+                Err(e) => (false, format!("set failed: {}", e)),
+                Ok(()) => match radio.get_rit().await {
+                    Err(e) => (false, format!("get failed: {}", e)),
+                    Ok(v) if v != target => (
+                        false,
+                        format!("mismatch: got {} expected {}", v, target),
+                    ),
+                    Ok(_) => match radio.get_information().await {
+                        Err(e) => (false, format!("IF failed: {}", e)),
+                        Ok(info) if info.rit_enabled != target => (
+                            false,
+                            format!(
+                                "IF mismatch: rit_enabled={} expected {}",
+                                info.rit_enabled, target
+                            ),
+                        ),
+                        Ok(_) => (true, "ok".to_string()),
+                    },
+                },
+            };
+            results.push(DiagResult { label, round, passed, detail });
+        }
+
+        // 12. set_vox(false) → get_vox()
+        {
+            let label = "set_vox / get_vox";
+            let target = false;
+            let (passed, detail) = match radio.set_vox(target).await {
+                Err(e) => (false, format!("set failed: {}", e)),
+                Ok(()) => match radio.get_vox().await {
+                    Err(e) => (false, format!("get failed: {}", e)),
+                    Ok(v) if v != target => (
+                        false,
+                        format!("mismatch: got {} expected {}", v, target),
+                    ),
+                    Ok(_) => (true, "ok".to_string()),
+                },
+            };
+            results.push(DiagResult { label, round, passed, detail });
+        }
+    }
+
+    results
+}
+
 async fn run_radio_loop<R: Radio>(
     radio: &mut R,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -186,6 +458,13 @@ async fn run_radio_loop<R: Radio>(
                         KeyResult::Quit => return Ok(()),
                         KeyResult::Continue => {
                             // Re-draw immediately so user sees state change
+                            draw_frame(terminal, state, control)?;
+                        }
+                        KeyResult::StartDiag => {
+                            // Show "Running" state immediately, then run diagnostics
+                            draw_frame(terminal, state, control)?;
+                            let results = run_diagnostics(radio).await;
+                            *control = ControlState::Diagnostic(DiagState::Done { results });
                             draw_frame(terminal, state, control)?;
                         }
                         KeyResult::Execute(action) => {

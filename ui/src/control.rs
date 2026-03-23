@@ -2,6 +2,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 
+use crate::diag::DiagState;
+
 // ---------------------------------------------------------------------------
 // State types
 // ---------------------------------------------------------------------------
@@ -74,6 +76,8 @@ pub enum ControlState {
     },
     /// Showing feedback after a command.
     Feedback { message: String, is_error: bool },
+    /// Running or displaying diagnostics.
+    Diagnostic(DiagState),
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +92,8 @@ pub enum KeyResult {
     Quit,
     /// Execute a radio action with a validated value.
     Execute(ExecuteAction),
+    /// Begin a diagnostic run.
+    StartDiag,
 }
 
 /// A validated radio command ready to execute.
@@ -523,6 +529,13 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState) -> KeyResult {
                 };
                 KeyResult::Continue
             }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                *state = ControlState::Diagnostic(DiagState::Running {
+                    current: 0,
+                    results: Vec::new(),
+                });
+                KeyResult::StartDiag
+            }
             KeyCode::Char('q') | KeyCode::Char('Q') => KeyResult::Quit,
             _ => KeyResult::Continue,
         },
@@ -635,6 +648,14 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState) -> KeyResult {
             *state = ControlState::Menu;
             KeyResult::Continue
         }
+
+        ControlState::Diagnostic(_) => match key.code {
+            KeyCode::Esc => {
+                *state = ControlState::Menu;
+                KeyResult::Continue
+            }
+            _ => KeyResult::Continue,
+        },
     }
 }
 

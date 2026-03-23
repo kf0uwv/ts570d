@@ -3,6 +3,7 @@
 //! Provides the ratatui-based terminal interface for the radio controller.
 
 pub(crate) mod control;
+pub(crate) mod diag;
 pub(crate) mod layout;
 mod terminal;
 
