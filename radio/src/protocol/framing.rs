@@ -21,6 +21,8 @@
 /// ```
 pub struct ResponseFramer {
     buffer: Vec<u8>,
+    overflow_count: usize,
+    semicolon_count: usize,
 }
 
 impl ResponseFramer {
@@ -33,7 +35,11 @@ impl ResponseFramer {
 
     /// Create a new, empty framer.
     pub fn new() -> Self {
-        Self { buffer: Vec::new() }
+        Self {
+            buffer: Vec::new(),
+            overflow_count: 0,
+            semicolon_count: 0,
+        }
     }
 
     /// Append `data` bytes to the internal buffer.
@@ -44,16 +50,25 @@ impl ResponseFramer {
     pub fn feed(&mut self, data: &[u8]) {
         if self.buffer.len() + data.len() > Self::MAX_BUFFER {
             // Discard stale data to prevent OOM.
-            // TODO: we need a way to signal this back to the ui or logs
+            self.overflow_count += 1;
             self.buffer.clear();
+            self.semicolon_count = 0;
         }
+        self.semicolon_count += data.iter().filter(|&&b| b == b';').count();
         self.buffer.extend_from_slice(data);
     }
 
     /// Return `true` if there is at least one complete frame available.
-    // TODO: This could be tracked as bytes are read off of the serial port and when the frame is read or the buffer cleared, it would be reset
     pub fn has_frame(&self) -> bool {
-        self.buffer.contains(&b';')
+        self.semicolon_count > 0
+    }
+
+    /// Return the number of buffer overflows that have occurred since the last
+    /// call to this method, resetting the counter to zero.
+    pub fn take_overflow_count(&mut self) -> usize {
+        let count = self.overflow_count;
+        self.overflow_count = 0;
+        count
     }
 
     /// Extract and return the next complete frame (including the `';'`
@@ -65,6 +80,7 @@ impl ResponseFramer {
         let pos = self.buffer.iter().position(|&b| b == b';')?;
         // Include the terminator in the frame.
         let frame_bytes: Vec<u8> = self.buffer.drain(..=pos).collect();
+        self.semicolon_count -= 1;
         // Convert to String, replacing invalid UTF-8 with replacement chars.
         Some(String::from_utf8_lossy(&frame_bytes).into_owned())
     }
@@ -74,6 +90,7 @@ impl ResponseFramer {
     /// Useful after a timeout or detected protocol error.
     pub fn clear(&mut self) {
         self.buffer.clear();
+        self.semicolon_count = 0;
     }
 }
 
