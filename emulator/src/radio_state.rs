@@ -1,3 +1,18 @@
+/// A single memory channel entry.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MemoryChannel {
+    /// Frequency in Hz (0 = vacant)
+    pub freq: u64,
+    /// Mode: 1–9 (0 = vacant)
+    pub mode: u8,
+    /// Memory lockout
+    pub lockout: bool,
+    /// Tone on/off
+    pub tone: bool,
+    /// Tone number 1–39 (0 = none)
+    pub tone_num: u8,
+}
+
 /// VFO / memory selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VfoSel {
@@ -95,7 +110,7 @@ pub struct RadioState {
     pub agc: u8,
     /// VOX gain 0–255
     pub vox_gain: u8,
-    /// VOX delay in milliseconds (0–1000)
+    /// VOX delay in milliseconds (0–3000)
     pub vox_delay: u16,
     /// RX VFO selection (FR command): 0=VFO-A, 1=VFO-B, 2=memory
     pub rx_vfo: u8,
@@ -111,9 +126,9 @@ pub struct RadioState {
     pub cw_auto_zerobeat: bool,
     /// Antenna tuner mode (AC command): packed 3-digit code
     pub ac_mode: u8,
-    /// Filter high cutoff (SH command): 0–10
+    /// DSP Slope High Cut-off (SH command): 0–20
     pub sh: u8,
-    /// Filter low cutoff (SL command): 0–10
+    /// DSP Slope Low Cut-off (SL command): 0–20
     pub sl: u8,
     /// IF shift direction: '+' or '-'
     pub is_direction: char,
@@ -131,6 +146,14 @@ pub struct RadioState {
     pub rit_offset: i32,
     /// XIT offset in Hz (–9999 to +9999)
     pub xit_offset: i32,
+    /// Filter bandwidth setting (FW command): 4-digit value, mode-dependent
+    pub filter_width: u16,
+    /// Extension menu values (EX command), indexed by menu number 0–51
+    pub menu_values: [u16; 52],
+    /// Current DRU playback channel (PB command): 0=no playback, 1–3=channel
+    pub playback_channel: u8,
+    /// 100 memory channels (MR/MW commands), indexed 0–99
+    pub memory_channels: [MemoryChannel; 100],
 }
 
 impl Default for RadioState {
@@ -202,6 +225,10 @@ impl Default for RadioState {
             semi_break_in_delay: 0,
             rit_offset: 0,
             xit_offset: 0,
+            filter_width: 0,
+            menu_values: [0u16; 52],
+            playback_channel: 0,
+            memory_channels: [MemoryChannel::default(); 100],
         }
     }
 }

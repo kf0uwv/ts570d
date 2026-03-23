@@ -273,19 +273,19 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // ID — Transceiver ID, returns "019" for TS-570D
+        // ID — Transceiver ID, returns "017" for TS-570D
         // ------------------------------------------------------------------
-        "ID" => query!("ID019;".to_string()),
+        "ID" => query!("ID017;".to_string()),
 
         // ------------------------------------------------------------------
-        // AI — Auto Information (0=off, 1=on)
+        // AI — Auto Information (0=off, 1=IF periodic, 2=on-change, 3=both)
         // ------------------------------------------------------------------
         "AI" => {
             if params.is_empty() {
                 query!(format!("AI{};", state.auto_info))
             } else if params.len() == 1 {
                 if let Ok(v) = params.parse::<u8>() {
-                    if v <= 1 {
+                    if v <= 3 {
                         state.auto_info = v;
                         set_ok!("auto_info", state.auto_info)
                     } else {
@@ -531,14 +531,14 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // VD — VOX Delay (0–1000 ms, 4 digits)
+        // VD — VOX Delay (0–3000 ms, 4 digits)
         // ------------------------------------------------------------------
         "VD" => {
             if params.is_empty() {
                 query!(format!("VD{:04};", state.vox_delay))
             } else if params.len() == 4 {
                 if let Ok(v) = params.parse::<u16>() {
-                    if v <= 1000 {
+                    if v <= 3000 {
                         state.vox_delay = v;
                         set_ok!("vox_delay", state.vox_delay)
                     } else {
@@ -656,11 +656,11 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // MC — Memory Channel (00–99, 2 digits with optional leading space)
+        // MC — Memory Channel (00–99, space + 2 digits)
         // ------------------------------------------------------------------
         "MC" => {
             if params.is_empty() {
-                query!(format!("MC{:02};", state.mem_channel))
+                query!(format!("MC {:02};", state.mem_channel))
             } else {
                 let trimmed = params.trim();
                 if let Ok(v) = trimmed.parse::<u8>() {
@@ -699,14 +699,14 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // KS — Keyer Speed (003–060 WPM, 3 digits)
+        // KS — Keyer Speed (010–060 WPM, 3 digits)
         // ------------------------------------------------------------------
         "KS" => {
             if params.is_empty() {
                 query!(format!("KS{:03};", state.keyer_speed))
             } else if params.len() == 3 {
                 if let Ok(v) = params.parse::<u8>() {
-                    if (3..=60).contains(&v) {
+                    if (10..=60).contains(&v) {
                         state.keyer_speed = v;
                         set_ok!("keyer_speed", state.keyer_speed)
                     } else {
@@ -721,9 +721,17 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // KY — CW Keying (write-only, silent)
+        // KY — CW Keying / buffer status
+        // Read (KY;): returns buffer status KY0; (buffer available)
+        // Set (KY<space><message>;): silent
         // ------------------------------------------------------------------
-        "KY" => (String::new(), vec![]),
+        "KY" => {
+            if params.is_empty() {
+                query!("KY0;".to_string())
+            } else {
+                (String::new(), vec![])
+            }
+        }
 
         // ------------------------------------------------------------------
         // PT — CW Pitch (00–12, 2 digits)
@@ -787,14 +795,14 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // SH — Filter High Cutoff (0–10, 2 digits)
+        // SH — DSP Slope High Cut-off (0–20, 2 digits)
         // ------------------------------------------------------------------
         "SH" => {
             if params.is_empty() {
                 query!(format!("SH{:02};", state.sh))
             } else if params.len() == 2 {
                 if let Ok(v) = params.parse::<u8>() {
-                    if v <= 10 {
+                    if v <= 20 {
                         state.sh = v;
                         set_ok!("sh", state.sh)
                     } else {
@@ -809,14 +817,14 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // SL — Filter Low Cutoff (0–10, 2 digits)
+        // SL — DSP Slope Low Cut-off (0–20, 2 digits)
         // ------------------------------------------------------------------
         "SL" => {
             if params.is_empty() {
                 query!(format!("SL{:02};", state.sl))
             } else if params.len() == 2 {
                 if let Ok(v) = params.parse::<u8>() {
-                    if v <= 10 {
+                    if v <= 20 {
                         state.sl = v;
                         set_ok!("sl", state.sl)
                     } else {
@@ -832,15 +840,17 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
 
         // ------------------------------------------------------------------
         // IS — IF Shift (direction char + 4-digit freq, e.g. "+0500")
+        // Space is accepted as equivalent to '+' per manual.
         // ------------------------------------------------------------------
         "IS" => {
             if params.is_empty() {
                 query!(format!("IS{}{:04};", state.is_direction, state.is_freq))
             } else if params.len() == 5 {
                 let direction = params.chars().next().unwrap_or('+');
-                if direction == '+' || direction == '-' {
+                if direction == '+' || direction == '-' || direction == ' ' {
+                    let stored_dir = if direction == ' ' { '+' } else { direction };
                     if let Ok(freq) = params[1..].parse::<u16>() {
-                        state.is_direction = direction;
+                        state.is_direction = stored_dir;
                         state.is_freq = freq;
                         set_ok2!("is_direction", state.is_direction, "is_freq", state.is_freq)
                     } else {
@@ -855,14 +865,14 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // CN — CTCSS Tone Number (00–39, 2 digits)
+        // CN — CTCSS Tone Number (01–39, 2 digits)
         // ------------------------------------------------------------------
         "CN" => {
             if params.is_empty() {
                 query!(format!("CN{:02};", state.ctcss_tone))
             } else if params.len() == 2 {
                 if let Ok(v) = params.parse::<u8>() {
-                    if v <= 39 {
+                    if (1..=39).contains(&v) {
                         state.ctcss_tone = v;
                         set_ok!("ctcss_tone", state.ctcss_tone)
                     } else {
@@ -895,14 +905,14 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // TN — Tone Number (00–39, 2 digits)
+        // TN — Tone Number (01–39, 2 digits)
         // ------------------------------------------------------------------
         "TN" => {
             if params.is_empty() {
                 query!(format!("TN{:02};", state.tone_number))
             } else if params.len() == 2 {
                 if let Ok(v) = params.parse::<u8>() {
-                    if v <= 39 {
+                    if (1..=39).contains(&v) {
                         state.tone_number = v;
                         set_ok!("tone_number", state.tone_number)
                     } else {
@@ -1022,30 +1032,226 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // UP — VFO frequency up by 10 Hz (write-only)
+        // UP — VFO frequency up by 100 Hz (Menu 02 default step, write-only)
         // ------------------------------------------------------------------
         "UP" => {
-            state.vfo_a_hz = state.vfo_a_hz.saturating_add(10);
+            state.vfo_a_hz = state.vfo_a_hz.saturating_add(100);
             set_ok!("vfo_a_hz", state.vfo_a_hz)
         }
 
         // ------------------------------------------------------------------
-        // DN — VFO frequency down by 10 Hz (write-only)
+        // DN — VFO frequency down by 100 Hz (Menu 02 default step, write-only)
         // ------------------------------------------------------------------
         "DN" => {
-            state.vfo_a_hz = state.vfo_a_hz.saturating_sub(10);
+            state.vfo_a_hz = state.vfo_a_hz.saturating_sub(100);
             set_ok!("vfo_a_hz", state.vfo_a_hz)
         }
 
         // ------------------------------------------------------------------
-        // VR — Voice Recall (write-only, no-op)
+        // VR — Voice Recall (P1=1 or 2, write-only, silent)
         // ------------------------------------------------------------------
-        "VR" => (String::new(), vec![]),
+        "VR" => {
+            if params.len() == 1 {
+                if matches!(params, "1" | "2") {
+                    (String::new(), vec![])
+                } else {
+                    query!("?;".to_string())
+                }
+            } else {
+                query!("?;".to_string())
+            }
+        }
 
         // ------------------------------------------------------------------
-        // SR — System Reset (write-only, no-op)
+        // SR — System Reset (P1=1 partial or 2 full, write-only, silent)
         // ------------------------------------------------------------------
-        "SR" => (String::new(), vec![]),
+        "SR" => {
+            if params.len() == 1 {
+                if matches!(params, "1" | "2") {
+                    (String::new(), vec![])
+                } else {
+                    query!("?;".to_string())
+                }
+            } else {
+                query!("?;".to_string())
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // FW — Filter Width (4 digits, 0000–9999)
+        // ------------------------------------------------------------------
+        "FW" => {
+            if params.is_empty() {
+                query!(format!("FW{:04};", state.filter_width))
+            } else if params.len() == 4 {
+                if let Ok(v) = params.parse::<u16>() {
+                    state.filter_width = v;
+                    set_ok!("filter_width", state.filter_width)
+                } else {
+                    query!("?;".to_string())
+                }
+            } else {
+                query!("?;".to_string())
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // EX — Extension Menu (P1=menu number 000–051, P2=selection value 4 digits)
+        // ------------------------------------------------------------------
+        "EX" => {
+            if params.len() == 3 {
+                // Read: EX<menu:3>;
+                if let Ok(n) = params.parse::<usize>() {
+                    if n <= 51 {
+                        query!(format!("EX{:03}{:04};", n, state.menu_values[n]))
+                    } else {
+                        query!("?;".to_string())
+                    }
+                } else {
+                    query!("?;".to_string())
+                }
+            } else if params.len() == 7 {
+                // Set: EX<menu:3><value:4>;
+                if let (Ok(n), Ok(v)) = (params[..3].parse::<usize>(), params[3..].parse::<u16>()) {
+                    if n <= 51 {
+                        state.menu_values[n] = v;
+                        set_ok!("menu_values", n)
+                    } else {
+                        query!("?;".to_string())
+                    }
+                } else {
+                    query!("?;".to_string())
+                }
+            } else {
+                query!("?;".to_string())
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // LM — Load Message (DRU recording, SET only, silent)
+        // P1 = LOAD MESSAGE: 0=cancel recording, 1–3=channel
+        // ------------------------------------------------------------------
+        "LM" => {
+            if params.len() == 1 {
+                if let Ok(v) = params.parse::<u8>() {
+                    if v <= 3 {
+                        (String::new(), vec![])
+                    } else {
+                        query!("?;".to_string())
+                    }
+                } else {
+                    query!("?;".to_string())
+                }
+            } else {
+                query!("?;".to_string())
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // PB — Play Back (DRU/CW message playback)
+        // P1 = PLAYBACK CHANNEL: 0=stop, 1–3=channel
+        // ------------------------------------------------------------------
+        "PB" => {
+            if params.is_empty() {
+                query!(format!("PB{};", state.playback_channel))
+            } else if params.len() == 1 {
+                if let Ok(v) = params.parse::<u8>() {
+                    if v <= 3 {
+                        state.playback_channel = v;
+                        set_ok!("playback_channel", state.playback_channel)
+                    } else {
+                        query!("?;".to_string())
+                    }
+                } else {
+                    query!("?;".to_string())
+                }
+            } else {
+                query!("?;".to_string())
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // MR — Memory Read
+        // Read: MR<P1:split><P3:channel:2>;  P1=0 for simplex
+        // Answer: MR<P1><_><P3:2><P4:11><P5:1><P6:1><P7:1><P8:2>;
+        // ------------------------------------------------------------------
+        "MR" => {
+            // Accept "MR0NN;" format (P1=split_type 1 digit, P3=channel 2 digits)
+            if params.len() >= 3 {
+                let split_type = params.chars().next().unwrap_or('0');
+                let ch_str = &params[1..];
+                if let Ok(ch) = ch_str.trim().parse::<usize>() {
+                    if ch <= 99 {
+                        let m = &state.memory_channels[ch];
+                        if m.freq == 0 {
+                            // Vacant: all zeros except channel number
+                            query!(format!("MR{} {:02}00000000000000000000;", split_type, ch))
+                        } else {
+                            query!(format!(
+                                "MR{} {:02}{:011}{}{}{}{:02};",
+                                split_type,
+                                ch,
+                                m.freq,
+                                m.mode,
+                                u8::from(m.lockout),
+                                u8::from(m.tone),
+                                m.tone_num,
+                            ))
+                        }
+                    } else {
+                        query!("?;".to_string())
+                    }
+                } else {
+                    query!("?;".to_string())
+                }
+            } else {
+                query!("?;".to_string())
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // MW — Memory Write
+        // Set: MW<P1:split><_><P3:channel:2><P4:freq:11><P5:mode><P6:lockout><P7:tone><P8:tone_num:2>
+        // ------------------------------------------------------------------
+        "MW" => {
+            // Minimum params: P1(1) + _ (1) + P3(2) + P4(11) + P5(1) + P6(1) + P7(1) + P8(2) = 20 chars
+            if params.len() >= 20 {
+                let ch_str = &params[2..4];  // P3: channel at positions 2-3
+                if let Ok(ch) = ch_str.trim().parse::<usize>() {
+                    if ch <= 99 {
+                        let freq_str = &params[4..15];   // P4: freq 11 digits
+                        let mode_str = &params[15..16];  // P5: mode 1 digit
+                        let lock_str = &params[16..17];  // P6: lockout
+                        let tone_str = &params[17..18];  // P7: tone on/off
+                        let tnum_str = &params[18..20];  // P8: tone number 2 digits
+                        if let (Ok(freq), Ok(mode), Ok(lock), Ok(tone), Ok(tnum)) = (
+                            freq_str.parse::<u64>(),
+                            mode_str.parse::<u8>(),
+                            lock_str.parse::<u8>(),
+                            tone_str.parse::<u8>(),
+                            tnum_str.parse::<u8>(),
+                        ) {
+                            state.memory_channels[ch] = crate::radio_state::MemoryChannel {
+                                freq,
+                                mode,
+                                lockout: lock != 0,
+                                tone: tone != 0,
+                                tone_num: tnum,
+                            };
+                            set_ok!("memory_channels", ch)
+                        } else {
+                            query!("?;".to_string())
+                        }
+                    } else {
+                        query!("?;".to_string())
+                    }
+                } else {
+                    query!("?;".to_string())
+                }
+            } else {
+                query!("?;".to_string())
+            }
+        }
 
         // ------------------------------------------------------------------
         // FV — Firmware Version (read-only)
@@ -1133,7 +1339,7 @@ mod tests {
     fn test_id_query() {
         let mut s = default_state();
         let (resp, changes) = handle("ID", &mut s);
-        assert_eq!(resp, "ID019;");
+        assert_eq!(resp, "ID017;");
         assert!(changes.is_empty());
     }
 

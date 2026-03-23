@@ -11,12 +11,10 @@
 //!
 //! ## Set-then-get behaviour
 //!
-//! `Ts570d::set` is fire-and-forget: it writes the command but does NOT read
-//! the radio's echo response.  The emulator echoes every set command.  The
-//! subsequent `get` call therefore reads the echo (which carries the correct
-//! value) rather than the freshly-generated query response.  This is
-//! acceptable here: the echo contains exactly the same value as a real query
-//! would, so the assertion is still valid.
+//! `Ts570d::set` is fire-and-forget: it writes the SET command but does NOT
+//! read a response (per Kenwood CAT protocol, SET commands are silent — the
+//! radio produces no response).  The subsequent `get` call sends a GET query
+//! and reads the proper query response, confirming the value was applied.
 
 use std::time::Duration;
 
@@ -97,7 +95,7 @@ fn test_set_vfo_a() {
         let mut radio = open_radio(&slave);
         let target = Frequency::new(14_195_000).expect("Frequency::new");
         radio.set_vfo_a(target).await.expect("set_vfo_a");
-        // The set-echo is in the buffer; reading it confirms the value was applied.
+        // SET is silent; get_vfo_a sends a GET query and reads the response.
         let got = radio.get_vfo_a().await.expect("get_vfo_a after set");
         assert_eq!(got.hz(), 14_195_000, "VFO A mismatch after set");
     });
@@ -171,7 +169,7 @@ fn test_set_fine_step_off() {
             .set_fine_step(false)
             .await
             .expect("set_fine_step(false) should not error");
-        // Read back the echo (which also confirms the value).
+        // Read back via GET query (SET is silent).
         let v = radio
             .get_fine_step()
             .await
@@ -295,7 +293,7 @@ fn test_set_rit_off() {
             .set_rit(false)
             .await
             .expect("set_rit(false) should not error");
-        // Read back the echo which confirms the value.
+        // Read back via GET query (SET is silent).
         let v = radio.get_rit().await.expect("get_rit after set_false");
         assert!(!v, "expected rit=false");
     });
@@ -765,8 +763,8 @@ fn test_get_id() {
     async_test!(async move {
         let mut radio = open_radio(&slave);
         let id = radio.get_id().await.expect("get_id");
-        // Emulator returns "ID019;" → 19u16 (TS-570S model code).
-        assert_eq!(id, 19, "unexpected radio ID: {}", id);
+        // Emulator returns "ID017;" → 17u16 (TS-570D model code).
+        assert_eq!(id, 17, "unexpected radio ID: {}", id);
     });
 }
 
