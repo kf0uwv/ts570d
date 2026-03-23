@@ -1133,6 +1133,7 @@ dependencies = [
 name = "ts570d"
 version = "0.1.0"
 dependencies = [
+ "emulator",
  "framework",
  "monoio",
  "radio",

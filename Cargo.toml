@@ -78,6 +78,13 @@ serial = { path = "serial" }
 radio = { path = "radio" }
 ui = { path = "ui" }
 
+[dev-dependencies]
+emulator  = { path = "emulator" }
+serial    = { path = "serial" }
+radio     = { path = "radio" }
+framework = { path = "framework" }
+monoio    = { workspace = true }
+
 [features]
 default = []
 
