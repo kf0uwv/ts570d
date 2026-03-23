@@ -769,3 +769,705 @@ fn test_get_id() {
         assert_eq!(id, 19, "unexpected radio ID: {}", id);
     });
 }
+
+// ---------------------------------------------------------------------------
+// PTT — transmit / receive
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_transmit() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.transmit().await.expect("transmit");
+    });
+}
+
+#[test]
+fn test_receive() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        // transmit first so receive is a meaningful state change.
+        radio.transmit().await.expect("transmit");
+        radio.receive().await.expect("receive");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Power on/off
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_power_on() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_power_on().await.expect("get_power_on");
+        // Default state: true (radio is on when emulator starts)
+        assert!(v, "expected power_on default=true");
+    });
+}
+
+#[test]
+fn test_set_power_on() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_power_on(false).await.expect("set_power_on(false)");
+        let v = radio.get_power_on().await.expect("get_power_on after set");
+        assert!(!v, "expected power_on=false after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Busy status (read-only)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_is_busy() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.is_busy().await.expect("is_busy");
+        // Emulator always returns BY0 (not busy).
+        assert!(!v, "expected busy=false from emulator");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// RIT clear / up / down
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_clear_rit() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.clear_rit().await.expect("clear_rit");
+    });
+}
+
+#[test]
+fn test_rit_up() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.rit_up().await.expect("rit_up");
+    });
+}
+
+#[test]
+fn test_rit_down() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.rit_down().await.expect("rit_down");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Scan
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_scan() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_scan().await.expect("get_scan");
+        assert!(!v, "expected scan default=false");
+    });
+}
+
+#[test]
+fn test_set_scan() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_scan(true).await.expect("set_scan(true)");
+        let v = radio.get_scan().await.expect("get_scan after set");
+        assert!(v, "expected scan=true after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// VOX gain
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_vox_gain() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_vox_gain().await.expect("get_vox_gain");
+        // Default: 128
+        assert_eq!(v, 128, "expected vox_gain default=128");
+    });
+}
+
+#[test]
+fn test_set_vox_gain() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_vox_gain(200).await.expect("set_vox_gain(200)");
+        let v = radio.get_vox_gain().await.expect("get_vox_gain after set");
+        assert_eq!(v, 200, "vox_gain mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// VOX delay
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_vox_delay() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_vox_delay().await.expect("get_vox_delay");
+        // Default: 250 ms
+        assert_eq!(v, 250, "expected vox_delay default=250");
+    });
+}
+
+#[test]
+fn test_set_vox_delay() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_vox_delay(500).await.expect("set_vox_delay(500)");
+        let v = radio.get_vox_delay().await.expect("get_vox_delay after set");
+        assert_eq!(v, 500, "vox_delay mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// RX VFO selection (FR)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_rx_vfo() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_rx_vfo().await.expect("get_rx_vfo");
+        // Default: 0 (VFO A)
+        assert_eq!(v, 0, "expected rx_vfo default=0");
+    });
+}
+
+#[test]
+fn test_set_rx_vfo() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_rx_vfo(1).await.expect("set_rx_vfo(1)");
+        let v = radio.get_rx_vfo().await.expect("get_rx_vfo after set");
+        assert_eq!(v, 1, "rx_vfo mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// TX VFO selection (FT)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_tx_vfo() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_tx_vfo().await.expect("get_tx_vfo");
+        // Default: 0 (VFO A)
+        assert_eq!(v, 0, "expected tx_vfo default=0");
+    });
+}
+
+#[test]
+fn test_set_tx_vfo() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_tx_vfo(1).await.expect("set_tx_vfo(1)");
+        let v = radio.get_tx_vfo().await.expect("get_tx_vfo after set");
+        assert_eq!(v, 1, "tx_vfo mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Memory channel (MC)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_memory_channel() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_memory_channel().await.expect("get_memory_channel");
+        // Default: 0
+        assert_eq!(v, 0, "expected mem_channel default=0");
+    });
+}
+
+#[test]
+fn test_set_memory_channel() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio
+            .set_memory_channel(42)
+            .await
+            .expect("set_memory_channel(42)");
+        let v = radio
+            .get_memory_channel()
+            .await
+            .expect("get_memory_channel after set");
+        assert_eq!(v, 42, "mem_channel mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Keyer speed (KS)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_keyer_speed() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_keyer_speed().await.expect("get_keyer_speed");
+        // Default: 20 WPM
+        assert_eq!(v, 20, "expected keyer_speed default=20");
+    });
+}
+
+#[test]
+fn test_set_keyer_speed() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_keyer_speed(25).await.expect("set_keyer_speed(25)");
+        let v = radio
+            .get_keyer_speed()
+            .await
+            .expect("get_keyer_speed after set");
+        assert_eq!(v, 25, "keyer_speed mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// CW pitch (PT)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_cw_pitch() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_cw_pitch().await.expect("get_cw_pitch");
+        // Default: 6 (700 Hz)
+        assert_eq!(v, 6, "expected cw_pitch default=6");
+    });
+}
+
+#[test]
+fn test_set_cw_pitch() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_cw_pitch(8).await.expect("set_cw_pitch(8)");
+        let v = radio.get_cw_pitch().await.expect("get_cw_pitch after set");
+        assert_eq!(v, 8, "cw_pitch mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// CW auto zero-beat (CA)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_cw_auto_zerobeat() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio
+            .get_cw_auto_zerobeat()
+            .await
+            .expect("get_cw_auto_zerobeat");
+        assert!(!v, "expected cw_auto_zerobeat default=false");
+    });
+}
+
+#[test]
+fn test_set_cw_auto_zerobeat() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio
+            .set_cw_auto_zerobeat(true)
+            .await
+            .expect("set_cw_auto_zerobeat(true)");
+        let v = radio
+            .get_cw_auto_zerobeat()
+            .await
+            .expect("get_cw_auto_zerobeat after set");
+        assert!(v, "expected cw_auto_zerobeat=true after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Antenna tuner thru / start tuning (AC)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_set_antenna_tuner_thru() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio
+            .set_antenna_tuner_thru(true)
+            .await
+            .expect("set_antenna_tuner_thru(true)");
+    });
+}
+
+#[test]
+fn test_start_antenna_tuning() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio
+            .start_antenna_tuning()
+            .await
+            .expect("start_antenna_tuning");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// High cutoff filter (SH)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_high_cutoff() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_high_cutoff().await.expect("get_high_cutoff");
+        // Default: 10
+        assert_eq!(v, 10, "expected high_cutoff default=10");
+    });
+}
+
+#[test]
+fn test_set_high_cutoff() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_high_cutoff(5).await.expect("set_high_cutoff(5)");
+        let v = radio
+            .get_high_cutoff()
+            .await
+            .expect("get_high_cutoff after set");
+        assert_eq!(v, 5, "high_cutoff mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Low cutoff filter (SL)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_low_cutoff() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_low_cutoff().await.expect("get_low_cutoff");
+        // Default: 0
+        assert_eq!(v, 0, "expected low_cutoff default=0");
+    });
+}
+
+#[test]
+fn test_set_low_cutoff() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_low_cutoff(3).await.expect("set_low_cutoff(3)");
+        let v = radio
+            .get_low_cutoff()
+            .await
+            .expect("get_low_cutoff after set");
+        assert_eq!(v, 3, "low_cutoff mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// IF shift (IS)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_if_shift() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let (dir, freq) = radio.get_if_shift().await.expect("get_if_shift");
+        // Default: direction='+', freq=0
+        assert_eq!(dir, '+', "expected if_shift direction default='+'");
+        assert_eq!(freq, 0, "expected if_shift freq default=0");
+    });
+}
+
+#[test]
+fn test_set_if_shift() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio
+            .set_if_shift('+', 600)
+            .await
+            .expect("set_if_shift(+, 600)");
+        let (dir, freq) = radio.get_if_shift().await.expect("get_if_shift after set");
+        assert_eq!(dir, '+', "if_shift direction mismatch after set");
+        assert_eq!(freq, 600, "if_shift freq mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// CTCSS tone number (CN)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_ctcss_tone_number() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio
+            .get_ctcss_tone_number()
+            .await
+            .expect("get_ctcss_tone_number");
+        // Default: 0
+        assert_eq!(v, 0, "expected ctcss_tone_number default=0");
+    });
+}
+
+#[test]
+fn test_set_ctcss_tone_number() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio
+            .set_ctcss_tone_number(8)
+            .await
+            .expect("set_ctcss_tone_number(8)");
+        let v = radio
+            .get_ctcss_tone_number()
+            .await
+            .expect("get_ctcss_tone_number after set");
+        assert_eq!(v, 8, "ctcss_tone_number mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// CTCSS on/off (CT)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_ctcss() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_ctcss().await.expect("get_ctcss");
+        assert!(!v, "expected ctcss default=false");
+    });
+}
+
+#[test]
+fn test_set_ctcss() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_ctcss(true).await.expect("set_ctcss(true)");
+        let v = radio.get_ctcss().await.expect("get_ctcss after set");
+        assert!(v, "expected ctcss=true after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Tone number (TN)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_tone_number() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_tone_number().await.expect("get_tone_number");
+        // Default: 0
+        assert_eq!(v, 0, "expected tone_number default=0");
+    });
+}
+
+#[test]
+fn test_set_tone_number() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_tone_number(5).await.expect("set_tone_number(5)");
+        let v = radio
+            .get_tone_number()
+            .await
+            .expect("get_tone_number after set");
+        assert_eq!(v, 5, "tone_number mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Tone on/off (TO)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_tone() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio.get_tone().await.expect("get_tone");
+        assert!(!v, "expected tone default=false");
+    });
+}
+
+#[test]
+fn test_set_tone() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_tone(true).await.expect("set_tone(true)");
+        let v = radio.get_tone().await.expect("get_tone after set");
+        assert!(v, "expected tone=true after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Beat cancel mode (BC)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_set_beat_cancel() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_beat_cancel(1).await.expect("set_beat_cancel(1)");
+        let v = radio.get_beat_cancel().await.expect("get_beat_cancel after set");
+        assert_eq!(v, 1, "beat_cancel mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Semi break-in delay (SD)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_semi_break_in_delay() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        let v = radio
+            .get_semi_break_in_delay()
+            .await
+            .expect("get_semi_break_in_delay");
+        // Default: 0
+        assert_eq!(v, 0, "expected semi_break_in_delay default=0");
+    });
+}
+
+#[test]
+fn test_set_semi_break_in_delay() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio
+            .set_semi_break_in_delay(200)
+            .await
+            .expect("set_semi_break_in_delay(200)");
+        let v = radio
+            .get_semi_break_in_delay()
+            .await
+            .expect("get_semi_break_in_delay after set");
+        assert_eq!(v, 200, "semi_break_in_delay mismatch after set");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Auto information (AI)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_set_auto_info() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.set_auto_info(1).await.expect("set_auto_info(1)");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// MIC up / down (UP / DN — write-only, adjusts VFO A by 10 Hz)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_mic_up() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.mic_up().await.expect("mic_up");
+    });
+}
+
+#[test]
+fn test_mic_down() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.mic_down().await.expect("mic_down");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Send CW (KY) — write-only
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_send_cw() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.send_cw("CQ").await.expect("send_cw");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Voice recall (VR) — write-only
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_voice_recall() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        radio.voice_recall(1).await.expect("voice_recall(1)");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// System reset (SR) — write-only
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_reset() {
+    let slave = start_emulator();
+    async_test!(async move {
+        let mut radio = open_radio(&slave);
+        // Partial reset (false → "1")
+        radio.reset(false).await.expect("reset(false)");
+    });
+}
