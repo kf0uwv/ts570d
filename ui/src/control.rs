@@ -11,8 +11,8 @@ use crossterm::event::{KeyCode, KeyEvent};
 pub enum CommandGroup {
     Frequency,
     Mode,
-    Audio,
-    Transmit,
+    Receive,
+    Transmission,
 }
 
 /// What radio action to perform when text input is confirmed.
@@ -164,7 +164,7 @@ fn mode_commands() -> Vec<GroupCommand> {
     ]
 }
 
-fn audio_commands() -> Vec<GroupCommand> {
+fn receive_commands() -> Vec<GroupCommand> {
     vec![
         GroupCommand {
             label: "AF gain (0-255)",
@@ -178,6 +178,11 @@ fn audio_commands() -> Vec<GroupCommand> {
         GroupCommand {
             label: "MIC gain (0-100)",
         },
+    ]
+}
+
+fn transmission_commands() -> Vec<GroupCommand> {
+    vec![
         GroupCommand {
             label: "TX power (0-100)",
         },
@@ -185,11 +190,6 @@ fn audio_commands() -> Vec<GroupCommand> {
         GroupCommand {
             label: "Attenuator",
         },
-    ]
-}
-
-fn transmit_commands() -> Vec<GroupCommand> {
-    vec![
         GroupCommand { label: "VOX" },
         GroupCommand {
             label: "VOX gain (0-100)",
@@ -205,8 +205,8 @@ pub fn group_command_labels(group: CommandGroup) -> Vec<&'static str> {
     let cmds = match group {
         CommandGroup::Frequency => frequency_commands(),
         CommandGroup::Mode => mode_commands(),
-        CommandGroup::Audio => audio_commands(),
-        CommandGroup::Transmit => transmit_commands(),
+        CommandGroup::Receive => receive_commands(),
+        CommandGroup::Transmission => transmission_commands(),
     };
     cmds.into_iter().map(|c| c.label).collect()
 }
@@ -299,8 +299,7 @@ fn select_mode_command(idx: usize) -> Option<ControlState> {
     }
 }
 
-fn select_audio_command(idx: usize) -> Option<ControlState> {
-    let on_off = vec!["On".to_string(), "Off".to_string()];
+fn select_receive_command(idx: usize) -> Option<ControlState> {
     match idx {
         0 => Some(ControlState::TextInput {
             prompt: "AF gain (0-255):".to_string(),
@@ -326,46 +325,46 @@ fn select_audio_command(idx: usize) -> Option<ControlState> {
             error: None,
             action: InputAction::SetMicGain,
         }),
-        4 => Some(ControlState::TextInput {
+        _ => None,
+    }
+}
+
+fn select_transmission_command(idx: usize) -> Option<ControlState> {
+    let on_off = vec!["On".to_string(), "Off".to_string()];
+    match idx {
+        0 => Some(ControlState::TextInput {
             prompt: "TX power % (0-100):".to_string(),
             buffer: String::new(),
             error: None,
             action: InputAction::SetPower,
         }),
-        5 => Some(ControlState::ListSelect {
+        1 => Some(ControlState::ListSelect {
             options: on_off.clone(),
             cursor: 0,
             action: SelectAction::TogglePreamp,
         }),
-        6 => Some(ControlState::ListSelect {
-            options: on_off,
+        2 => Some(ControlState::ListSelect {
+            options: on_off.clone(),
             cursor: 0,
             action: SelectAction::ToggleAtt,
         }),
-        _ => None,
-    }
-}
-
-fn select_transmit_command(idx: usize) -> Option<ControlState> {
-    let on_off = vec!["On".to_string(), "Off".to_string()];
-    match idx {
-        0 => Some(ControlState::ListSelect {
+        3 => Some(ControlState::ListSelect {
             options: on_off.clone(),
             cursor: 0,
             action: SelectAction::ToggleVox,
         }),
-        1 => Some(ControlState::TextInput {
+        4 => Some(ControlState::TextInput {
             prompt: "VOX gain (0-100):".to_string(),
             buffer: String::new(),
             error: None,
             action: InputAction::SetVoxGain,
         }),
-        2 => Some(ControlState::ListSelect {
+        5 => Some(ControlState::ListSelect {
             options: on_off,
             cursor: 0,
             action: SelectAction::ToggleProc,
         }),
-        3 => Some(ControlState::ListSelect {
+        6 => Some(ControlState::ListSelect {
             options: vec!["ANT1".to_string(), "ANT2".to_string()],
             cursor: 0,
             action: SelectAction::SetAntenna,
@@ -378,8 +377,8 @@ fn select_group_command(group: CommandGroup, idx: usize) -> Option<ControlState>
     match group {
         CommandGroup::Frequency => select_frequency_command(idx),
         CommandGroup::Mode => select_mode_command(idx),
-        CommandGroup::Audio => select_audio_command(idx),
-        CommandGroup::Transmit => select_transmit_command(idx),
+        CommandGroup::Receive => select_receive_command(idx),
+        CommandGroup::Transmission => select_transmission_command(idx),
     }
 }
 
@@ -510,16 +509,16 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState) -> KeyResult {
                 };
                 KeyResult::Continue
             }
-            KeyCode::Char('a') | KeyCode::Char('A') => {
+            KeyCode::Char('r') | KeyCode::Char('R') => {
                 *state = ControlState::GroupMenu {
-                    group: CommandGroup::Audio,
+                    group: CommandGroup::Receive,
                     cursor: 0,
                 };
                 KeyResult::Continue
             }
             KeyCode::Char('t') | KeyCode::Char('T') => {
                 *state = ControlState::GroupMenu {
-                    group: CommandGroup::Transmit,
+                    group: CommandGroup::Transmission,
                     cursor: 0,
                 };
                 KeyResult::Continue

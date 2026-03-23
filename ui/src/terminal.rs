@@ -58,6 +58,81 @@ pub async fn run<R: Radio>(radio: &mut R) -> UiResult<()> {
     result
 }
 
+/// Poll all radio state getters and update `state` in place.
+///
+/// Each getter failure is silently ignored — the previous value is preserved.
+/// This is called at the top of every outer loop iteration and also immediately
+/// after a successful command execution so the UI reflects the new state.
+async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
+    if let Ok(info) = radio.get_information().await {
+        state.vfo_a_hz = info.frequency.hz();
+        state.mode = info.mode.name().to_string();
+        state.tx = info.tx_rx;
+        state.rit = info.rit_enabled;
+        state.xit = info.xit_enabled;
+        state.rit_xit_offset_hz = info.rit_xit_offset;
+        state.split = info.split;
+        state.scan = info.scan_status != 0;
+        state.memory_channel = info.memory_channel;
+        state.memory_mode = info.vfo_memory != 0;
+        state.ctcss = info.ctcss_tone != 0;
+    }
+    if let Ok(freq) = radio.get_vfo_b().await {
+        state.vfo_b_hz = freq.hz();
+    }
+    if let Ok(s) = radio.get_smeter().await {
+        state.smeter = s;
+    }
+    if let Ok(v) = radio.get_af_gain().await {
+        state.af_gain = v;
+    }
+    if let Ok(v) = radio.get_rf_gain().await {
+        state.rf_gain = v;
+    }
+    if let Ok(v) = radio.get_squelch().await {
+        state.squelch = v;
+    }
+    if let Ok(v) = radio.get_mic_gain().await {
+        state.mic_gain = v;
+    }
+    if let Ok(v) = radio.get_power().await {
+        state.power_pct = v;
+    }
+    if let Ok(v) = radio.get_agc().await {
+        state.agc = v;
+    }
+    if let Ok(v) = radio.get_noise_blanker().await {
+        state.noise_blanker = v;
+    }
+    if let Ok(v) = radio.get_noise_reduction().await {
+        state.noise_reduction = v;
+    }
+    if let Ok(v) = radio.get_preamp().await {
+        state.preamp = v;
+    }
+    if let Ok(v) = radio.get_attenuator().await {
+        state.attenuator = v;
+    }
+    if let Ok(v) = radio.get_speech_processor().await {
+        state.speech_processor = v;
+    }
+    if let Ok(v) = radio.get_beat_cancel().await {
+        state.beat_cancel = v;
+    }
+    if let Ok(v) = radio.get_vox().await {
+        state.vox = v;
+    }
+    if let Ok(v) = radio.get_antenna().await {
+        state.antenna = v;
+    }
+    if let Ok(v) = radio.get_frequency_lock().await {
+        state.freq_lock = v;
+    }
+    if let Ok(v) = radio.get_fine_step().await {
+        state.fine_step = v;
+    }
+}
+
 async fn run_radio_loop<R: Radio>(
     radio: &mut R,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -66,73 +141,7 @@ async fn run_radio_loop<R: Radio>(
 ) -> UiResult<()> {
     loop {
         // --- Phase 3: Poll radio state ---
-        if let Ok(info) = radio.get_information().await {
-            state.vfo_a_hz = info.frequency.hz();
-            state.mode = info.mode.name().to_string();
-            state.tx = info.tx_rx;
-            state.rit = info.rit_enabled;
-            state.xit = info.xit_enabled;
-            state.rit_xit_offset_hz = info.rit_xit_offset;
-            state.split = info.split;
-            state.scan = info.scan_status != 0;
-            state.memory_channel = info.memory_channel;
-            state.memory_mode = info.vfo_memory != 0;
-            state.ctcss = info.ctcss_tone != 0;
-        }
-        if let Ok(freq) = radio.get_vfo_b().await {
-            state.vfo_b_hz = freq.hz();
-        }
-        if let Ok(s) = radio.get_smeter().await {
-            state.smeter = s;
-        }
-        if let Ok(v) = radio.get_af_gain().await {
-            state.af_gain = v;
-        }
-        if let Ok(v) = radio.get_rf_gain().await {
-            state.rf_gain = v;
-        }
-        if let Ok(v) = radio.get_squelch().await {
-            state.squelch = v;
-        }
-        if let Ok(v) = radio.get_mic_gain().await {
-            state.mic_gain = v;
-        }
-        if let Ok(v) = radio.get_power().await {
-            state.power_pct = v;
-        }
-        if let Ok(v) = radio.get_agc().await {
-            state.agc = v;
-        }
-        if let Ok(v) = radio.get_noise_blanker().await {
-            state.noise_blanker = v;
-        }
-        if let Ok(v) = radio.get_noise_reduction().await {
-            state.noise_reduction = v;
-        }
-        if let Ok(v) = radio.get_preamp().await {
-            state.preamp = v;
-        }
-        if let Ok(v) = radio.get_attenuator().await {
-            state.attenuator = v;
-        }
-        if let Ok(v) = radio.get_speech_processor().await {
-            state.speech_processor = v;
-        }
-        if let Ok(v) = radio.get_beat_cancel().await {
-            state.beat_cancel = v;
-        }
-        if let Ok(v) = radio.get_vox().await {
-            state.vox = v;
-        }
-        if let Ok(v) = radio.get_antenna().await {
-            state.antenna = v;
-        }
-        if let Ok(v) = radio.get_frequency_lock().await {
-            state.freq_lock = v;
-        }
-        if let Ok(v) = radio.get_fine_step().await {
-            state.fine_step = v;
-        }
+        poll_radio_state(radio, state).await;
 
         // --- Phase 4: Draw frame ---
         draw_frame(terminal, state, control)?;
@@ -157,6 +166,9 @@ async fn run_radio_loop<R: Radio>(
                             let (desc, result) = execute_action(radio, action).await;
                             match result {
                                 Ok(()) => {
+                                    // Re-poll immediately so the status panel reflects
+                                    // the new radio state before the next 200ms cycle.
+                                    poll_radio_state(radio, state).await;
                                     *control = ControlState::Feedback {
                                         message: format!("OK: {}", desc),
                                         is_error: false,

@@ -460,19 +460,19 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
                 ),
                 Span::raw(" Mode  "),
                 Span::styled(
-                    "[A]",
+                    "[R]",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" Audio  "),
+                Span::raw(" Receive  "),
                 Span::styled(
                     "[T]",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" Transmit  "),
+                Span::raw(" Transmission  "),
                 Span::styled("[q]", Style::default().fg(Color::DarkGray)),
                 Span::raw(" Quit"),
             ]);
