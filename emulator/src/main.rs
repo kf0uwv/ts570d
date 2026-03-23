@@ -1,9 +1,30 @@
 use emulator::emulator::Emulator;
+use emulator::logger::BackgroundLogger;
 use emulator::port::{self, PortMode};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
     let tui = args.iter().any(|a| a == "--tui");
+    let background = args.iter().any(|a| a == "--background");
+
+    // --tui and --background are mutually exclusive.
+    if tui && background {
+        eprintln!("Error: --tui and --background are mutually exclusive");
+        std::process::exit(1);
+    }
+
+    // Parse optional --log-file <path> (only meaningful with --background).
+    let log_file: Option<String> = {
+        let mut lf = None;
+        let mut it = args.iter().peekable();
+        while let Some(arg) = it.next() {
+            if arg == "--log-file" {
+                lf = it.next().cloned();
+            }
+        }
+        lf
+    };
 
     // Determine port mode from --port argument.
     let mode = port::parse_port_arg(args.into_iter());
@@ -17,9 +38,11 @@ fn main() {
         }
     };
 
+    // Always print the PTY slave path as the FIRST line in KEY=VALUE format
+    // for virtual mode, so scripts can parse it regardless of run mode.
     let slave_path = match (&mode, slave_path_opt) {
         (PortMode::Virtual, Some(ref path)) => {
-            println!("PTY slave: {path}");
+            println!("PTY_SLAVE={path}");
             path.clone()
         }
         (PortMode::Physical(ref path), None) => {
@@ -37,10 +60,7 @@ fn main() {
     ctrlc::set_handler(|| {
         // Restore terminal in case --tui is active.
         let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::LeaveAlternateScreen
-        );
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
         println!("\nEmulator shutting down.");
         std::process::exit(0);
     })
@@ -48,6 +68,20 @@ fn main() {
 
     let result = if tui {
         emu.run_with_tui()
+    } else if background {
+        // Build the logger: file if --log-file was given, otherwise stdout.
+        let logger = if let Some(ref path) = log_file {
+            match BackgroundLogger::file(path) {
+                Ok(l) => l,
+                Err(err) => {
+                    eprintln!("Failed to open log file '{path}': {err}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            BackgroundLogger::stdout()
+        };
+        emu.run_background(logger)
     } else {
         emu.run()
     };

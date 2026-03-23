@@ -923,7 +923,7 @@ mod tests {
 
     // --- NopRadio tests ---
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_nop_radio_returns_not_implemented() {
         let mut radio = NopRadio;
         assert!(matches!(

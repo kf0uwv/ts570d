@@ -2,6 +2,7 @@
 //!
 //! Provides the ratatui-based terminal interface for the radio controller.
 
+pub(crate) mod control;
 pub(crate) mod layout;
 mod terminal;
 
@@ -19,16 +20,46 @@ pub type UiResult<T> = Result<T, UiError>;
 /// All fields have defaults matching TS-570D power-on state.
 #[derive(Debug, Clone)]
 pub struct RadioDisplay {
-    /// VFO A frequency in Hz (e.g., 14_000_000 for 14.000 MHz)
+    // --- Primary (from IF / get_information) ---
     pub vfo_a_hz: u64,
-    /// VFO B frequency in Hz
     pub vfo_b_hz: u64,
-    /// Operating mode name (e.g., "USB", "LSB", "CW")
     pub mode: String,
-    /// S-meter reading (0–30 scale per TS-570D CAT protocol)
-    pub smeter: u16,
-    /// True when transmitting
     pub tx: bool,
+    pub rit: bool,
+    pub xit: bool,
+    pub rit_xit_offset_hz: i32,
+    pub split: bool,
+    pub scan: bool,
+    pub memory_channel: u8,
+    pub memory_mode: bool,
+
+    // --- Meters ---
+    pub smeter: u16,
+
+    // --- Gains / levels ---
+    pub af_gain: u8,
+    pub rf_gain: u8,
+    pub squelch: u8,
+    pub mic_gain: u8,
+    pub power_pct: u8,
+    pub agc: u8,
+
+    // --- Receiver features ---
+    pub noise_blanker: bool,
+    pub noise_reduction: u8,
+    pub preamp: bool,
+    pub attenuator: bool,
+    pub speech_processor: bool,
+    pub beat_cancel: u8,
+
+    // --- Transmit ---
+    pub vox: bool,
+    pub antenna: u8,
+
+    // --- Tone ---
+    pub ctcss: bool,
+    pub freq_lock: bool,
+    pub fine_step: bool,
 }
 
 impl Default for RadioDisplay {
@@ -37,8 +68,32 @@ impl Default for RadioDisplay {
             vfo_a_hz: 14_000_000,
             vfo_b_hz: 14_100_000,
             mode: "USB".to_string(),
-            smeter: 10,
             tx: false,
+            rit: false,
+            xit: false,
+            rit_xit_offset_hz: 0,
+            split: false,
+            scan: false,
+            memory_channel: 0,
+            memory_mode: false,
+            smeter: 0,
+            af_gain: 200,
+            rf_gain: 255,
+            squelch: 0,
+            mic_gain: 50,
+            power_pct: 100,
+            agc: 2,
+            noise_blanker: false,
+            noise_reduction: 0,
+            preamp: false,
+            attenuator: false,
+            speech_processor: false,
+            beat_cancel: 0,
+            vox: false,
+            antenna: 1,
+            ctcss: false,
+            freq_lock: false,
+            fine_step: false,
         }
     }
 }

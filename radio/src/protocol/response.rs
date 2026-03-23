@@ -98,6 +98,10 @@ pub enum Response {
     CwAutoZerobeat(bool),
     /// FS — fine step on/off
     FineStep(bool),
+    /// SH — DSP high cutoff filter index (00–20)
+    HighCutoff(u8),
+    /// SL — DSP low cutoff filter index (00–20)
+    LowCutoff(u8),
     /// `?;` error response
     Error,
 }

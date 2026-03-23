@@ -1,15 +1,24 @@
+use std::collections::VecDeque;
 use std::io::stdout;
+use std::time::Duration;
 
-use crossterm::{execute, terminal};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyModifiers},
+    execute, terminal,
+};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use serialport::SerialPort;
 
 use crate::commands;
 use crate::io::EmulatorIo;
+use crate::logger::{now_ms, BackgroundLogger, LogEvent};
 use crate::pty::PtyPair;
 use crate::radio_state::RadioState;
 use crate::tui;
 use crate::EmulatorError;
+
+/// Maximum number of log entries kept for the TUI command panel.
+const LOG_LIMIT: usize = 40;
 
 /// The TS-570D emulator.
 ///
@@ -23,6 +32,8 @@ pub struct Emulator {
     slave_path: String,
     io: EmulatorIo,
     state: RadioState,
+    /// Rolling command/response log for the TUI command panel.
+    log: VecDeque<String>,
 }
 
 impl Emulator {
@@ -31,7 +42,7 @@ impl Emulator {
     pub fn new() -> Result<Self, EmulatorError> {
         let mut pty = PtyPair::new()?;
         let slave_path = pty.slave_path().to_string();
-        println!("Emulator listening on: {}", slave_path);
+        println!("PTY_SLAVE={}", slave_path);
         // Take the master port out of PtyPair for use by EmulatorIo.
         let master = pty.take_master();
         let io = EmulatorIo::from_port(master);
@@ -41,6 +52,7 @@ impl Emulator {
             slave_path,
             io,
             state,
+            log: VecDeque::new(),
         })
     }
 
@@ -56,6 +68,7 @@ impl Emulator {
             slave_path,
             io,
             state,
+            log: VecDeque::new(),
         }
     }
 
@@ -74,7 +87,7 @@ impl Emulator {
             match self.io.read_commands() {
                 Ok(cmds) => {
                     for cmd in cmds {
-                        let response = commands::handle(&cmd, &mut self.state);
+                        let (response, _changes) = commands::handle(&cmd, &mut self.state);
                         self.io.write_response(&response)?;
                     }
                 }
@@ -90,6 +103,63 @@ impl Emulator {
                         || e.kind() == std::io::ErrorKind::BrokenPipe =>
                 {
                     // Client disconnected — normal shutdown.
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Run the background event loop, emitting NDJSON events to `logger`.
+    ///
+    /// Emits a `startup` event immediately, then a `command` event and
+    /// zero or more `state_change` events for every CAT command received.
+    pub fn run_background(&mut self, mut logger: BackgroundLogger) -> Result<(), EmulatorError> {
+        // Emit startup event.
+        let startup = LogEvent::Startup {
+            ts: now_ms(),
+            port: &self.slave_path.clone(),
+            mode: "background",
+        };
+        logger.log_event(&startup);
+
+        loop {
+            match self.io.read_commands() {
+                Ok(cmds) => {
+                    for cmd in cmds {
+                        let (response, changes) = commands::handle(&cmd, &mut self.state);
+                        self.io.write_response(&response)?;
+
+                        // Log the raw command + response.
+                        let cmd_event = LogEvent::Command {
+                            ts: now_ms(),
+                            raw: &format!("{};", cmd),
+                            response: &response,
+                        };
+                        logger.log_event(&cmd_event);
+
+                        // Log each state change.
+                        for change in &changes {
+                            let sc_event = LogEvent::StateChange {
+                                ts: now_ms(),
+                                field: change.field,
+                                value: &change.value,
+                            };
+                            logger.log_event(&sc_event);
+                        }
+                    }
+                }
+                Err(EmulatorError::Io(ref e))
+                    if e.kind() == std::io::ErrorKind::TimedOut
+                        || e.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    continue;
+                }
+                Err(EmulatorError::Io(ref e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof
+                        || e.kind() == std::io::ErrorKind::BrokenPipe =>
+                {
                     break;
                 }
                 Err(e) => return Err(e),
@@ -121,21 +191,53 @@ impl Emulator {
         result
     }
 
+    /// Append a command/response pair to the rolling TUI log.
+    fn log_entry(&mut self, cmd: &str, response: &str) {
+        self.log.push_back(format!("→ {};", cmd));
+        self.log.push_back(format!("← {}", response));
+        // Keep the log bounded at LOG_LIMIT entries (pairs of 2).
+        while self.log.len() > LOG_LIMIT {
+            self.log.pop_front();
+        }
+    }
+
     fn tui_loop(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<(), EmulatorError> {
         loop {
             // 1. Draw the current state.
-            terminal.draw(|f| tui::draw(f, &self.state))?;
+            let slave_path = self.slave_path.clone();
+            let log_slice: Vec<String> = self.log.iter().cloned().collect();
+            terminal.draw(|f| tui::draw(f, &self.state, &slave_path, &log_slice))?;
 
-            // 2. Read incoming CAT commands (blocking with timeout).
+            // 2. Poll for keyboard events (non-blocking, 10 ms window).
+            if event::poll(Duration::from_millis(10))? {
+                if let Event::Key(key) = event::read()? {
+                    let quit = match key.code {
+                        // q or Q → clean shutdown.
+                        KeyCode::Char('q') | KeyCode::Char('Q') => true,
+                        // Ctrl+C → clean shutdown.
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
+                        _ => false,
+                    };
+                    if quit {
+                        let _ = terminal::disable_raw_mode();
+                        let _ = execute!(stdout(), terminal::LeaveAlternateScreen);
+                        std::process::exit(0);
+                    }
+                }
+            }
+
+            // 3. Read incoming CAT commands (non-blocking poll).
             match self.io.read_commands() {
                 Ok(cmds) => {
-                    // 3. Handle each command, updating state.
+                    // 4. Handle each command, updating state.
                     for cmd in cmds {
-                        let response = commands::handle(&cmd, &mut self.state);
-                        // 4. Write response.
+                        let (response, _changes) = commands::handle(&cmd, &mut self.state);
+                        // 5. Append to command log.
+                        self.log_entry(&cmd, &response);
+                        // 6. Write response.
                         self.io.write_response(&response)?;
                     }
                 }

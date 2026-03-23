@@ -35,7 +35,6 @@ pub struct RadioState {
     pub auto_info: u8,
 
     // --- TUI / front-panel LCD annunciator fields ---
-
     /// Built-in antenna tuner active
     pub antenna_tuner: bool,
     /// Active antenna port: 1 or 2
@@ -86,6 +85,52 @@ pub struct RadioState {
     pub mem_channel: u8,
     /// Currently displayed menu item number (0–99)
     pub menu_number: u8,
+
+    // --- Additional fields for expanded CAT command coverage ---
+    /// Scan active
+    pub scan: bool,
+    /// Microphone gain 0–255
+    pub mic_gain: u8,
+    /// AGC time constant (GT command): 0=off, 1=fast, 2=mid, 3=mid-slow, 4=slow
+    pub agc: u8,
+    /// VOX gain 0–255
+    pub vox_gain: u8,
+    /// VOX delay in milliseconds (0–1000)
+    pub vox_delay: u16,
+    /// RX VFO selection (FR command): 0=VFO-A, 1=VFO-B, 2=memory
+    pub rx_vfo: u8,
+    /// TX VFO selection (FT command): 0=VFO-A, 1=VFO-B
+    pub tx_vfo: u8,
+    /// Power on/off state (PS command)
+    pub power_on: bool,
+    /// CW keyer speed in WPM (KS command)
+    pub keyer_speed: u8,
+    /// CW pitch 0–12 (PT command)
+    pub cw_pitch: u8,
+    /// CW auto zero-beat (CA command)
+    pub cw_auto_zerobeat: bool,
+    /// Antenna tuner mode (AC command): packed 3-digit code
+    pub ac_mode: u8,
+    /// Filter high cutoff (SH command): 0–10
+    pub sh: u8,
+    /// Filter low cutoff (SL command): 0–10
+    pub sl: u8,
+    /// IF shift direction: '+' or '-'
+    pub is_direction: char,
+    /// IF shift frequency offset 0–9999 Hz
+    pub is_freq: u16,
+    /// CTCSS tone number (CN command): 00–39
+    pub ctcss_tone: u8,
+    /// Tone number (TN command): 00–39
+    pub tone_number: u8,
+    /// Beat cancel mode (BC command): 0=off, 1=on, 2=enhanced
+    pub beat_cancel_mode: u8,
+    /// Semi break-in delay in ms (SD command): 0–1000
+    pub semi_break_in_delay: u16,
+    /// RIT offset in Hz (–9999 to +9999)
+    pub rit_offset: i32,
+    /// XIT offset in Hz (–9999 to +9999)
+    pub xit_offset: i32,
 }
 
 impl Default for RadioState {
@@ -134,6 +179,29 @@ impl Default for RadioState {
             ctrl: false,
             mem_channel: 0,
             menu_number: 0,
+
+            scan: false,
+            mic_gain: 50,
+            agc: 4,
+            vox_gain: 128,
+            vox_delay: 250,
+            rx_vfo: 0,
+            tx_vfo: 0,
+            power_on: true,
+            keyer_speed: 20,
+            cw_pitch: 6,
+            cw_auto_zerobeat: false,
+            ac_mode: 0,
+            sh: 10,
+            sl: 0,
+            is_direction: '+',
+            is_freq: 0,
+            ctcss_tone: 0,
+            tone_number: 0,
+            beat_cancel_mode: 0,
+            semi_break_in_delay: 0,
+            rit_offset: 0,
+            xit_offset: 0,
         }
     }
 }

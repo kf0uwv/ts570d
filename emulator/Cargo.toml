@@ -12,8 +12,15 @@ name = "emulator"
 path = "src/main.rs"
 
 [dependencies]
+# Radio command table (approved architecture exception — emulator is test infrastructure)
+radio = { path = "../radio" }
+
 # Error handling
 thiserror = { workspace = true }
+
+# Serialization for JSON logging
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # PTY creation via serialport-rs (TTYPort::pair() creates a pseudo-terminal pair)
 serialport = "4"

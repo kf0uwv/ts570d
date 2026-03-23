@@ -77,7 +77,6 @@ framework = { path = "framework" }
 serial = { path = "serial" }
 radio = { path = "radio" }
 ui = { path = "ui" }
-emulator = { path = "emulator" }
 
 [features]
 default = []

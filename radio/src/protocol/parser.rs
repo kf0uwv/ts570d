@@ -3,8 +3,8 @@
 //! [`ResponseParser`] converts raw semicolon-terminated strings (as returned
 //! by the radio) into typed [`Response`] values.
 
-use framework::radio::{Frequency, Mode, RadioError, RadioResult};
 use crate::protocol::response::{InformationResponse, Response};
+use framework::radio::{Frequency, Mode, RadioError, RadioResult};
 
 /// Parses raw TS-570D response strings into typed [`Response`] values.
 ///
@@ -80,6 +80,8 @@ impl ResponseParser {
             "SD" => Self::parse_four_digit_u16(params).map(Response::SemiBreakInDelay),
             "CA" => Self::parse_one_digit_bool(params).map(Response::CwAutoZerobeat),
             "FS" => Self::parse_one_digit_bool(params).map(Response::FineStep),
+            "SH" => Self::parse_two_digit_u8(params).map(Response::HighCutoff),
+            "SL" => Self::parse_two_digit_u8(params).map(Response::LowCutoff),
             _ => Err(RadioError::InvalidProtocolString(raw.to_string())),
         }
     }
@@ -230,7 +232,10 @@ impl ResponseParser {
         let rit_enabled = &params[20..21] != "0";
         let xit_enabled = &params[21..22] != "0";
 
-        let memory_bank = params[22..24].trim().parse::<u8>().unwrap_or(0);
+        let memory_bank = params[22..24]
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| RadioError::InvalidProtocolString(params[22..24].to_string()))?;
 
         let memory_channel = params[24..26]
             .parse::<u8>()
@@ -1185,6 +1190,93 @@ mod tests {
     fn test_parse_fs_on() {
         let resp = ResponseParser::parse("FS1;").unwrap();
         assert_eq!(resp, Response::FineStep(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // SH — high cutoff filter (F08)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_sh_value() {
+        let resp = ResponseParser::parse("SH05;").unwrap();
+        assert_eq!(resp, Response::HighCutoff(5));
+    }
+
+    #[test]
+    fn test_parse_sh_zero() {
+        let resp = ResponseParser::parse("SH00;").unwrap();
+        assert_eq!(resp, Response::HighCutoff(0));
+    }
+
+    #[test]
+    fn test_parse_sh_max() {
+        let resp = ResponseParser::parse("SH20;").unwrap();
+        assert_eq!(resp, Response::HighCutoff(20));
+    }
+
+    // -----------------------------------------------------------------------
+    // SL — low cutoff filter (F08)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_sl_value() {
+        let resp = ResponseParser::parse("SL03;").unwrap();
+        assert_eq!(resp, Response::LowCutoff(3));
+    }
+
+    #[test]
+    fn test_parse_sl_zero() {
+        let resp = ResponseParser::parse("SL00;").unwrap();
+        assert_eq!(resp, Response::LowCutoff(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // IF — memory_bank error propagation (F05)
+    // -----------------------------------------------------------------------
+
+    /// A memory_bank field containing non-digit characters must return
+    /// `InvalidProtocolString`, not silently produce 0.
+    #[test]
+    fn test_parse_if_invalid_memory_bank_returns_error() {
+        // Build a 37-char IF payload with "XX" in the memory_bank position [22..24].
+        // [0..11]  = "00014230000"
+        // [11..15] = "1000"
+        // [15..20] = "+0000"
+        // [20]     = "0"  rit
+        // [21]     = "0"  xit
+        // [22..24] = "XX" ← invalid memory bank
+        // [24..26] = "01"
+        // [26]     = "0"
+        // [27]     = "2"
+        // [28]     = "0"
+        // [29]     = "0"
+        // [30]     = "0"
+        // [31..33] = "00"
+        // [33..35] = "00"
+        // [35..37] = "00"
+        let if_payload = "00014230000" // 11
+            .to_string()
+            + "1000"   // 4
+            + "+0000"  // 5
+            + "0"      // 1 rit
+            + "0"      // 1 xit
+            + "XX"     // 2 ← invalid memory bank
+            + "01"     // 2 channel
+            + "0"      // 1 tx/rx
+            + "2"      // 1 mode
+            + "0"      // 1 vfo/mem
+            + "0"      // 1 scan
+            + "0"      // 1 split
+            + "00"     // 2 ctcss tone
+            + "00"     // 2 tone number
+            + "00"; // 2 padding
+        let raw = format!("IF{};", if_payload);
+        let result = ResponseParser::parse(&raw);
+        assert!(
+            result.is_err(),
+            "expected error for invalid memory_bank, got {:?}",
+            result
+        );
     }
 
     // -----------------------------------------------------------------------

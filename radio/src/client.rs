@@ -61,6 +61,30 @@ impl<T: Transport> RadioClient<T> {
         self.read_response().await
     }
 
+    /// Send a query command with a parameter prefix and return the radio's response string.
+    ///
+    /// Formats the wire bytes as `"<code><params>;"` and reads back the response up to
+    /// and including the terminating `';'`.  Use this when the command requires a
+    /// selector or sub-address appended directly to the command code before the
+    /// semicolon, e.g. `"SM0;"` or `"RM1;"`.
+    ///
+    /// # Errors
+    ///
+    /// - [`RadioError::UnknownCommand`] — `code` is not in the command table
+    /// - [`RadioError::CommandNotReadable`] — command does not support read
+    /// - [`RadioError::Transport`] — I/O error on the underlying transport
+    pub async fn query_with_param(&mut self, code: &str, params: &str) -> RadioResult<String> {
+        let meta = Self::validate_code(code)?;
+        if !meta.supports_read {
+            return Err(RadioError::CommandNotReadable(code.to_string()));
+        }
+
+        let wire = format!("{}{};", code, params);
+        self.transport.write(wire.as_bytes()).await?;
+        self.transport.flush().await?;
+        self.read_response().await
+    }
+
     /// Send a set command with parameters.
     ///
     /// Formats the wire bytes as `"<code><params>;"` and does not read a
@@ -183,7 +207,7 @@ mod tests {
     // Tests
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_query_fa_formats_correctly() {
         let mut transport = MockTransport::new();
         transport.enqueue_response("FA00014250000;");
@@ -195,7 +219,7 @@ mod tests {
         assert_eq!(response, "FA00014250000;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_fa_formats_correctly() {
         let transport = MockTransport::new();
         let mut client = RadioClient::new(transport);
@@ -205,7 +229,7 @@ mod tests {
         assert_eq!(client.transport.written(), b"FA00014250000;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_query_unknown_command_returns_error() {
         let transport = MockTransport::new();
         let mut client = RadioClient::new(transport);
@@ -219,7 +243,7 @@ mod tests {
         );
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_read_only_command_returns_error() {
         // IF is read-only (supports_write = false)
         let transport = MockTransport::new();
@@ -234,7 +258,7 @@ mod tests {
         );
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_query_write_only_command_returns_error() {
         // TX is write-only (supports_read = false)
         let transport = MockTransport::new();
@@ -249,7 +273,7 @@ mod tests {
         );
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_does_not_read_response() {
         // set() must not call read() — the mock read queue is empty, which
         // would cause a panic or return 0 bytes. If this test passes, set()
@@ -261,7 +285,7 @@ mod tests {
         // No panic — reads were never called.
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_query_set_unknown_command_does_not_write() {
         let transport = MockTransport::new();
         let mut client = RadioClient::new(transport);
@@ -271,6 +295,44 @@ mod tests {
         assert!(
             client.transport.written().is_empty(),
             "nothing should be written for unknown command"
+        );
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_query_with_param_sm0_formats_correctly() {
+        let mut transport = MockTransport::new();
+        transport.enqueue_response("SM00015;");
+
+        let mut client = RadioClient::new(transport);
+        let response = client.query_with_param("SM", "0").await.unwrap();
+
+        assert_eq!(client.transport.written(), b"SM0;");
+        assert_eq!(response, "SM00015;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_query_with_param_rm1_formats_correctly() {
+        let mut transport = MockTransport::new();
+        transport.enqueue_response("RM10023;");
+
+        let mut client = RadioClient::new(transport);
+        let response = client.query_with_param("RM", "1").await.unwrap();
+
+        assert_eq!(client.transport.written(), b"RM1;");
+        assert_eq!(response, "RM10023;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_query_with_param_unknown_command_returns_error() {
+        let transport = MockTransport::new();
+        let mut client = RadioClient::new(transport);
+
+        let result = client.query_with_param("ZZ", "0").await;
+
+        assert!(
+            matches!(result, Err(RadioError::UnknownCommand(ref c)) if c == "ZZ"),
+            "expected UnknownCommand(ZZ), got {:?}",
+            result
         );
     }
 }

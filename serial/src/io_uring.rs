@@ -14,7 +14,7 @@ use monoio::buf::VecBuf;
 use monoio::io::{AsyncReadRent, AsyncWriteRent};
 use monoio::net::UnixStream;
 use nix::sys::termios::{
-    cfmakeraw, cfsetispeed, cfsetospeed, tcgetattr, tcsetattr, tcdrain, BaudRate, ControlFlags,
+    cfmakeraw, cfsetispeed, cfsetospeed, tcdrain, tcgetattr, tcsetattr, BaudRate, ControlFlags,
     InputFlags, SetArg,
 };
 
@@ -22,6 +22,20 @@ use framework::errors::TransportError;
 use framework::transport::Transport;
 
 use crate::SerialError;
+
+/// Timeout for `Transport::read` retries on EAGAIN.
+///
+/// When the serial port has no data (EAGAIN / `WouldBlock`), `Transport::read`
+/// retries the readv operation until data arrives or this deadline elapses.
+/// 2 seconds is generous for TS-570D command-response latency (typically < 100 ms).
+///
+/// In tests, a shorter timeout is used to keep the test suite fast.
+#[cfg(not(test))]
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Short read timeout used in tests to avoid 2-second waits in the test suite.
+#[cfg(test)]
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Serial port configuration
 #[derive(Debug, Clone)]
@@ -52,7 +66,7 @@ impl Default for SerialConfig {
         Self {
             baud_rate: 9600,
             data_bits: 8,
-            stop_bits: 1,
+            stop_bits: 2,
             parity: Parity::None,
             flow_control: FlowControl::None,
         }
@@ -206,7 +220,7 @@ impl SerialPort {
     /// Configures the port for raw mode according to all fields of `config`:
     /// baud rate, data bits (5–8), stop bits (1–2), parity, and flow control.
     ///
-    /// `SerialConfig::default()` gives 9600 baud, 8N1, no flow control.
+    /// `SerialConfig::default()` gives 9600 baud, 8N2, no flow control (matching the Kenwood TS-570D).
     pub fn open(path: &str, config: SerialConfig) -> crate::SerialResult<Self> {
         // Open the device:
         // O_NOCTTY: don't become controlling terminal
@@ -277,31 +291,46 @@ impl Transport for SerialPort {
     /// Uses `IORING_OP_READV` (via `readv`) which works on any fd type,
     /// unlike `IORING_OP_RECV` which is socket-only.
     ///
-    /// ## Non-blocking behaviour
+    /// ## Non-blocking behaviour and retries
     ///
     /// The fd is opened with `O_NONBLOCK`.  When no data is available, io_uring
-    /// completes the `readv` immediately with `EAGAIN`, which surfaces as
-    /// `ErrorKind::WouldBlock`.  This method maps that to `Ok(0)` — the standard
-    /// non-blocking read contract meaning "no data yet, try again later".
+    /// completes the `readv` immediately with `EAGAIN` (`ErrorKind::WouldBlock`).
+    /// This method retries internally until either data arrives or the read
+    /// timeout (`READ_TIMEOUT`) elapses, at which point it returns
+    /// `Err(TransportError::ReadTimeout)`.
+    ///
+    /// ## Contract
+    ///
+    /// On success, the return value is always `> 0`.  Callers can safely treat
+    /// `Ok(0)` as impossible and `n == 0` as an EOF sentinel without needing to
+    /// handle the EAGAIN case themselves.
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        // Build a single-segment VecBuf for readv; initialize with zeros so iov_len is correct
-        let read_buf: VecBuf = vec![vec![0u8; buf.len()]].into();
-        let (result, read_buf) = self.stream.readv(read_buf).await;
-        match result {
-            Ok(n) => {
-                // Extract the raw buffers back and copy data to caller
-                let vecs: Vec<Vec<u8>> = read_buf.into();
-                if n > 0 {
-                    buf[..n].copy_from_slice(&vecs[0][..n]);
+        let deadline = std::time::Instant::now() + READ_TIMEOUT;
+        loop {
+            // Build a single-segment VecBuf for readv; initialize with zeros so iov_len is correct
+            let read_buf: VecBuf = vec![vec![0u8; buf.len()]].into();
+            let (result, read_buf) = self.stream.readv(read_buf).await;
+            match result {
+                Ok(n) => {
+                    // Extract the raw buffers back and copy data to caller
+                    let vecs: Vec<Vec<u8>> = read_buf.into();
+                    if n > 0 {
+                        buf[..n].copy_from_slice(&vecs[0][..n]);
+                    }
+                    return Ok(n);
                 }
-                Ok(n)
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    // EAGAIN: no data yet. Check deadline before retrying.
+                    if std::time::Instant::now() >= deadline {
+                        return Err(TransportError::ReadTimeout);
+                    }
+                    // Re-submit readv to io_uring. Each `.await` is a cooperative
+                    // yield point — the runtime processes other completions between
+                    // retries, so this is not a true busy-spin even though it loops
+                    // without an explicit sleep.
+                }
+                Err(e) => return Err(TransportError::Io(e)),
             }
-            Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                // EAGAIN: fd is non-blocking and no data is available yet.
-                // Return 0 — caller should retry.
-                Ok(0)
-            }
-            Err(e) => Err(TransportError::Io(e)),
         }
     }
 
@@ -375,8 +404,8 @@ mod tests {
         let slave = pair.slave_path().to_string();
 
         make_runtime().block_on(async {
-            let port = SerialPort::open(&slave, SerialConfig::default())
-                .expect("SerialPort::open failed");
+            let port =
+                SerialPort::open(&slave, SerialConfig::default()).expect("SerialPort::open failed");
             assert_eq!(port.path(), slave);
         });
     }
@@ -392,8 +421,8 @@ mod tests {
         write_to_master(pair.master_raw_fd(), expected);
 
         let result = make_runtime().block_on(async {
-            let mut port = SerialPort::open(&slave, SerialConfig::default())
-                .expect("SerialPort::open failed");
+            let mut port =
+                SerialPort::open(&slave, SerialConfig::default()).expect("SerialPort::open failed");
             let mut buf = vec![0u8; 64];
             let n = port.read(&mut buf).await.expect("Transport::read failed");
             buf.truncate(n);
@@ -412,8 +441,8 @@ mod tests {
 
         // Write from SerialPort (slave side) via async Transport::write
         make_runtime().block_on(async {
-            let mut port = SerialPort::open(&slave, SerialConfig::default())
-                .expect("SerialPort::open failed");
+            let mut port =
+                SerialPort::open(&slave, SerialConfig::default()).expect("SerialPort::open failed");
             let n = port.write(expected).await.expect("Transport::write failed");
             assert_eq!(n, expected.len());
         });
@@ -449,6 +478,66 @@ mod tests {
         );
     }
 
+    /// `SerialConfig::default()` must set stop_bits = 2 to match the Kenwood TS-570D (8N2).
+    #[test]
+    fn test_default_config_stop_bits_is_2() {
+        let config = SerialConfig::default();
+        assert_eq!(
+            config.stop_bits, 2,
+            "SerialConfig::default() must use 2 stop bits (8N2) for TS-570D compatibility"
+        );
+    }
+
+    /// `Transport::read` waits for data and returns it once available.
+    ///
+    /// This test verifies that `Transport::read` does not return `Ok(0)` when no
+    /// data is immediately available.  Instead, it should block (retrying internally)
+    /// until data arrives.  A background thread writes to the master side after a
+    /// short delay; the async read must successfully receive that data.
+    ///
+    /// On PTY devices, io_uring's `IORING_OP_READV` blocks at the kernel level until
+    /// data arrives (rather than returning EAGAIN).  On real O_NONBLOCK serial ports,
+    /// EAGAIN is returned and the retry loop handles it.  In both cases the caller
+    /// receives `Ok(n > 0)` when data arrives — never `Ok(0)`.
+    #[test]
+    fn test_read_blocks_until_data_arrives() {
+        let pair = PtyPair::new().expect("PTY creation failed");
+        let slave = pair.slave_path().to_string();
+        let master_fd = pair.master_raw_fd();
+
+        // Write to the master after a short delay from a background thread.
+        // The async read on the slave must wait and then return the data.
+        let expected = b"FA00014000000;";
+        let expected_clone: &'static [u8] = expected;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            unsafe {
+                libc::write(
+                    master_fd,
+                    expected_clone.as_ptr() as *const libc::c_void,
+                    expected_clone.len(),
+                )
+            };
+        });
+
+        // Keep PtyPair alive to hold the master fd open.
+        let _pair = pair;
+
+        let result = make_runtime().block_on(async {
+            let mut port =
+                SerialPort::open(&slave, SerialConfig::default()).expect("SerialPort::open failed");
+            let mut buf = vec![0u8; 64];
+            let n = port.read(&mut buf).await.expect("Transport::read failed");
+            buf.truncate(n);
+            buf
+        });
+
+        assert_eq!(
+            result, expected,
+            "read should return data written by the background thread"
+        );
+    }
+
     /// Full-duplex roundtrip test: write from slave via Transport, read from master;
     /// then write from master, read from slave via Transport.
     #[test]
@@ -460,13 +549,17 @@ mod tests {
         // --- slave → master direction ---
         let slave_to_master_msg = b"FA;";
         make_runtime().block_on(async {
-            let mut port = SerialPort::open(&slave, SerialConfig::default())
-                .expect("SerialPort::open failed");
+            let mut port =
+                SerialPort::open(&slave, SerialConfig::default()).expect("SerialPort::open failed");
             let n = port
                 .write(slave_to_master_msg)
                 .await
                 .expect("Transport::write failed");
-            assert_eq!(n, slave_to_master_msg.len(), "write returned wrong byte count");
+            assert_eq!(
+                n,
+                slave_to_master_msg.len(),
+                "write returned wrong byte count"
+            );
         });
         let received_on_master = read_from_master(master_fd, 64);
         assert_eq!(
@@ -478,8 +571,8 @@ mod tests {
         let master_to_slave_msg = b"FA00014000000;";
         write_to_master(master_fd, master_to_slave_msg);
         let received_on_slave = make_runtime().block_on(async {
-            let mut port = SerialPort::open(&slave, SerialConfig::default())
-                .expect("SerialPort::open failed");
+            let mut port =
+                SerialPort::open(&slave, SerialConfig::default()).expect("SerialPort::open failed");
             let mut buf = vec![0u8; 64];
             let n = port.read(&mut buf).await.expect("Transport::read failed");
             buf.truncate(n);

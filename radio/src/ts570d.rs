@@ -116,10 +116,9 @@ impl<T: Transport> Ts570d<T> {
     ///
     /// Returns the raw 0–30 reading from the `SM0` response.
     pub async fn get_smeter(&mut self) -> RadioResult<u16> {
-        // The SM command takes a 1-digit selector; querying "SM" sends "SM;"
-        // and the radio responds "SM0XXXX;".  The parser expects a 5-char
-        // params string (selector + 4-digit reading).
-        let raw = self.client.query("SM").await?;
+        // The SM command requires a 1-digit main/sub selector; send "SM0;"
+        // to query the main receiver.  The radio responds "SM0XXXX;".
+        let raw = self.client.query_with_param("SM", "0").await?;
         match ResponseParser::parse(&raw)? {
             Response::SMeter(_sel, reading) => Ok(reading),
             other => Err(RadioError::InvalidProtocolString(format!(
@@ -754,12 +753,13 @@ impl<T: Transport> Ts570d<T> {
     /// Get high cutoff filter index (SH, 00–20).
     pub async fn get_high_cutoff(&mut self) -> RadioResult<u8> {
         let raw = self.client.query("SH").await?;
-        // SH returns two digits
-        raw.trim_end_matches(';')
-            .trim_start_matches("SH")
-            .trim()
-            .parse::<u8>()
-            .map_err(|_| RadioError::InvalidProtocolString(raw.clone()))
+        match ResponseParser::parse(&raw)? {
+            Response::HighCutoff(v) => Ok(v),
+            other => Err(RadioError::InvalidProtocolString(format!(
+                "expected HighCutoff, got {:?}",
+                other
+            ))),
+        }
     }
 
     /// Set high cutoff filter index (00–20).
@@ -770,11 +770,13 @@ impl<T: Transport> Ts570d<T> {
     /// Get low cutoff filter index (SL, 00–20).
     pub async fn get_low_cutoff(&mut self) -> RadioResult<u8> {
         let raw = self.client.query("SL").await?;
-        raw.trim_end_matches(';')
-            .trim_start_matches("SL")
-            .trim()
-            .parse::<u8>()
-            .map_err(|_| RadioError::InvalidProtocolString(raw.clone()))
+        match ResponseParser::parse(&raw)? {
+            Response::LowCutoff(v) => Ok(v),
+            other => Err(RadioError::InvalidProtocolString(format!(
+                "expected LowCutoff, got {:?}",
+                other
+            ))),
+        }
     }
 
     /// Set low cutoff filter index (00–20).
@@ -922,7 +924,10 @@ impl<T: Transport> Ts570d<T> {
 
     /// Read meter value (1=SWR, 2=COMP, 3=ALC).
     pub async fn get_meter(&mut self, meter: u8) -> RadioResult<u16> {
-        let raw = self.client.query(&format!("RM{}", meter)).await?;
+        let raw = self
+            .client
+            .query_with_param("RM", &format!("{}", meter))
+            .await?;
         match ResponseParser::parse(&raw)? {
             Response::Meter(_meter_type, value) => Ok(value),
             other => Err(RadioError::InvalidProtocolString(format!(
@@ -1509,21 +1514,21 @@ mod tests {
     // get_vfo_a
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_vfo_a_query_sent() {
         let mut radio = make_radio("FA00014250000;");
         let _ = radio.get_vfo_a().await.unwrap();
         assert_eq!(radio.client.transport.written(), b"FA;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_vfo_a_frequency_parsed() {
         let mut radio = make_radio("FA00014250000;");
         let freq = radio.get_vfo_a().await.unwrap();
         assert_eq!(freq, Frequency::new(14_250_000).unwrap());
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_vfo_a_frequency_14mhz() {
         let mut radio = make_radio("FA00014100000;");
         let freq = radio.get_vfo_a().await.unwrap();
@@ -1534,7 +1539,7 @@ mod tests {
     // set_vfo_a
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_vfo_a_command_formatted() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1543,7 +1548,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "FA00014250000;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_vfo_a_zero_padded() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1556,14 +1561,14 @@ mod tests {
     // get_vfo_b
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_vfo_b_query_sent() {
         let mut radio = make_radio("FB00007100000;");
         let _ = radio.get_vfo_b().await.unwrap();
         assert_eq!(radio.client.transport.written(), b"FB;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_vfo_b_frequency_parsed() {
         let mut radio = make_radio("FB00007100000;");
         let freq = radio.get_vfo_b().await.unwrap();
@@ -1574,7 +1579,7 @@ mod tests {
     // set_vfo_b
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_vfo_b_command_formatted() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1587,28 +1592,28 @@ mod tests {
     // get_mode
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_mode_query_sent() {
         let mut radio = make_radio("MD2;");
         let _ = radio.get_mode().await.unwrap();
         assert_eq!(radio.client.transport.written(), b"MD;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_mode_usb_parsed() {
         let mut radio = make_radio("MD2;");
         let mode = radio.get_mode().await.unwrap();
         assert_eq!(mode, Mode::Usb);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_mode_lsb_parsed() {
         let mut radio = make_radio("MD1;");
         let mode = radio.get_mode().await.unwrap();
         assert_eq!(mode, Mode::Lsb);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_mode_cw_parsed() {
         let mut radio = make_radio("MD3;");
         let mode = radio.get_mode().await.unwrap();
@@ -1619,7 +1624,7 @@ mod tests {
     // set_mode
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_mode_usb_encoded() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1627,7 +1632,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "MD2;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_mode_lsb_encoded() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1635,7 +1640,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "MD1;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_mode_cw_reverse_encoded() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1643,7 +1648,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "MD7;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_mode_fsk_reverse_encoded() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1655,28 +1660,29 @@ mod tests {
     // get_smeter
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_smeter_query_sent() {
         let mut radio = make_radio("SM00015;");
         let _ = radio.get_smeter().await.unwrap();
-        assert_eq!(radio.client.transport.written(), b"SM;");
+        // Must send "SM0;" — the TS-570D requires the main receiver selector digit.
+        assert_eq!(radio.client.transport.written(), b"SM0;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_smeter_value_parsed() {
         let mut radio = make_radio("SM00015;");
         let reading = radio.get_smeter().await.unwrap();
         assert_eq!(reading, 15);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_smeter_zero() {
         let mut radio = make_radio("SM00000;");
         let reading = radio.get_smeter().await.unwrap();
         assert_eq!(reading, 0);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_smeter_max() {
         let mut radio = make_radio("SM00030;");
         let reading = radio.get_smeter().await.unwrap();
@@ -1687,7 +1693,7 @@ mod tests {
     // transmit / receive
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_transmit_sends_tx() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1695,7 +1701,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "TX;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_receive_sends_rx() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1707,21 +1713,21 @@ mod tests {
     // get_id
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_id_query_sent() {
         let mut radio = make_radio("ID019;");
         let _ = radio.get_id().await.unwrap();
         assert_eq!(radio.client.transport.written(), b"ID;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_id_ts570s_parsed() {
         let mut radio = make_radio("ID019;");
         let id = radio.get_id().await.unwrap();
         assert_eq!(id, 19);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_id_ts570d_parsed() {
         let mut radio = make_radio("ID018;");
         let id = radio.get_id().await.unwrap();
@@ -1732,7 +1738,7 @@ mod tests {
     // get_information
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_information_query_sent() {
         // Build a minimal valid IF string (37-char payload after "IF", before ";")
         // payload = "000142300001000+000000000102000000000" (37 chars)
@@ -1742,7 +1748,7 @@ mod tests {
         assert_eq!(radio.client.transport.written(), b"IF;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_information_frequency_parsed() {
         // 37-char payload after "IF":
         //   [0..11]  "00014230000"  freq = 14_230_000
@@ -1773,21 +1779,21 @@ mod tests {
     // get_af_gain / set_af_gain
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_af_gain_query_sent() {
         let mut radio = make_radio("AG0128;");
         let _ = radio.get_af_gain().await.unwrap();
         assert_eq!(radio.client.transport.written(), b"AG;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_af_gain_value_parsed() {
         let mut radio = make_radio("AG0128;");
         let level = radio.get_af_gain().await.unwrap();
         assert_eq!(level, 128);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_af_gain_formatted() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1795,7 +1801,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "AG0200;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_af_gain_zero_padded() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1807,21 +1813,21 @@ mod tests {
     // get_rf_gain / set_rf_gain
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_rf_gain_query_sent() {
         let mut radio = make_radio("RG200;");
         let _ = radio.get_rf_gain().await.unwrap();
         assert_eq!(radio.client.transport.written(), b"RG;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_rf_gain_value_parsed() {
         let mut radio = make_radio("RG200;");
         let level = radio.get_rf_gain().await.unwrap();
         assert_eq!(level, 200);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_rf_gain_formatted() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1829,7 +1835,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "RG255;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_rf_gain_zero_padded() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1841,21 +1847,21 @@ mod tests {
     // get_power / set_power
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_power_query_sent() {
         let mut radio = make_radio("PC100;");
         let _ = radio.get_power().await.unwrap();
         assert_eq!(radio.client.transport.written(), b"PC;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_power_value_parsed() {
         let mut radio = make_radio("PC100;");
         let watts = radio.get_power().await.unwrap();
         assert_eq!(watts, 100);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_power_formatted() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1863,7 +1869,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "PC100;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_power_min_zero_padded() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1875,7 +1881,7 @@ mod tests {
     // Error propagation
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_vfo_a_bad_response_returns_error() {
         // Parser will return an error for a response with the wrong code
         let mut radio = make_radio("FB00014250000;");
@@ -1885,7 +1891,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_mode_bad_response_returns_error() {
         // MD8 is an invalid mode — parser returns an error
         let mut radio = make_radio("MD8;");
@@ -1897,21 +1903,21 @@ mod tests {
     // get_noise_blanker / set_noise_blanker
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_noise_blanker_on() {
         let mut radio = make_radio("NB1;");
         let v = radio.get_noise_blanker().await.unwrap();
         assert!(v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_noise_blanker_off() {
         let mut radio = make_radio("NB0;");
         let v = radio.get_noise_blanker().await.unwrap();
         assert!(!v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_noise_blanker_on() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1919,7 +1925,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "NB1;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_noise_blanker_off() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1931,14 +1937,14 @@ mod tests {
     // get_noise_reduction / set_noise_reduction
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_noise_reduction_nr2() {
         let mut radio = make_radio("NR2;");
         let v = radio.get_noise_reduction().await.unwrap();
         assert_eq!(v, 2);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_noise_reduction() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1950,14 +1956,14 @@ mod tests {
     // get_preamp / set_preamp
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_preamp_on() {
         let mut radio = make_radio("PA1;");
         let v = radio.get_preamp().await.unwrap();
         assert!(v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_preamp_on() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1969,21 +1975,21 @@ mod tests {
     // get_attenuator / set_attenuator
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_attenuator_off() {
         let mut radio = make_radio("RA00;");
         let v = radio.get_attenuator().await.unwrap();
         assert!(!v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_attenuator_on() {
         let mut radio = make_radio("RA01;");
         let v = radio.get_attenuator().await.unwrap();
         assert!(v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_attenuator_on() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -1991,7 +1997,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "RA01;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_attenuator_off() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2003,14 +2009,14 @@ mod tests {
     // get_squelch / set_squelch
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_squelch() {
         let mut radio = make_radio("SQ100;");
         let v = radio.get_squelch().await.unwrap();
         assert_eq!(v, 100);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_squelch() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2022,14 +2028,14 @@ mod tests {
     // get_mic_gain / set_mic_gain
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_mic_gain() {
         let mut radio = make_radio("MG050;");
         let v = radio.get_mic_gain().await.unwrap();
         assert_eq!(v, 50);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_mic_gain() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2041,14 +2047,14 @@ mod tests {
     // get_agc / set_agc
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_agc_fast() {
         let mut radio = make_radio("GT002;");
         let v = radio.get_agc().await.unwrap();
         assert_eq!(v, 2);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_agc() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2060,14 +2066,14 @@ mod tests {
     // get_rit / set_rit / clear_rit / rit_up / rit_down
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_rit_on() {
         let mut radio = make_radio("RT1;");
         let v = radio.get_rit().await.unwrap();
         assert!(v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_rit_on() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2075,7 +2081,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "RT1;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_clear_rit() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2083,7 +2089,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "RC;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_rit_up() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2091,7 +2097,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "RU;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_rit_down() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2103,14 +2109,14 @@ mod tests {
     // get_xit / set_xit
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_xit_on() {
         let mut radio = make_radio("XT1;");
         let v = radio.get_xit().await.unwrap();
         assert!(v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_xit_on() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2122,14 +2128,14 @@ mod tests {
     // get_scan / set_scan
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_scan_off() {
         let mut radio = make_radio("SC0;");
         let v = radio.get_scan().await.unwrap();
         assert!(!v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_scan_on() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2141,14 +2147,14 @@ mod tests {
     // get_vox / set_vox / get_vox_gain / set_vox_gain / get_vox_delay / set_vox_delay
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_vox_on() {
         let mut radio = make_radio("VX1;");
         let v = radio.get_vox().await.unwrap();
         assert!(v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_vox_on() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2156,14 +2162,14 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "VX1;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_vox_gain() {
         let mut radio = make_radio("VG005;");
         let v = radio.get_vox_gain().await.unwrap();
         assert_eq!(v, 5);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_vox_gain() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2171,14 +2177,14 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "VG007;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_vox_delay() {
         let mut radio = make_radio("VD1500;");
         let v = radio.get_vox_delay().await.unwrap();
         assert_eq!(v, 1500);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_vox_delay() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2190,14 +2196,14 @@ mod tests {
     // get_rx_vfo / set_rx_vfo / get_tx_vfo / set_tx_vfo
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_rx_vfo_a() {
         let mut radio = make_radio("FR0;");
         let v = radio.get_rx_vfo().await.unwrap();
         assert_eq!(v, 0);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_rx_vfo_b() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2205,14 +2211,14 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "FR1;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_tx_vfo_a() {
         let mut radio = make_radio("FT0;");
         let v = radio.get_tx_vfo().await.unwrap();
         assert_eq!(v, 0);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_tx_vfo_b() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2224,14 +2230,14 @@ mod tests {
     // get_frequency_lock / set_frequency_lock
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_frequency_lock_on() {
         let mut radio = make_radio("LK1;");
         let v = radio.get_frequency_lock().await.unwrap();
         assert!(v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_frequency_lock_on() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2243,14 +2249,14 @@ mod tests {
     // get_power_on / set_power_on
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_power_on_true() {
         let mut radio = make_radio("PS1;");
         let v = radio.get_power_on().await.unwrap();
         assert!(v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_power_on_off() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2262,14 +2268,14 @@ mod tests {
     // is_busy
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_is_busy_true() {
         let mut radio = make_radio("BY1;");
         let v = radio.is_busy().await.unwrap();
         assert!(v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_is_busy_false() {
         let mut radio = make_radio("BY0;");
         let v = radio.is_busy().await.unwrap();
@@ -2280,14 +2286,14 @@ mod tests {
     // get_speech_processor / set_speech_processor
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_speech_processor_on() {
         let mut radio = make_radio("PR1;");
         let v = radio.get_speech_processor().await.unwrap();
         assert!(v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_speech_processor_on() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2299,14 +2305,14 @@ mod tests {
     // get_memory_channel / set_memory_channel
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_memory_channel() {
         let mut radio = make_radio("MC05;");
         let v = radio.get_memory_channel().await.unwrap();
         assert_eq!(v, 5);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_memory_channel() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2318,14 +2324,14 @@ mod tests {
     // get_antenna / set_antenna
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_antenna_1() {
         let mut radio = make_radio("AN1;");
         let v = radio.get_antenna().await.unwrap();
         assert_eq!(v, 1);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_antenna_2() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2337,7 +2343,7 @@ mod tests {
     // CW keyer inherent methods
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_send_cw() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2345,14 +2351,14 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "KYCQ;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_keyer_speed() {
         let mut radio = make_radio("KS025;");
         let v = radio.get_keyer_speed().await.unwrap();
         assert_eq!(v, 25);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_keyer_speed() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2360,14 +2366,14 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "KS030;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_cw_pitch() {
         let mut radio = make_radio("PT06;");
         let v = radio.get_cw_pitch().await.unwrap();
         assert_eq!(v, 6);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_cw_pitch() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2379,7 +2385,7 @@ mod tests {
     // Voice / reset
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_voice_recall() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2387,7 +2393,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "VR1;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_reset_partial() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2395,7 +2401,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "SR1;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_reset_full() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2407,14 +2413,14 @@ mod tests {
     // Semi break-in delay
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_semi_break_in_delay() {
         let mut radio = make_radio("SD0200;");
         let v = radio.get_semi_break_in_delay().await.unwrap();
         assert_eq!(v, 200);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_semi_break_in_delay() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2426,14 +2432,14 @@ mod tests {
     // CW auto zero-beat
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_cw_auto_zerobeat_on() {
         let mut radio = make_radio("CA1;");
         let v = radio.get_cw_auto_zerobeat().await.unwrap();
         assert!(v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_cw_auto_zerobeat_on() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2445,14 +2451,14 @@ mod tests {
     // Fine step
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_fine_step_on() {
         let mut radio = make_radio("FS1;");
         let v = radio.get_fine_step().await.unwrap();
         assert!(v);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_fine_step_on() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2464,14 +2470,14 @@ mod tests {
     // Beat cancel
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_beat_cancel_off() {
         let mut radio = make_radio("BC0;");
         let v = radio.get_beat_cancel().await.unwrap();
         assert_eq!(v, 0);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_beat_cancel_enhanced() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2483,7 +2489,7 @@ mod tests {
     // IF shift
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_get_if_shift() {
         let mut radio = make_radio("IS+0500;");
         let (dir, freq) = radio.get_if_shift().await.unwrap();
@@ -2491,7 +2497,7 @@ mod tests {
         assert_eq!(freq, 500);
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_if_shift() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2503,7 +2509,7 @@ mod tests {
     // MIC up/down
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_mic_up() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2511,7 +2517,7 @@ mod tests {
         assert_eq!(radio.client.transport.written_str(), "UP;");
     }
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_mic_down() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
@@ -2523,11 +2529,110 @@ mod tests {
     // Auto info
     // -----------------------------------------------------------------------
 
-    #[monoio::test]
+    #[monoio::test(driver = "legacy")]
     async fn test_set_auto_info() {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
         radio.set_auto_info(2).await.unwrap();
         assert_eq!(radio.client.transport.written_str(), "AI2;");
+    }
+
+    // -----------------------------------------------------------------------
+    // get_high_cutoff / set_high_cutoff (F08)
+    // -----------------------------------------------------------------------
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_high_cutoff_query_sent() {
+        let mut radio = make_radio("SH05;");
+        let _ = radio.get_high_cutoff().await.unwrap();
+        assert_eq!(radio.client.transport.written(), b"SH;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_high_cutoff_value_parsed() {
+        let mut radio = make_radio("SH05;");
+        let v = radio.get_high_cutoff().await.unwrap();
+        assert_eq!(v, 5);
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_high_cutoff_max() {
+        let mut radio = make_radio("SH20;");
+        let v = radio.get_high_cutoff().await.unwrap();
+        assert_eq!(v, 20);
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_set_high_cutoff() {
+        let transport = FakeTransport::new();
+        let mut radio = Ts570d::new(transport);
+        radio.set_high_cutoff(10).await.unwrap();
+        assert_eq!(radio.client.transport.written_str(), "SH10;");
+    }
+
+    // -----------------------------------------------------------------------
+    // get_low_cutoff / set_low_cutoff (F08)
+    // -----------------------------------------------------------------------
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_low_cutoff_query_sent() {
+        let mut radio = make_radio("SL03;");
+        let _ = radio.get_low_cutoff().await.unwrap();
+        assert_eq!(radio.client.transport.written(), b"SL;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_low_cutoff_value_parsed() {
+        let mut radio = make_radio("SL03;");
+        let v = radio.get_low_cutoff().await.unwrap();
+        assert_eq!(v, 3);
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_set_low_cutoff() {
+        let transport = FakeTransport::new();
+        let mut radio = Ts570d::new(transport);
+        radio.set_low_cutoff(7).await.unwrap();
+        assert_eq!(radio.client.transport.written_str(), "SL07;");
+    }
+
+    // -----------------------------------------------------------------------
+    // get_meter (F01)
+    // -----------------------------------------------------------------------
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_meter_swr_query_sent() {
+        let mut radio = make_radio("RM10023;");
+        let _ = radio.get_meter(1).await.unwrap();
+        // Must send "RM1;" — the meter type selector belongs in the wire bytes before ';'
+        assert_eq!(radio.client.transport.written(), b"RM1;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_meter_swr_value_parsed() {
+        let mut radio = make_radio("RM10023;");
+        let v = radio.get_meter(1).await.unwrap();
+        assert_eq!(v, 23);
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_meter_comp_query_sent() {
+        let mut radio = make_radio("RM20010;");
+        let _ = radio.get_meter(2).await.unwrap();
+        assert_eq!(radio.client.transport.written(), b"RM2;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_meter_alc_query_sent() {
+        let mut radio = make_radio("RM30005;");
+        let _ = radio.get_meter(3).await.unwrap();
+        assert_eq!(radio.client.transport.written(), b"RM3;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_meter_zero_value() {
+        let mut radio = make_radio("RM10000;");
+        let v = radio.get_meter(1).await.unwrap();
+        assert_eq!(v, 0);
     }
 }
