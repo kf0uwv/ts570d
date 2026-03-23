@@ -60,6 +60,9 @@ pub struct RadioDisplay {
     pub ctcss: bool,
     pub freq_lock: bool,
     pub fine_step: bool,
+
+    // --- Poll errors (from most recent poll cycle) ---
+    pub poll_errors: Vec<String>,
 }
 
 impl Default for RadioDisplay {
@@ -94,6 +97,7 @@ impl Default for RadioDisplay {
             ctcss: false,
             freq_lock: false,
             fine_step: false,
+            poll_errors: Vec::new(),
         }
     }
 }

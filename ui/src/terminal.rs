@@ -10,7 +10,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::{
     control::{handle_key, ControlState, ExecuteAction, KeyResult},
-    layout::{draw_control_panel, draw_header, draw_ui, split_areas},
+    layout::{draw_control_panel, draw_errors, draw_header, draw_ui, split_areas},
     RadioDisplay, UiError, UiResult,
 };
 
@@ -40,9 +40,10 @@ pub(crate) fn draw_frame(
 ) -> UiResult<()> {
     terminal.draw(|f| {
         let area = f.size();
-        let (header_area, status_area, ctrl_area) = split_areas(area);
+        let (header_area, status_area, errors_area, ctrl_area) = split_areas(area);
         draw_header(f, header_area);
         draw_ui(f, status_area, state);
+        draw_errors(f, errors_area, state);
         draw_control_panel(f, ctrl_area, control);
     })?;
     Ok(())
@@ -60,77 +61,102 @@ pub async fn run<R: Radio>(radio: &mut R) -> UiResult<()> {
 
 /// Poll all radio state getters and update `state` in place.
 ///
-/// Each getter failure is silently ignored — the previous value is preserved.
+/// `state.poll_errors` is cleared at the start of each call and re-populated
+/// with any errors from this cycle (capped at 5). Previous values are
+/// preserved when a getter fails.
 /// This is called at the top of every outer loop iteration and also immediately
 /// after a successful command execution so the UI reflects the new state.
 async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
-    if let Ok(info) = radio.get_information().await {
-        state.vfo_a_hz = info.frequency.hz();
-        state.mode = info.mode.name().to_string();
-        state.tx = info.tx_rx;
-        state.rit = info.rit_enabled;
-        state.xit = info.xit_enabled;
-        state.rit_xit_offset_hz = info.rit_xit_offset;
-        state.split = info.split;
-        state.scan = info.scan_status != 0;
-        state.memory_channel = info.memory_channel;
-        state.memory_mode = info.vfo_memory != 0;
-        state.ctcss = info.ctcss_tone != 0;
+    state.poll_errors.clear();
+
+    macro_rules! poll {
+        ($label:expr, $expr:expr, $ok:expr) => {
+            match $expr.await {
+                Ok(v) => $ok(v),
+                Err(e) => {
+                    if state.poll_errors.len() < 5 {
+                        state.poll_errors.push(format!("{}: {}", $label, e));
+                    }
+                }
+            }
+        };
     }
-    if let Ok(freq) = radio.get_vfo_b().await {
-        state.vfo_b_hz = freq.hz();
-    }
-    if let Ok(s) = radio.get_smeter().await {
+
+    poll!(
+        "IF",
+        radio.get_information(),
+        |info: framework::radio::InformationResponse| {
+            state.vfo_a_hz = info.frequency.hz();
+            state.mode = info.mode.name().to_string();
+            state.tx = info.tx_rx;
+            state.rit = info.rit_enabled;
+            state.xit = info.xit_enabled;
+            state.rit_xit_offset_hz = info.rit_xit_offset;
+            state.split = info.split;
+            state.scan = info.scan_status != 0;
+            state.memory_channel = info.memory_channel;
+            state.memory_mode = info.vfo_memory != 0;
+            state.ctcss = info.ctcss_tone != 0;
+        }
+    );
+    poll!(
+        "VFO-B",
+        radio.get_vfo_b(),
+        |freq: framework::radio::Frequency| {
+            state.vfo_b_hz = freq.hz();
+        }
+    );
+    poll!("SM", radio.get_smeter(), |s: u16| {
         state.smeter = s;
-    }
-    if let Ok(v) = radio.get_af_gain().await {
+    });
+    poll!("AF", radio.get_af_gain(), |v: u8| {
         state.af_gain = v;
-    }
-    if let Ok(v) = radio.get_rf_gain().await {
+    });
+    poll!("RF", radio.get_rf_gain(), |v: u8| {
         state.rf_gain = v;
-    }
-    if let Ok(v) = radio.get_squelch().await {
+    });
+    poll!("SQ", radio.get_squelch(), |v: u8| {
         state.squelch = v;
-    }
-    if let Ok(v) = radio.get_mic_gain().await {
+    });
+    poll!("MG", radio.get_mic_gain(), |v: u8| {
         state.mic_gain = v;
-    }
-    if let Ok(v) = radio.get_power().await {
+    });
+    poll!("PC", radio.get_power(), |v: u8| {
         state.power_pct = v;
-    }
-    if let Ok(v) = radio.get_agc().await {
+    });
+    poll!("GT", radio.get_agc(), |v: u8| {
         state.agc = v;
-    }
-    if let Ok(v) = radio.get_noise_blanker().await {
+    });
+    poll!("NB", radio.get_noise_blanker(), |v: bool| {
         state.noise_blanker = v;
-    }
-    if let Ok(v) = radio.get_noise_reduction().await {
+    });
+    poll!("NR", radio.get_noise_reduction(), |v: u8| {
         state.noise_reduction = v;
-    }
-    if let Ok(v) = radio.get_preamp().await {
+    });
+    poll!("PA", radio.get_preamp(), |v: bool| {
         state.preamp = v;
-    }
-    if let Ok(v) = radio.get_attenuator().await {
+    });
+    poll!("RA", radio.get_attenuator(), |v: bool| {
         state.attenuator = v;
-    }
-    if let Ok(v) = radio.get_speech_processor().await {
+    });
+    poll!("PR", radio.get_speech_processor(), |v: bool| {
         state.speech_processor = v;
-    }
-    if let Ok(v) = radio.get_beat_cancel().await {
+    });
+    poll!("BC", radio.get_beat_cancel(), |v: u8| {
         state.beat_cancel = v;
-    }
-    if let Ok(v) = radio.get_vox().await {
+    });
+    poll!("VX", radio.get_vox(), |v: bool| {
         state.vox = v;
-    }
-    if let Ok(v) = radio.get_antenna().await {
+    });
+    poll!("AN", radio.get_antenna(), |v: u8| {
         state.antenna = v;
-    }
-    if let Ok(v) = radio.get_frequency_lock().await {
+    });
+    poll!("LK", radio.get_frequency_lock(), |v: bool| {
         state.freq_lock = v;
-    }
-    if let Ok(v) = radio.get_fine_step().await {
+    });
+    poll!("FS", radio.get_fine_step(), |v: bool| {
         state.fine_step = v;
-    }
+    });
 }
 
 async fn run_radio_loop<R: Radio>(

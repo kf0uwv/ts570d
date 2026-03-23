@@ -104,17 +104,18 @@ fn off_style() -> Style {
 // Top-level layout splitter
 // ---------------------------------------------------------------------------
 
-/// Split the full terminal area into (header, status, controls) areas.
-pub fn split_areas(area: Rect) -> (Rect, Rect, Rect) {
+/// Split the full terminal area into (header, status, errors, controls) areas.
+pub fn split_areas(area: Rect) -> (Rect, Rect, Rect, Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
             Constraint::Length(7), // Status
+            Constraint::Length(5), // Errors  (border + 3 lines)
             Constraint::Min(4),    // Controls
         ])
         .split(area);
-    (chunks[0], chunks[1], chunks[2])
+    (chunks[0], chunks[1], chunks[2], chunks[3])
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +136,36 @@ pub fn draw_header(f: &mut Frame, area: Rect) {
         )
         .alignment(Alignment::Center);
     f.render_widget(title, inner);
+}
+
+// ---------------------------------------------------------------------------
+// draw_errors — poll error panel
+// ---------------------------------------------------------------------------
+
+/// Draw the poll error panel.
+///
+/// Shows "No errors" (dim green) when `state.poll_errors` is empty, or up to
+/// 3 error lines (red) from the most recent poll cycle.
+pub fn draw_errors(f: &mut Frame, area: Rect, state: &RadioDisplay) {
+    let block = Block::default().title(" Errors ").borders(Borders::ALL);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if state.poll_errors.is_empty() {
+        let no_err = Paragraph::new(Line::from(Span::styled(
+            "No errors",
+            Style::default().fg(Color::DarkGray),
+        )));
+        f.render_widget(no_err, inner);
+    } else {
+        let lines: Vec<Line> = state
+            .poll_errors
+            .iter()
+            .take(3)
+            .map(|e| Line::from(Span::styled(e.as_str(), Style::default().fg(Color::Red))))
+            .collect();
+        f.render_widget(Paragraph::new(lines), inner);
+    }
 }
 
 // ---------------------------------------------------------------------------
