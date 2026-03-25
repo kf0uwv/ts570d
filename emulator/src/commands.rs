@@ -197,7 +197,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 query!(format!("PC{:03};", state.power_control))
             } else if params.len() == 3 {
                 if let Ok(v) = params.parse::<u8>() {
-                    if v >= 5 && v <= 100 && v % 5 == 0 {
+                    if (5..=100).contains(&v) && v % 5 == 0 {
                         state.power_control = v;
                         set_ok!("power_control", state.power_control)
                     } else {

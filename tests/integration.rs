@@ -753,7 +753,7 @@ fn test_get_information() {
         // Verify the fields parse into plausible values.
         let freq_hz = info.frequency.hz();
         assert!(
-            freq_hz >= 500_000 && freq_hz <= 60_000_000,
+            (500_000..=60_000_000).contains(&freq_hz),
             "IF frequency out of range: {} Hz",
             freq_hz
         );
