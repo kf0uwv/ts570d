@@ -131,7 +131,8 @@ impl ResponseParser {
         match params.len() {
             4 => {
                 // Canonical per manual: 4-digit reading, no selector
-                let reading = params.parse::<u16>()
+                let reading = params
+                    .parse::<u16>()
                     .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
                 Ok(Response::SMeter(0, reading))
             }

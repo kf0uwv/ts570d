@@ -1229,14 +1229,14 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         "MW" => {
             // Minimum params: P1(1) + _ (1) + P3(2) + P4(11) + P5(1) + P6(1) + P7(1) + P8(2) = 20 chars
             if params.len() >= 20 {
-                let ch_str = &params[2..4];  // P3: channel at positions 2-3
+                let ch_str = &params[2..4]; // P3: channel at positions 2-3
                 if let Ok(ch) = ch_str.trim().parse::<usize>() {
                     if ch <= 99 {
-                        let freq_str = &params[4..15];   // P4: freq 11 digits
-                        let mode_str = &params[15..16];  // P5: mode 1 digit
-                        let lock_str = &params[16..17];  // P6: lockout
-                        let tone_str = &params[17..18];  // P7: tone on/off
-                        let tnum_str = &params[18..20];  // P8: tone number 2 digits
+                        let freq_str = &params[4..15]; // P4: freq 11 digits
+                        let mode_str = &params[15..16]; // P5: mode 1 digit
+                        let lock_str = &params[16..17]; // P6: lockout
+                        let tone_str = &params[17..18]; // P7: tone on/off
+                        let tnum_str = &params[18..20]; // P8: tone number 2 digits
                         if let (Ok(freq), Ok(mode), Ok(lock), Ok(tone), Ok(tnum)) = (
                             freq_str.parse::<u64>(),
                             mode_str.parse::<u8>(),
@@ -1372,7 +1372,7 @@ mod tests {
         assert!(resp.ends_with(';'));
         assert!(changes.is_empty());
         // Payload (excluding "IF" and ";") must be exactly 34 chars
-        let payload = &resp[2..resp.len()-1];
+        let payload = &resp[2..resp.len() - 1];
         assert_eq!(payload.len(), 34, "IF payload length: {payload:?}");
     }
 }

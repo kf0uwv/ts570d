@@ -512,7 +512,11 @@ pub trait Radio {
 
     /// Write memory channel contents (MW command).
     /// `entry.channel` must match `ch`.
-    async fn write_memory_channel(&mut self, _ch: u8, _entry: MemoryChannelEntry) -> RadioResult<()> {
+    async fn write_memory_channel(
+        &mut self,
+        _ch: u8,
+        _entry: MemoryChannelEntry,
+    ) -> RadioResult<()> {
         Err(RadioError::Unsupported)
     }
 

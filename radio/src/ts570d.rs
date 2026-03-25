@@ -786,9 +786,7 @@ impl<T: Transport> Ts570d<T> {
     ///
     /// AC SET format: `AC[P2][P3]` — 2 digits (P2=0:THRU/1:IN, P3=0:off/1:tune).
     pub async fn set_antenna_tuner_thru(&mut self, thru: bool) -> RadioResult<()> {
-        self.client
-            .set("AC", if thru { "00" } else { "10" })
-            .await
+        self.client.set("AC", if thru { "00" } else { "10" }).await
     }
 
     /// Start antenna tuning (AC SET with P2=IN, P3=tune-start).
