@@ -1,0 +1,18 @@
+Package: ts570d-radio-control
+Version: 0.1.0
+Architecture: amd64
+Maintainer: Matt Franklin <radiombf@gmail.com>
+Section: hamradio
+Priority: optional
+Depends: libc6 (>= 2.17)
+Description: Kenwood TS-570D terminal radio control
+ Terminal-based CAT control for the Kenwood TS-570D/S HF transceiver.
+ Uses io_uring for low-latency serial I/O and ratatui for the TUI.
+ .
+ Includes:
+  - ts570d-control: main control application
+  - ts570d-emulator: virtual radio emulator (PTY-based, no hardware needed)
+  - rs232c-pintest: RS-232C wiring/pin diagnostic tool
+ .
+ Requires Linux kernel 5.1+ for io_uring support.
+Homepage: https://github.com/kf0uwv/ts570d

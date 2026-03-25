@@ -16,8 +16,12 @@ node_modules/
 # Planning directories (agent working files)
 planning/
 
+# Manual PDF (large binary — download via docs/README or from Kenwood website)
+docs/*.pdf
+
 # Temporary files
 *.swp
 *.swo
 *~
 .DS_Store
+*.deb

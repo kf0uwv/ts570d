@@ -53,6 +53,18 @@ Decisions recorded in `./planning/` files are **binding**. You MUST implement ex
 5. Update `./planning/kenwood/progress.md` with results
 6. STOP and report results back — do NOT proceed to any next task without explicit architect/user approval
 
+## TS-570D Manual (MANDATORY — READ BEFORE IMPLEMENTING ANY COMMAND)
+
+The official Kenwood TS-570D instruction manual (English) is at:
+**`./docs/TS-570-English.pdf`**
+
+The CAT command reference is in the second half of the manual (booklet pages 70–81, PDF pages ~76–87). Before implementing, fixing, or validating ANY command or response format, you MUST:
+1. Read the relevant pages of this PDF using the Read tool
+2. Use the exact field widths, parameter ranges, and response formats specified in the manual
+3. Document in your findings.md which manual page(s) you referenced and what they specify
+
+Do NOT rely on memory, secondary sources, or other Kenwood models — those have different layouts.
+
 ## Focus Areas
 - TS-570D specific command implementation (frequency, mode, etc.)
 - Robust response parsing and validation
