@@ -57,6 +57,10 @@ pub struct RadioDisplay {
     pub vox: bool,
     pub antenna: u8,
 
+    // --- VFO routing ---
+    pub rx_vfo: u8,
+    pub tx_vfo: u8,
+
     // --- Tone ---
     pub ctcss: bool,
     pub freq_lock: bool,
@@ -64,6 +68,14 @@ pub struct RadioDisplay {
 
     // --- Poll errors (from most recent poll cycle) ---
     pub poll_errors: Vec<String>,
+
+    // --- Connection health ---
+    /// `false` when the radio has been unresponsive for 3 consecutive poll cycles.
+    pub connected: bool,
+
+    /// `true` from startup until the first successful poll cycle completes.
+    /// Used to show "Connecting..." instead of "CONNECTION LOST" on startup.
+    pub initializing: bool,
 }
 
 impl Default for RadioDisplay {
@@ -95,10 +107,14 @@ impl Default for RadioDisplay {
             beat_cancel: 0,
             vox: false,
             antenna: 1,
+            rx_vfo: 0,
+            tx_vfo: 0,
             ctcss: false,
             freq_lock: false,
             fine_step: false,
             poll_errors: Vec::new(),
+            connected: true,
+            initializing: true,
         }
     }
 }

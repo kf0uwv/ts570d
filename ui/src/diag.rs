@@ -35,5 +35,9 @@ pub(crate) enum DiagState {
         results: Vec<DiagResult>,
     },
     /// All steps finished (or aborted). `results` contains the full log.
-    Done { results: Vec<DiagResult> },
+    /// `scroll` is the number of lines scrolled from the top.
+    Done {
+        results: Vec<DiagResult>,
+        scroll: usize,
+    },
 }

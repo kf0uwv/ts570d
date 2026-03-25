@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
@@ -114,7 +114,7 @@ pub fn split_areas(area: Rect) -> (Rect, Rect, Rect, Rect) {
             Constraint::Length(3), // Header
             Constraint::Length(7), // Status
             Constraint::Length(5), // Errors  (border + 3 lines)
-            Constraint::Min(4),    // Controls
+            Constraint::Min(8),    // Controls
         ])
         .split(area);
     (chunks[0], chunks[1], chunks[2], chunks[3])
@@ -168,6 +168,62 @@ pub fn draw_errors(f: &mut Frame, area: Rect, state: &RadioDisplay) {
             .collect();
         f.render_widget(Paragraph::new(lines), inner);
     }
+}
+
+// ---------------------------------------------------------------------------
+// draw_disconnected — connection-lost overlay (replaces control panel)
+// ---------------------------------------------------------------------------
+
+/// Draw a full-panel overlay when the radio is unreachable or still connecting.
+///
+/// When `initializing` is true the radio has not yet responded — show "Connecting...".
+/// When `initializing` is false the radio was connected but has gone silent — show "CONNECTION LOST".
+pub fn draw_disconnected(f: &mut Frame, area: Rect, errors: &[String], initializing: bool) {
+    let lines: Vec<Line> = if initializing {
+        vec![
+            Line::from(Span::styled(
+                "Connecting to radio...",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(""),
+            Line::from("Waiting for response. This may take a few seconds."),
+            Line::from(""),
+            Line::from(Span::styled("[Q] Quit", Style::default().fg(Color::White))),
+        ]
+    } else {
+        let mut v: Vec<Line> = vec![
+            Line::from(Span::styled(
+                "CONNECTION LOST",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("The radio is not responding."),
+            Line::from("Reconnect the cable or restart the radio."),
+            Line::from("The UI will recover automatically when contact is restored."),
+            Line::from(""),
+        ];
+        for e in errors.iter().take(8) {
+            v.push(Line::from(Span::styled(
+                e.as_str(),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        v.push(Line::from(""));
+        v.push(Line::from(Span::styled(
+            "[Q] Quit",
+            Style::default().fg(Color::White),
+        )));
+        v
+    };
+
+    let p = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Radio Status "),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
 }
 
 // ---------------------------------------------------------------------------
@@ -443,11 +499,27 @@ pub fn draw_ui(f: &mut Frame, area: Rect, state: &RadioDisplay) {
     // Row 5 — Status bar
     // -----------------------------------------------------------------------
 
+    let rx_vfo_label = match state.rx_vfo {
+        0 => "VFO-A",
+        1 => "VFO-B",
+        2 => "MEM",
+        _ => "?",
+    };
+    let ant_label = match state.antenna {
+        1 => "ANT1",
+        2 => "ANT2",
+        _ => "ANT?",
+    };
     let status_line = Line::from(vec![
         Span::styled(
             "TS-570D Radio Control",
             Style::default().fg(Color::DarkGray),
         ),
+        Span::raw("  |  "),
+        Span::styled("RX:", Style::default().fg(Color::DarkGray)),
+        Span::styled(rx_vfo_label, Style::default().fg(Color::White)),
+        Span::raw("  "),
+        Span::styled(ant_label, Style::default().fg(Color::White)),
         Span::raw("  |  "),
         Span::styled("q: quit", Style::default().fg(Color::DarkGray)),
     ]);
@@ -458,6 +530,38 @@ pub fn draw_ui(f: &mut Frame, area: Rect, state: &RadioDisplay) {
 // ---------------------------------------------------------------------------
 // draw_control_panel
 // ---------------------------------------------------------------------------
+
+/// Build a column of menu lines from (key, label) pairs.
+fn build_menu_column<'a>(items: &[(&'static str, &'static str)]) -> Vec<Line<'a>> {
+    let key_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    items
+        .iter()
+        .map(|(key, label)| {
+            Line::from(vec![
+                Span::styled(format!("[{}]", key), key_style),
+                Span::raw(format!(" {}", label)),
+            ])
+        })
+        .collect()
+}
+
+/// Build a column of menu lines from (key_str, label_str) pairs (owned strings).
+fn build_menu_column_owned(items: Vec<(String, String)>) -> Vec<Line<'static>> {
+    let key_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    items
+        .into_iter()
+        .map(|(key, label)| {
+            Line::from(vec![
+                Span::styled(format!("[{}]", key), key_style),
+                Span::raw(format!(" {}", label)),
+            ])
+        })
+        .collect()
+}
 
 /// Draw the interactive control panel.
 pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
@@ -470,142 +574,162 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
     let inner = outer_block.inner(area);
     f.render_widget(outer_block, area);
 
-    // Split inner area into 3 lines
-    let lines = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // Line 1: hints / prompt
-            Constraint::Length(1), // Line 2: error / blank
-            Constraint::Min(1),    // Line 3: input / cursor
-        ])
-        .split(inner);
-
     match state {
         ControlState::Menu => {
-            let hint = Line::from(vec![
-                Span::styled(
-                    "[F]",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" Frequency  "),
-                Span::styled(
-                    "[M]",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" Mode  "),
-                Span::styled(
-                    "[R]",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" Receive  "),
-                Span::styled(
-                    "[T]",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" Transmission  "),
-                Span::styled(
-                    "[D]",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" Diagnostics  "),
-                Span::styled("[q]", Style::default().fg(Color::DarkGray)),
-                Span::raw(" Quit"),
-            ]);
-            f.render_widget(Paragraph::new(hint), lines[0]);
-            // Line 2: blank
-            // Line 3: prompt
-            f.render_widget(Paragraph::new(">"), lines[2]);
+            // Split inner area: content rows above, prompt line at bottom.
+            let sections = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(inner);
+            let content_area = sections[0];
+            let prompt_area = sections[1];
+
+            // Split content area into 2 equal columns.
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(content_area);
+
+            let left: &[(&str, &str)] = &[
+                ("F", "Freq"),
+                ("N", "Mem"),
+                ("M", "Mode/DSP"),
+                ("R", "Receive"),
+                ("T", "Transmit"),
+            ];
+            let right: &[(&str, &str)] = &[
+                ("C", "CW"),
+                ("O", "Tones"),
+                ("S", "System"),
+                ("D", "Diag"),
+                ("Q", "Quit"),
+            ];
+
+            f.render_widget(Paragraph::new(build_menu_column(left)), cols[0]);
+            f.render_widget(Paragraph::new(build_menu_column(right)), cols[1]);
+            f.render_widget(Paragraph::new(">"), prompt_area);
         }
 
         ControlState::GroupMenu { group, .. } => {
             let labels = group_command_labels(*group);
-            let mut spans: Vec<Span> = Vec::new();
-            for (i, lbl) in labels.iter().enumerate() {
-                spans.push(Span::styled(
-                    format!("[{}]", i + 1),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::raw(format!(" {}  ", lbl)));
-            }
-            spans.push(Span::styled("[Esc]", Style::default().fg(Color::DarkGray)));
-            spans.push(Span::raw(" Back"));
-            f.render_widget(Paragraph::new(Line::from(spans)), lines[0]);
-            f.render_widget(Paragraph::new(">"), lines[2]);
-        }
+            let key_chars = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c"];
 
-        ControlState::TextInput {
-            prompt,
-            buffer,
-            error,
-            ..
-        } => {
-            f.render_widget(Paragraph::new(prompt.as_str()), lines[0]);
-            if let Some(err) = error {
-                let err_line = Line::from(vec![Span::styled(
-                    format!("⚠ {}", err),
-                    Style::default().fg(Color::Red),
-                )]);
-                f.render_widget(Paragraph::new(err_line), lines[1]);
-            }
-            let input_line = Line::from(vec![
-                Span::raw("> "),
-                Span::raw(buffer.as_str()),
-                Span::styled("_", Style::default().fg(Color::Yellow)),
-            ]);
-            f.render_widget(Paragraph::new(input_line), lines[2]);
-        }
+            let half = labels.len().div_ceil(2);
+            let left_items: Vec<(String, String)> = labels[..half]
+                .iter()
+                .enumerate()
+                .map(|(i, lbl)| {
+                    let k = key_chars.get(i).copied().unwrap_or("?").to_string();
+                    (k, lbl.to_string())
+                })
+                .collect();
+            let mut right_items: Vec<(String, String)> = labels[half..]
+                .iter()
+                .enumerate()
+                .map(|(i, lbl)| {
+                    let k = key_chars.get(half + i).copied().unwrap_or("?").to_string();
+                    (k, lbl.to_string())
+                })
+                .collect();
+            right_items.push(("Esc".to_string(), "Back".to_string()));
 
-        ControlState::ListSelect {
-            options, cursor, ..
-        } => {
-            let hint = Line::from("← → to select, Enter to confirm, Esc to cancel");
-            f.render_widget(Paragraph::new(hint), lines[0]);
+            // Split inner area: content rows above, prompt line at bottom.
+            let sections = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(inner);
+            let content_area = sections[0];
+            let prompt_area = sections[1];
 
-            let mut option_spans: Vec<Span> = vec![Span::raw("> ")];
-            for (i, opt) in options.iter().enumerate() {
-                if i == *cursor {
-                    option_spans.push(Span::styled(
-                        format!("[{}]", opt),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                } else {
-                    option_spans.push(Span::raw(format!(" {} ", opt)));
-                }
-                if i + 1 < options.len() {
-                    option_spans.push(Span::raw("  "));
-                }
-            }
-            f.render_widget(Paragraph::new(Line::from(option_spans)), lines[2]);
-        }
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(content_area);
 
-        ControlState::Feedback { message, is_error } => {
-            let msg_style = if *is_error {
-                Style::default().fg(Color::Red)
-            } else {
-                Style::default().fg(Color::Green)
-            };
+            f.render_widget(Paragraph::new(build_menu_column_owned(left_items)), cols[0]);
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(message.as_str(), msg_style))),
-                lines[1],
+                Paragraph::new(build_menu_column_owned(right_items)),
+                cols[1],
             );
-            f.render_widget(Paragraph::new("Press any key to continue"), lines[2]);
+            f.render_widget(Paragraph::new(">"), prompt_area);
         }
-        // Diagnostic is handled by the early-return above.
-        ControlState::Diagnostic(_) => {}
+
+        // For input/selection states, use the original 3-line layout.
+        _ => {
+            let lines = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Line 1: hints / prompt
+                    Constraint::Length(1), // Line 2: error / blank
+                    Constraint::Min(1),    // Line 3: input / cursor
+                ])
+                .split(inner);
+
+            match state {
+                ControlState::TextInput {
+                    prompt,
+                    buffer,
+                    error,
+                    ..
+                } => {
+                    f.render_widget(Paragraph::new(prompt.as_str()), lines[0]);
+                    if let Some(err) = error {
+                        let err_line = Line::from(vec![Span::styled(
+                            format!("⚠ {}", err),
+                            Style::default().fg(Color::Red),
+                        )]);
+                        f.render_widget(Paragraph::new(err_line), lines[1]);
+                    }
+                    let input_line = Line::from(vec![
+                        Span::raw("> "),
+                        Span::raw(buffer.as_str()),
+                        Span::styled("_", Style::default().fg(Color::Yellow)),
+                    ]);
+                    f.render_widget(Paragraph::new(input_line), lines[2]);
+                }
+
+                ControlState::ListSelect {
+                    options, cursor, ..
+                } => {
+                    let hint = Line::from("← → to select, Enter to confirm, Esc to cancel");
+                    f.render_widget(Paragraph::new(hint), lines[0]);
+
+                    let mut option_spans: Vec<Span> = vec![Span::raw("> ")];
+                    for (i, opt) in options.iter().enumerate() {
+                        if i == *cursor {
+                            option_spans.push(Span::styled(
+                                format!("[{}]", opt),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        } else {
+                            option_spans.push(Span::raw(format!(" {} ", opt)));
+                        }
+                        if i + 1 < options.len() {
+                            option_spans.push(Span::raw("  "));
+                        }
+                    }
+                    f.render_widget(Paragraph::new(Line::from(option_spans)), lines[2]);
+                }
+
+                ControlState::Feedback { message, is_error } => {
+                    let msg_style = if *is_error {
+                        Style::default().fg(Color::Red)
+                    } else {
+                        Style::default().fg(Color::Green)
+                    };
+                    f.render_widget(
+                        Paragraph::new(Line::from(Span::styled(message.as_str(), msg_style))),
+                        lines[1],
+                    );
+                    f.render_widget(Paragraph::new("Press any key to continue"), lines[2]);
+                }
+
+                // Menu, GroupMenu, and Diagnostic are handled above.
+                _ => {}
+            }
+        }
     }
 }
 
@@ -698,7 +822,7 @@ pub fn draw_diag_panel(f: &mut Frame, area: Rect, diag: &DiagState) {
             f.render_widget(Paragraph::new(visible), inner);
         }
 
-        DiagState::Done { results } => {
+        DiagState::Done { results, scroll } => {
             let summary_lines = build_summary_lines(results);
 
             // Count unique labels that have all rounds passing
@@ -733,12 +857,17 @@ pub fn draw_diag_panel(f: &mut Frame, area: Rect, diag: &DiagState) {
             lines.extend(summary_lines);
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
+                Span::styled("[↑/↓]", Style::default().fg(Color::DarkGray)),
+                Span::styled(" scroll  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("[PgUp/PgDn]", Style::default().fg(Color::DarkGray)),
+                Span::styled("  ", Style::default()),
                 Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
-                Span::styled(" return to menu", Style::default().fg(Color::DarkGray)),
+                Span::styled(" menu", Style::default().fg(Color::DarkGray)),
             ]));
 
             let height = inner.height as usize;
-            let start = lines.len().saturating_sub(height);
+            let max_scroll = lines.len().saturating_sub(height);
+            let start = (*scroll).min(max_scroll);
             let visible: Vec<Line> = lines.into_iter().skip(start).collect();
             f.render_widget(Paragraph::new(visible), inner);
         }
