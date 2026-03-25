@@ -247,6 +247,27 @@ impl SerialPort {
         // Configure termios with all SerialConfig fields.
         configure_termios(&owned_fd, &config)?;
 
+        // Flush any data the radio sent before we were ready (e.g. AI auto-info).
+        // SAFETY: owned_fd is a valid open fd.
+        unsafe {
+            libc::tcflush(owned_fd.as_raw_fd(), libc::TCIFLUSH);
+        }
+
+        // Assert RTS and DTR. The TS-570D uses RTS as "receive enable" — when RTS is
+        // LOW the radio suppresses responses. Assert it explicitly so the OS/driver
+        // default doesn't leave it undriven.
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = owned_fd.as_raw_fd();
+            const TIOCM_RTS: libc::c_int = 0x004;
+            const TIOCM_DTR: libc::c_int = 0x002;
+            let bits: libc::c_int = TIOCM_RTS | TIOCM_DTR;
+            // SAFETY: fd is a valid open serial port fd; &bits is a valid c_int pointer.
+            unsafe { libc::ioctl(fd, libc::TIOCMBIS, &bits) };
+            // Ignore ioctl error — PTY devices don't support modem control lines and
+            // will return ENOTTY, which is harmless.
+        }
+
         // Wrap in monoio::net::UnixStream for AsyncReadRent + AsyncWriteRent.
         //
         // SAFETY: `owned_fd` is a valid open file descriptor (serial port or PTY).
@@ -269,6 +290,14 @@ impl SerialPort {
     /// Get the device path this port was opened on.
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Discard any unread bytes in the kernel receive buffer.
+    pub fn flush_rx(&self) {
+        // SAFETY: self.stream.as_raw_fd() is a valid open fd.
+        unsafe {
+            libc::tcflush(self.stream.as_raw_fd(), libc::TCIFLUSH);
+        }
     }
 }
 
@@ -332,6 +361,10 @@ impl Transport for SerialPort {
                 Err(e) => return Err(TransportError::Io(e)),
             }
         }
+    }
+
+    fn flush_rx(&mut self) {
+        SerialPort::flush_rx(self);
     }
 
     /// Flush the serial port output buffer.

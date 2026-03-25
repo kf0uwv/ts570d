@@ -38,6 +38,8 @@ pub enum RadioError {
     Transport(#[from] TransportError),
     #[error("Not implemented")]
     NotImplemented,
+    #[error("Operation not supported")]
+    Unsupported,
 }
 
 /// Convenience [`Result`] alias for radio operations.
@@ -213,6 +215,31 @@ pub struct InformationResponse {
     pub ctcss_tone: u8,
     /// Tone number (0–42).
     pub tone_number: u8,
+}
+
+// ---------------------------------------------------------------------------
+// MemoryChannelEntry
+// ---------------------------------------------------------------------------
+
+/// Contents of a single memory channel (MR/MW commands).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryChannelEntry {
+    /// Channel number 0–99.
+    pub channel: u8,
+    /// `true` if this is a split-TX channel.
+    pub split: bool,
+    /// Frequency in Hz. `0` means vacant.
+    pub freq_hz: u64,
+    /// Mode digit: 1=LSB 2=USB 3=CW 4=FM 5=AM 6=FSK 7=CW-R 9=FSK-R. `0` means vacant.
+    pub mode: u8,
+    /// Channel lockout active.
+    pub lockout: bool,
+    /// Tone type: 0=off, 1=tone, 2=CTCSS.
+    pub tone_type: u8,
+    /// Tone number 0–39.
+    pub tone_number: u8,
+    /// `true` if the channel is vacant (freq == 0).
+    pub vacant: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +505,22 @@ pub trait Radio {
         Err(RadioError::NotImplemented)
     }
 
+    /// Read memory channel contents (MR command).
+    async fn read_memory_channel(&mut self, _ch: u8) -> RadioResult<MemoryChannelEntry> {
+        Err(RadioError::Unsupported)
+    }
+
+    /// Write memory channel contents (MW command).
+    /// `entry.channel` must match `ch`.
+    async fn write_memory_channel(&mut self, _ch: u8, _entry: MemoryChannelEntry) -> RadioResult<()> {
+        Err(RadioError::Unsupported)
+    }
+
+    /// Clear a memory channel (write a vacant entry).
+    async fn clear_memory_channel(&mut self, _ch: u8) -> RadioResult<()> {
+        Err(RadioError::Unsupported)
+    }
+
     // -----------------------------------------------------------------------
     // Antenna
     // -----------------------------------------------------------------------
@@ -700,6 +743,10 @@ pub trait Radio {
     async fn mic_down(&mut self) -> RadioResult<()> {
         Err(RadioError::NotImplemented)
     }
+
+    /// Flush the receive buffer, discarding unsolicited or stale data.
+    /// Default implementation is a no-op.
+    fn flush_rx(&mut self) {}
 }
 
 // ---------------------------------------------------------------------------

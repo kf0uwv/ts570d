@@ -151,8 +151,14 @@ fn test_set_fine_step_on() {
     let slave = start_emulator();
     async_test!(async move {
         let mut radio = open_radio(&slave);
-        radio.set_fine_step(true).await.expect("set_fine_step(true)");
-        let v = radio.get_fine_step().await.expect("get_fine_step after set true");
+        radio
+            .set_fine_step(true)
+            .await
+            .expect("set_fine_step(true)");
+        let v = radio
+            .get_fine_step()
+            .await
+            .expect("get_fine_step after set true");
         assert!(v, "expected fine_step=true after set");
     });
 }
@@ -187,7 +193,10 @@ fn test_get_frequency_lock() {
     let slave = start_emulator();
     async_test!(async move {
         let mut radio = open_radio(&slave);
-        let v = radio.get_frequency_lock().await.expect("get_frequency_lock");
+        let v = radio
+            .get_frequency_lock()
+            .await
+            .expect("get_frequency_lock");
         assert!(!v, "expected freq_lock default=false");
     });
 }
@@ -711,7 +720,8 @@ fn test_get_smeter() {
     async_test!(async move {
         let mut radio = open_radio(&slave);
         let v = radio.get_smeter().await.expect("get_smeter");
-        assert!(v <= 30, "smeter out of range: {}", v);
+        // Manual p.73 format 22: SM command range is 0000–0015.
+        assert!(v <= 15, "smeter out of range: {}", v);
     });
 }
 
@@ -812,7 +822,10 @@ fn test_set_power_on() {
     let slave = start_emulator();
     async_test!(async move {
         let mut radio = open_radio(&slave);
-        radio.set_power_on(false).await.expect("set_power_on(false)");
+        radio
+            .set_power_on(false)
+            .await
+            .expect("set_power_on(false)");
         let v = radio.get_power_on().await.expect("get_power_on after set");
         assert!(!v, "expected power_on=false after set");
     });
@@ -899,8 +912,8 @@ fn test_get_vox_gain() {
     async_test!(async move {
         let mut radio = open_radio(&slave);
         let v = radio.get_vox_gain().await.expect("get_vox_gain");
-        // Default: 128
-        assert_eq!(v, 128, "expected vox_gain default=128");
+        // Default: 5 (valid range 1–9)
+        assert_eq!(v, 5, "expected vox_gain default=5");
     });
 }
 
@@ -909,9 +922,9 @@ fn test_set_vox_gain() {
     let slave = start_emulator();
     async_test!(async move {
         let mut radio = open_radio(&slave);
-        radio.set_vox_gain(200).await.expect("set_vox_gain(200)");
+        radio.set_vox_gain(7).await.expect("set_vox_gain(7)");
         let v = radio.get_vox_gain().await.expect("get_vox_gain after set");
-        assert_eq!(v, 200, "vox_gain mismatch after set");
+        assert_eq!(v, 7, "vox_gain mismatch after set");
     });
 }
 
@@ -936,7 +949,10 @@ fn test_set_vox_delay() {
     async_test!(async move {
         let mut radio = open_radio(&slave);
         radio.set_vox_delay(500).await.expect("set_vox_delay(500)");
-        let v = radio.get_vox_delay().await.expect("get_vox_delay after set");
+        let v = radio
+            .get_vox_delay()
+            .await
+            .expect("get_vox_delay after set");
         assert_eq!(v, 500, "vox_delay mismatch after set");
     });
 }
@@ -1002,7 +1018,10 @@ fn test_get_memory_channel() {
     let slave = start_emulator();
     async_test!(async move {
         let mut radio = open_radio(&slave);
-        let v = radio.get_memory_channel().await.expect("get_memory_channel");
+        let v = radio
+            .get_memory_channel()
+            .await
+            .expect("get_memory_channel");
         // Default: 0
         assert_eq!(v, 0, "expected mem_channel default=0");
     });
@@ -1045,7 +1064,10 @@ fn test_set_keyer_speed() {
     let slave = start_emulator();
     async_test!(async move {
         let mut radio = open_radio(&slave);
-        radio.set_keyer_speed(25).await.expect("set_keyer_speed(25)");
+        radio
+            .set_keyer_speed(25)
+            .await
+            .expect("set_keyer_speed(25)");
         let v = radio
             .get_keyer_speed()
             .await
@@ -1211,7 +1233,7 @@ fn test_get_if_shift() {
         let mut radio = open_radio(&slave);
         let (dir, freq) = radio.get_if_shift().await.expect("get_if_shift");
         // Default: direction='+', freq=0
-        assert_eq!(dir, '+', "expected if_shift direction default='+'");
+        assert_eq!(dir, ' ', "expected if_shift direction default=' '");
         assert_eq!(freq, 0, "expected if_shift freq default=0");
     });
 }
@@ -1355,7 +1377,10 @@ fn test_set_beat_cancel() {
     async_test!(async move {
         let mut radio = open_radio(&slave);
         radio.set_beat_cancel(1).await.expect("set_beat_cancel(1)");
-        let v = radio.get_beat_cancel().await.expect("get_beat_cancel after set");
+        let v = radio
+            .get_beat_cancel()
+            .await
+            .expect("get_beat_cancel after set");
         assert_eq!(v, 1, "beat_cancel mismatch after set");
     });
 }

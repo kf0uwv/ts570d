@@ -26,4 +26,8 @@ pub trait Transport {
 
     /// Flush any buffered writes.
     async fn flush(&mut self) -> Result<(), TransportError>;
+
+    /// Discard any unread bytes in the receive buffer.
+    /// Default implementation is a no-op (e.g. for in-memory fakes).
+    fn flush_rx(&mut self) {}
 }

@@ -27,5 +27,9 @@ nix = { workspace = true, features = ["term"] }
 [dev-dependencies]
 emulator = { path = "../emulator" }
 
+[[bin]]
+name = "pin-test"
+path = "src/bin/pin_test.rs"
+
 [features]
 default = []
