@@ -24,7 +24,7 @@
 
 use framework::transport::Transport;
 
-use framework::radio::{Frequency, Mode, RadioError, RadioResult};
+use framework::radio::{Frequency, MemoryChannelEntry, Mode, RadioError, RadioResult};
 
 use crate::client::RadioClient;
 use crate::protocol::{InformationResponse, Response, ResponseParser};
@@ -114,11 +114,11 @@ impl<T: Transport> Ts570d<T> {
 
     /// Query the S-meter reading (main receiver).
     ///
-    /// Returns the raw 0–30 reading from the `SM0` response.
+    /// Returns the raw 0–15 reading from the `SM` response.
+    /// Manual p.80, format 22: SM value range is 0000–0015.
     pub async fn get_smeter(&mut self) -> RadioResult<u16> {
-        // The SM command requires a 1-digit main/sub selector; send "SM0;"
-        // to query the main receiver.  The radio responds "SM0XXXX;".
-        let raw = self.client.query_with_param("SM", "0").await?;
+        // Manual p.80: query is "SM;" and the radio responds "SM<4digits>;"
+        let raw = self.client.query("SM").await?;
         match ResponseParser::parse(&raw)? {
             Response::SMeter(_sel, reading) => Ok(reading),
             other => Err(RadioError::InvalidProtocolString(format!(
@@ -148,7 +148,7 @@ impl<T: Transport> Ts570d<T> {
 
     /// Query the radio's model identifier.
     ///
-    /// The TS-570D returns `018`; the TS-570S returns `019`.
+    /// The TS-570D returns `017`; the TS-570S returns `018` (manual p.73, format 16).
     pub async fn get_id(&mut self) -> RadioResult<u16> {
         let raw = self.client.query("ID").await?;
         match ResponseParser::parse(&raw)? {
@@ -198,10 +198,10 @@ impl<T: Transport> Ts570d<T> {
 
     /// Set the AF (audio) gain level for the main receiver.
     ///
-    /// Params are formatted as `0<level:03>` (selector `0` = main receiver,
-    /// followed by the 3-digit level).
+    /// Manual p.75: Set format is `AG<P1:3>;` (3 digits, format 31, 000–255).
+    /// No selector digit in the set command.
     pub async fn set_af_gain(&mut self, level: u8) -> RadioResult<()> {
-        self.client.set("AG", &format!("0{:03}", level)).await
+        self.client.set("AG", &format!("{:03}", level)).await
     }
 
     // -----------------------------------------------------------------------
@@ -664,6 +664,56 @@ impl<T: Transport> Ts570d<T> {
         self.client.set("MC", &format!("{:02}", ch)).await
     }
 
+    /// Read memory channel contents (MR command).
+    ///
+    /// Sends `MR0NN;` where NN is zero-padded 2-digit channel number.
+    /// Manual p.78: Read format is `MR<P1><P3>;` with no space (P1=split type,
+    /// P3=channel 2 digits).  The answer has a space between P1 and P3.
+    /// Parses the radio's `MR...;` response into a [`MemoryChannelEntry`].
+    pub async fn read_memory_channel(&mut self, ch: u8) -> RadioResult<MemoryChannelEntry> {
+        let raw = self
+            .client
+            .query_with_param("MR", &format!("0{:02}", ch))
+            .await?;
+        match ResponseParser::parse(&raw)? {
+            Response::MemoryRead(entry) => Ok(entry),
+            other => Err(RadioError::InvalidProtocolString(format!(
+                "expected MemoryRead, got {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Write memory channel contents (MW command).
+    ///
+    /// Formats and sends `MW<P1> <P3><P4><P5><P6><P7><P8>;`. No response is
+    /// expected from the radio.
+    pub async fn write_memory_channel(
+        &mut self,
+        ch: u8,
+        entry: MemoryChannelEntry,
+    ) -> RadioResult<()> {
+        let params = format!(
+            "{} {:02}{:011}{}{}{}{:02}",
+            if entry.split { 1 } else { 0 },
+            ch,
+            entry.freq_hz,
+            entry.mode,
+            if entry.lockout { 1 } else { 0 },
+            entry.tone_type,
+            entry.tone_number,
+        );
+        self.client.set("MW", &params).await
+    }
+
+    /// Clear a memory channel by writing a vacant entry (MW command).
+    ///
+    /// Sends `MW0 NN00000000000000000000;`.
+    pub async fn clear_memory_channel(&mut self, ch: u8) -> RadioResult<()> {
+        let params = format!("0 {:02}00000000000000000000", ch);
+        self.client.set("MW", &params).await
+    }
+
     // -----------------------------------------------------------------------
     // Antenna
     // -----------------------------------------------------------------------
@@ -734,16 +784,16 @@ impl<T: Transport> Ts570d<T> {
 
     /// Set antenna tuner to through (bypass) or tuner mode.
     ///
-    /// AC format: `AC<0/1><0/1><0/1>` — we set byte 0 for thru, ignore others.
+    /// AC SET format: `AC[P2][P3]` — 2 digits (P2=0:THRU/1:IN, P3=0:off/1:tune).
     pub async fn set_antenna_tuner_thru(&mut self, thru: bool) -> RadioResult<()> {
         self.client
-            .set("AC", if thru { "000" } else { "001" })
+            .set("AC", if thru { "00" } else { "10" })
             .await
     }
 
-    /// Start antenna tuning.
+    /// Start antenna tuning (AC SET with P2=IN, P3=tune-start).
     pub async fn start_antenna_tuning(&mut self) -> RadioResult<()> {
-        self.client.set("AC", "010").await
+        self.client.set("AC", "11").await
     }
 
     // -----------------------------------------------------------------------
@@ -1022,6 +1072,11 @@ impl<T: Transport> Ts570d<T> {
     pub async fn mic_down(&mut self) -> RadioResult<()> {
         self.client.set("DN", "").await
     }
+
+    /// Flush the transport receive buffer, discarding unsolicited or stale data.
+    pub fn flush_rx(&mut self) {
+        self.client.transport.flush_rx();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1277,6 +1332,25 @@ impl<T: framework::transport::Transport> framework::radio::Radio for Ts570d<T> {
         Ts570d::set_memory_channel(self, ch).await
     }
 
+    async fn read_memory_channel(
+        &mut self,
+        ch: u8,
+    ) -> framework::radio::RadioResult<framework::radio::MemoryChannelEntry> {
+        Ts570d::read_memory_channel(self, ch).await
+    }
+
+    async fn write_memory_channel(
+        &mut self,
+        ch: u8,
+        entry: framework::radio::MemoryChannelEntry,
+    ) -> framework::radio::RadioResult<()> {
+        Ts570d::write_memory_channel(self, ch, entry).await
+    }
+
+    async fn clear_memory_channel(&mut self, ch: u8) -> framework::radio::RadioResult<()> {
+        Ts570d::clear_memory_channel(self, ch).await
+    }
+
     async fn get_antenna(&mut self) -> framework::radio::RadioResult<u8> {
         Ts570d::get_antenna(self).await
     }
@@ -1427,6 +1501,10 @@ impl<T: framework::transport::Transport> framework::radio::Radio for Ts570d<T> {
 
     async fn mic_down(&mut self) -> framework::radio::RadioResult<()> {
         Ts570d::mic_down(self).await
+    }
+
+    fn flush_rx(&mut self) {
+        Ts570d::flush_rx(self);
     }
 }
 
@@ -1662,31 +1740,33 @@ mod tests {
 
     #[monoio::test(driver = "legacy")]
     async fn test_get_smeter_query_sent() {
-        let mut radio = make_radio("SM00015;");
+        // Manual p.80: Answer is SM<4digits>; — no selector prefix.
+        let mut radio = make_radio("SM0015;");
         let _ = radio.get_smeter().await.unwrap();
-        // Must send "SM0;" — the TS-570D requires the main receiver selector digit.
-        assert_eq!(radio.client.transport.written(), b"SM0;");
+        assert_eq!(radio.client.transport.written(), b"SM;");
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_get_smeter_value_parsed() {
-        let mut radio = make_radio("SM00015;");
+        // Manual p.80: SM<4digits>; canonical form.
+        let mut radio = make_radio("SM0015;");
         let reading = radio.get_smeter().await.unwrap();
         assert_eq!(reading, 15);
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_get_smeter_zero() {
-        let mut radio = make_radio("SM00000;");
+        let mut radio = make_radio("SM0000;");
         let reading = radio.get_smeter().await.unwrap();
         assert_eq!(reading, 0);
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_get_smeter_max() {
-        let mut radio = make_radio("SM00030;");
+        // Maximum S-meter value per manual is 0015 (S9+60 dB).
+        let mut radio = make_radio("SM0015;");
         let reading = radio.get_smeter().await.unwrap();
-        assert_eq!(reading, 30);
+        assert_eq!(reading, 15);
     }
 
     // -----------------------------------------------------------------------
@@ -1740,9 +1820,9 @@ mod tests {
 
     #[monoio::test(driver = "legacy")]
     async fn test_get_information_query_sent() {
-        // Build a minimal valid IF string (37-char payload after "IF", before ";")
-        // payload = "000142300001000+000000000102000000000" (37 chars)
-        let if_str = "IF000142300001000+000000000102000000000;";
+        // Build a minimal valid IF string (34-char payload after "IF", before ";")
+        // payload = "0001423000001000+00000000102000000" (34 chars)
+        let if_str = "IF0001423000001000+00000000102000000;";
         let mut radio = make_radio(if_str);
         let _ = radio.get_information().await;
         assert_eq!(radio.client.transport.written(), b"IF;");
@@ -1750,13 +1830,13 @@ mod tests {
 
     #[monoio::test(driver = "legacy")]
     async fn test_get_information_frequency_parsed() {
-        // 37-char payload after "IF":
+        // 34-char payload after "IF":
         //   [0..11]  "00014230000"  freq = 14_230_000
-        //   [11..15] "1000"         step = 1000
-        //   [15..20] "+0000"        rit/xit offset = 0
-        //   [20]     "0"            rit disabled
-        //   [21]     "0"            xit disabled
-        //   [22..24] "00"           memory bank = 0
+        //   [11..16] "01000"        step = 1000
+        //   [16..21] "+0000"        rit/xit offset = 0
+        //   [21]     "0"            rit disabled
+        //   [22]     "0"            xit disabled
+        //   [23]     "0"            memory bank = 0 (1 char)
         //   [24..26] "01"           memory channel = 1
         //   [26]     "0"            rx (not tx)
         //   [27]     "2"            mode = USB
@@ -1764,11 +1844,9 @@ mod tests {
         //   [29]     "0"            scan off
         //   [30]     "0"            split off
         //   [31..33] "00"           ctcss tone = 0
-        //   [33..35] "00"           tone number = 0
-        //   [35]     "0"            offset indicator
-        //   [36]     "0"            reserved
-        // Total payload: 11+4+5+1+1+2+2+1+1+1+1+1+2+2+1+1 = 37 chars
-        let if_str = "IF000142300001000+000000000102000000000;";
+        //   [33]     "0"            tone number = 0
+        // Total payload: 11+5+5+1+1+1+2+1+1+1+1+1+2+1 = 34 chars
+        let if_str = "IF0001423000001000+00000000102000000;";
         let mut radio = make_radio(if_str);
         let info = radio.get_information().await.unwrap();
         assert_eq!(info.frequency, Frequency::new(14_230_000).unwrap());
@@ -1781,24 +1859,27 @@ mod tests {
 
     #[monoio::test(driver = "legacy")]
     async fn test_get_af_gain_query_sent() {
-        let mut radio = make_radio("AG0128;");
+        // Manual p.75: Answer is AG<3digits>; — no selector prefix.
+        let mut radio = make_radio("AG128;");
         let _ = radio.get_af_gain().await.unwrap();
         assert_eq!(radio.client.transport.written(), b"AG;");
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_get_af_gain_value_parsed() {
-        let mut radio = make_radio("AG0128;");
+        // Manual p.75: AG<3digits>; canonical form.
+        let mut radio = make_radio("AG128;");
         let level = radio.get_af_gain().await.unwrap();
         assert_eq!(level, 128);
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_set_af_gain_formatted() {
+        // Manual p.75: Set is AG<P1:3>; — 3-digit level, no selector.
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
         radio.set_af_gain(200).await.unwrap();
-        assert_eq!(radio.client.transport.written_str(), "AG0200;");
+        assert_eq!(radio.client.transport.written_str(), "AG200;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1806,7 +1887,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(transport);
         radio.set_af_gain(5).await.unwrap();
-        assert_eq!(radio.client.transport.written_str(), "AG0005;");
+        assert_eq!(radio.client.transport.written_str(), "AG005;");
     }
 
     // -----------------------------------------------------------------------

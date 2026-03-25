@@ -6,7 +6,7 @@
 
 pub use framework::radio::InformationResponse;
 
-use framework::radio::{Frequency, Mode};
+use framework::radio::{Frequency, MemoryChannelEntry, Mode};
 
 /// A parsed response from the TS-570D radio.
 ///
@@ -20,13 +20,13 @@ pub enum Response {
     VfoBFrequency(Frequency),
     /// MD — operating mode
     Mode(Mode),
-    /// ID — radio model identifier (018 = TS-570D, 019 = TS-570S)
+    /// ID — radio model identifier (017 = TS-570D, 018 = TS-570S)
     RadioId(u16),
     /// IF — composite information response
     Information(InformationResponse),
-    /// SM — S-meter reading.  Fields: (main_sub selector, reading 0–30)
+    /// SM — S-meter reading.  Fields: (selector always 0, reading 0000–0015 per manual format 22)
     SMeter(u8, u16),
-    /// AG — AF gain level.  Fields: (main_sub selector 0/1, level 0–255)
+    /// AG — AF gain level.  Fields: (selector always 0 for canonical form, level 0–255 per format 31)
     AfGain(u8, u8),
     /// RG — RF gain level (0–255)
     RfGain(u8),
@@ -72,6 +72,8 @@ pub enum Response {
     SpeechProcessor(bool),
     /// MC — memory channel (00–99)
     MemoryChannel(u8),
+    /// MR — memory read (channel contents)
+    MemoryRead(MemoryChannelEntry),
     /// AN — antenna selection (1=ANT1, 2=ANT2)
     Antenna(u8),
     /// CN — CTCSS tone number (01–39)

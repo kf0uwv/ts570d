@@ -300,14 +300,17 @@ mod tests {
 
     #[monoio::test(driver = "legacy")]
     async fn test_query_with_param_sm0_formats_correctly() {
+        // Tests the client's query_with_param mechanism (sends "SM0;").
+        // Note: per manual p.80 the canonical SM query is "SM;" not "SM0;",
+        // and the canonical answer is "SM<4digits>;" (no selector).
         let mut transport = MockTransport::new();
-        transport.enqueue_response("SM00015;");
+        transport.enqueue_response("SM0015;");
 
         let mut client = RadioClient::new(transport);
         let response = client.query_with_param("SM", "0").await.unwrap();
 
         assert_eq!(client.transport.written(), b"SM0;");
-        assert_eq!(response, "SM00015;");
+        assert_eq!(response, "SM0015;");
     }
 
     #[monoio::test(driver = "legacy")]

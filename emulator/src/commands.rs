@@ -125,13 +125,13 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         // ------------------------------------------------------------------
         // AG — AF Gain
         //
-        // Query response: AG<sel:1><level:3>; (4 param chars after code)
-        // Set: client sends AG0<level:3> (4 chars) or AG<level:3> (3 chars — legacy)
+        // Manual p.75: Read=AG;, Answer=AG<P1:3>; (format 31, 3 digits, no selector).
+        // Set=AG<P1:3>; but real radio also accepts AG0<P1:3> (4 chars with selector).
         // ------------------------------------------------------------------
         "AG" => {
             if params.is_empty() {
-                // Query: respond with selector 0 (main receiver) + 3-digit level
-                query!(format!("AG0{:03};", state.af_gain))
+                // Query: respond with 3-digit level only (no selector per manual)
+                query!(format!("AG{:03};", state.af_gain))
             } else if params.len() == 4 {
                 // Set with selector prefix (e.g. "0200") — silent
                 if let Ok(v) = params[1..].parse::<u8>() {
@@ -141,7 +141,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                     query!("?;".to_string())
                 }
             } else if params.len() == 3 {
-                // Set without selector prefix (legacy/simplified) — silent
+                // Set without selector prefix — silent
                 if let Ok(v) = params.parse::<u8>() {
                     state.af_gain = v;
                     set_ok!("af_gain", state.af_gain)
@@ -190,14 +190,14 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // PC — Power Control (0–100, 3 digits)
+        // PC — Power Control (5–100 in 5W steps, 3 digits)
         // ------------------------------------------------------------------
         "PC" => {
             if params.is_empty() {
                 query!(format!("PC{:03};", state.power_control))
             } else if params.len() == 3 {
                 if let Ok(v) = params.parse::<u8>() {
-                    if v <= 100 {
+                    if v >= 5 && v <= 100 && v % 5 == 0 {
                         state.power_control = v;
                         set_ok!("power_control", state.power_control)
                     } else {
@@ -228,15 +228,15 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // IF — Transceiver Information (read-only, composite 37-char payload)
+        // IF — Transceiver Information (read-only, composite 34-char payload)
         //
-        // Payload layout (37 chars after "IF"):
+        // Payload layout (34 chars after "IF"):
         //   [0..11]  freq (11 digits)
-        //   [11..15] step (4 digits)
-        //   [15..20] RIT/XIT offset (sign + 4 digits, e.g. "+0000")
-        //   [20]     RIT enabled (0/1)
-        //   [21]     XIT enabled (0/1)
-        //   [22..24] memory bank (2 digits)
+        //   [11..16] step (5 chars, spaces — TS-570D doesn't use this in CAT)
+        //   [16..21] RIT/XIT offset (sign + 4 digits, e.g. "+0000")
+        //   [21]     RIT enabled (0/1)
+        //   [22]     XIT enabled (0/1)
+        //   [23]     bank (1 char, space = VFO mode)
         //   [24..26] memory channel (2 digits)
         //   [26]     TX/RX (0=RX, 1=TX)
         //   [27]     mode (1–9)
@@ -244,9 +244,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         //   [29]     scan status (0/1)
         //   [30]     split (0/1)
         //   [31..33] CTCSS tone number (2 digits)
-        //   [33..35] tone number (2 digits)
-        //   [35]     offset indicator (always 0)
-        //   [36]     reserved (0)
+        //   [33]     tone number (1 char)
         // ------------------------------------------------------------------
         "IF" => {
             let tx_flag = u8::from(state.tx);
@@ -255,10 +253,14 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             let vfo_flag: u8 = 0; // 0 = VFO mode
             let scan_flag = u8::from(state.scan);
             let split_flag = u8::from(state.split);
+            let rit_sign = if state.rit_offset >= 0 { '+' } else { '-' };
+            let rit_abs = state.rit_offset.unsigned_abs() as u16;
+            let tone_digit = state.tone_number % 10;
             query!(format!(
-                "IF{freq:011}1000+{rit_off:04}{rit}{xit}00{mem:02}{tx}{mode}{vfo}{scan}{split}{ctcss:02}{tone:02}00;",
+                "IF{freq:011}     {sign}{rit_off:04}{rit}{xit} {mem:02}{tx}{mode}{vfo}{scan}{split}{ctcss:02}{tone:01};",
                 freq = state.vfo_a_hz,
-                rit_off = 0u16,
+                sign = rit_sign,
+                rit_off = rit_abs,
                 rit = rit_flag,
                 xit = xit_flag,
                 mem = state.mem_channel,
@@ -268,7 +270,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 scan = scan_flag,
                 split = split_flag,
                 ctcss = state.ctcss_tone,
-                tone = state.tone_number,
+                tone = tone_digit,
             ))
         }
 
@@ -300,13 +302,13 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // SM — S-Meter reading (read-only, with 1-digit selector prefix)
+        // SM — S-Meter reading (read-only)
         //
-        // Real response: SM0XXXX; where XXXX is 0000–0030.
+        // Manual p.80: Answer format is SM<P1:4>; where P1=S-METER VALUE
+        // (format 22, 4 digits, 0000–0015).  No selector digit in response.
         // ------------------------------------------------------------------
         "SM" => {
-            // params may be "0" (selector) — we respond with SM0<smeter>;
-            query!(format!("SM0{:04};", state.smeter))
+            query!(format!("SM{:04};", state.smeter))
         }
 
         // ------------------------------------------------------------------
@@ -386,15 +388,21 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // MG — Microphone Gain (0–255, 3 digits)
+        // MG — Microphone Gain (0–100, 3 digits)
+        //
+        // Manual p.78: Format 31 (MIC GAIN), range 000 (min) – 100 (max).
         // ------------------------------------------------------------------
         "MG" => {
             if params.is_empty() {
                 query!(format!("MG{:03};", state.mic_gain))
             } else if params.len() == 3 {
                 if let Ok(v) = params.parse::<u8>() {
-                    state.mic_gain = v;
-                    set_ok!("mic_gain", state.mic_gain)
+                    if v <= 100 {
+                        state.mic_gain = v;
+                        set_ok!("mic_gain", state.mic_gain)
+                    } else {
+                        query!("?;".to_string())
+                    }
                 } else {
                     query!("?;".to_string())
                 }
@@ -513,15 +521,19 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // VG — VOX Gain (0–255, 3 digits)
+        // VG — VOX Gain (1–9, 3 digits per Kenwood spec)
         // ------------------------------------------------------------------
         "VG" => {
             if params.is_empty() {
                 query!(format!("VG{:03};", state.vox_gain))
             } else if params.len() == 3 {
                 if let Ok(v) = params.parse::<u8>() {
-                    state.vox_gain = v;
-                    set_ok!("vox_gain", state.vox_gain)
+                    if (1..=9).contains(&v) {
+                        state.vox_gain = v;
+                        set_ok!("vox_gain", state.vox_gain)
+                    } else {
+                        query!("?;".to_string())
+                    }
                 } else {
                     query!("?;".to_string())
                 }
@@ -781,8 +793,10 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         // ------------------------------------------------------------------
         "AC" => {
             if params.is_empty() {
+                // Answer format: AC[P1][P2][P3] — 3 digits; P1 is status-only
                 query!(format!("AC{:03};", state.ac_mode))
-            } else if params.len() == 3 {
+            } else if params.len() == 2 {
+                // SET format: AC[P2][P3] — 2 digits (P2=0:THRU/1:IN, P3=0:off/1:tune)
                 if let Ok(v) = params.parse::<u8>() {
                     state.ac_mode = v;
                     set_ok!("ac_mode", state.ac_mode)
@@ -846,11 +860,10 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             if params.is_empty() {
                 query!(format!("IS{}{:04};", state.is_direction, state.is_freq))
             } else if params.len() == 5 {
-                let direction = params.chars().next().unwrap_or('+');
+                let direction = params.chars().next().unwrap_or(' ');
                 if direction == '+' || direction == '-' || direction == ' ' {
-                    let stored_dir = if direction == ' ' { '+' } else { direction };
                     if let Ok(freq) = params[1..].parse::<u16>() {
-                        state.is_direction = stored_dir;
+                        state.is_direction = direction;
                         state.is_freq = freq;
                         set_ok2!("is_direction", state.is_direction, "is_freq", state.is_freq)
                     } else {
@@ -1358,5 +1371,8 @@ mod tests {
         assert!(resp.starts_with("IF"), "IF response: {resp}");
         assert!(resp.ends_with(';'));
         assert!(changes.is_empty());
+        // Payload (excluding "IF" and ";") must be exactly 34 chars
+        let payload = &resp[2..resp.len()-1];
+        assert_eq!(payload.len(), 34, "IF payload length: {payload:?}");
     }
 }

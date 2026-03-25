@@ -4,7 +4,7 @@
 //! by the radio) into typed [`Response`] values.
 
 use crate::protocol::response::{InformationResponse, Response};
-use framework::radio::{Frequency, Mode, RadioError, RadioResult};
+use framework::radio::{Frequency, MemoryChannelEntry, Mode, RadioError, RadioResult};
 
 /// Parses raw TS-570D response strings into typed [`Response`] values.
 ///
@@ -67,6 +67,7 @@ impl ResponseParser {
             "BY" => Self::parse_one_digit_bool(params).map(Response::Busy),
             "PR" => Self::parse_one_digit_bool(params).map(Response::SpeechProcessor),
             "MC" => Self::parse_memory_channel(params),
+            "MR" => Self::parse_memory_read(params),
             "AN" => Self::parse_one_digit_u8(params).map(Response::Antenna),
             "CN" => Self::parse_two_digit_u8(params).map(Response::CtcssTone),
             "CT" => Self::parse_one_digit_bool(params).map(Response::Ctcss),
@@ -120,36 +121,62 @@ impl ResponseParser {
 
     /// Parse the `SM` (S-meter) response.
     ///
-    /// Wire format: `SM<sel><reading>` where `<sel>` is 1 digit (0/1) and
-    /// `<reading>` is 4 digits (0000–0030).
+    /// Manual p.80: Answer format is `SM<P1:4>;` where P1=S-METER VALUE
+    /// (format 22, 4 digits, 0000–0015 in receive / 0000–0008 in transmit).
+    /// There is NO selector digit in the response.
+    ///
+    /// For backward compatibility with older emulator output, the 5-char form
+    /// `SM<sel:1><reading:4>` is also accepted.
     fn parse_smeter(params: &str) -> RadioResult<Response> {
-        if params.len() != 5 {
-            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        match params.len() {
+            4 => {
+                // Canonical per manual: 4-digit reading, no selector
+                let reading = params.parse::<u16>()
+                    .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+                Ok(Response::SMeter(0, reading))
+            }
+            5 => {
+                // Legacy 5-char form: selector digit + 4-digit reading
+                let sel = params[..1]
+                    .parse::<u8>()
+                    .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+                let reading = params[1..]
+                    .parse::<u16>()
+                    .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+                Ok(Response::SMeter(sel, reading))
+            }
+            _ => Err(RadioError::InvalidProtocolString(params.to_string())),
         }
-        let sel = params[..1]
-            .parse::<u8>()
-            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
-        let reading = params[1..]
-            .parse::<u16>()
-            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
-        Ok(Response::SMeter(sel, reading))
     }
 
     /// Parse the `AG` (AF gain) response.
     ///
-    /// Wire format: `AG<sel><level>` where `<sel>` is 1 digit (0/1) and
-    /// `<level>` is 3 digits (000–255).
+    /// Manual p.75: Answer format is `AG<P1:3>;` where P1=AF GAIN (format 31,
+    /// 3 digits, 000–255).  There is NO selector digit in the answer.
+    ///
+    /// For backward compatibility with older emulator output, the 4-char form
+    /// `AG<sel:1><level:3>` is also accepted.
     fn parse_af_gain(params: &str) -> RadioResult<Response> {
-        if params.len() != 4 {
-            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        match params.len() {
+            3 => {
+                // Canonical per manual: 3-digit level, no selector
+                let level = params
+                    .parse::<u8>()
+                    .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+                Ok(Response::AfGain(0, level))
+            }
+            4 => {
+                // Legacy 4-char form: selector digit + 3-digit level
+                let sel = params[..1]
+                    .parse::<u8>()
+                    .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+                let level = params[1..]
+                    .parse::<u8>()
+                    .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+                Ok(Response::AfGain(sel, level))
+            }
+            _ => Err(RadioError::InvalidProtocolString(params.to_string())),
         }
-        let sel = params[..1]
-            .parse::<u8>()
-            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
-        let level = params[1..]
-            .parse::<u8>()
-            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
-        Ok(Response::AfGain(sel, level))
     }
 
     /// Parse the `RG` (RF gain) response.
@@ -193,53 +220,72 @@ impl ResponseParser {
 
     /// Parse the composite `IF` (Information) response.
     ///
-    /// The payload after `IF` is exactly 37 characters long.
+    /// The payload after `IF` is exactly 34 characters long (confirmed from
+    /// actual TS-570D radio output).
     ///
     /// ```text
     /// Pos  Len  Field
     ///   0   11  frequency (Hz, zero-padded)
-    ///  11    4  step
-    ///  15    5  RIT/XIT offset (signed, e.g. "+0500" or "-0500")
-    ///  20    1  RIT enabled (0/1)
-    ///  21    1  XIT enabled (0/1)
-    ///  22    2  memory bank
-    ///  24    2  memory channel
+    ///  11    5  step (may be all spaces in VFO mode — treat as 0)
+    ///  16    5  RIT/XIT offset (sign + 4 digits; sign may be ' ', '+', or '-')
+    ///  21    1  RIT enabled (0/1)
+    ///  22    1  XIT enabled (0/1)
+    ///  23    1  memory bank (space = VFO mode — treat as 0)
+    ///  24    2  memory channel (may be spaces in VFO mode — treat as 0)
     ///  26    1  TX/RX (0=RX, 1=TX)
     ///  27    1  mode (1–9)
     ///  28    1  VFO/memory (0=VFO, 1=Memory)
     ///  29    1  scan status
     ///  30    1  split
     ///  31    2  CTCSS tone number
-    ///  33    2  tone number
-    ///  35    1  offset indicator (always 0 on TS-570D)
-    ///  36    1  (last position — not used)
+    ///  33    1  tone number
     /// ```
     fn parse_information(params: &str) -> RadioResult<Response> {
-        // The TS-570D IF payload is 37 characters.
-        if params.len() < 37 {
+        // The TS-570D IF payload is 34 characters.
+        if params.len() < 34 {
             return Err(RadioError::InvalidProtocolString(params.to_string()));
         }
 
         let frequency = Frequency::from_protocol_str(&params[0..11])?;
 
-        let step = params[11..15]
-            .parse::<u32>()
-            .map_err(|_| RadioError::InvalidProtocolString(params[11..15].to_string()))?;
+        // Step: 5 chars, may be all spaces in VFO mode — treat as 0.
+        let step = {
+            let s = params[11..16].trim();
+            if s.is_empty() {
+                0u32
+            } else {
+                s.parse::<u32>()
+                    .map_err(|_| RadioError::InvalidProtocolString(params[11..16].to_string()))?
+            }
+        };
 
-        // RIT/XIT offset: 5 chars, format is sign + 4 digits, e.g. "+0500" or "-0500"
-        let rit_xit_offset = Self::parse_signed_offset(&params[15..20])?;
+        // RIT/XIT offset: 5 chars, format is sign + 4 digits, e.g. "+0500", "-0500", " 0000"
+        let rit_xit_offset = Self::parse_signed_offset(&params[16..21])?;
 
-        let rit_enabled = &params[20..21] != "0";
-        let xit_enabled = &params[21..22] != "0";
+        let rit_enabled = &params[21..22] != "0";
+        let xit_enabled = &params[22..23] != "0";
 
-        let memory_bank = params[22..24]
-            .trim()
-            .parse::<u8>()
-            .map_err(|_| RadioError::InvalidProtocolString(params[22..24].to_string()))?;
+        // Memory bank: 1 char at [23], space = VFO mode — treat as 0.
+        let memory_bank = {
+            let s = params[23..24].trim();
+            if s.is_empty() {
+                0u8
+            } else {
+                s.parse::<u8>()
+                    .map_err(|_| RadioError::InvalidProtocolString(params[23..24].to_string()))?
+            }
+        };
 
-        let memory_channel = params[24..26]
-            .parse::<u8>()
-            .map_err(|_| RadioError::InvalidProtocolString(params[24..26].to_string()))?;
+        // Memory channel: 2 chars at [24..26], may be spaces in VFO mode — treat as 0.
+        let memory_channel = {
+            let s = params[24..26].trim();
+            if s.is_empty() {
+                0u8
+            } else {
+                s.parse::<u8>()
+                    .map_err(|_| RadioError::InvalidProtocolString(params[24..26].to_string()))?
+            }
+        };
 
         let tx_rx = &params[26..27] != "0";
 
@@ -262,9 +308,10 @@ impl ResponseParser {
             .parse::<u8>()
             .map_err(|_| RadioError::InvalidProtocolString(params[31..33].to_string()))?;
 
-        let tone_number = params[33..35]
+        // Tone number: 1 char at [33]
+        let tone_number = params[33..34]
             .parse::<u8>()
-            .map_err(|_| RadioError::InvalidProtocolString(params[33..35].to_string()))?;
+            .map_err(|_| RadioError::InvalidProtocolString(params[33..34].to_string()))?;
 
         Ok(Response::Information(InformationResponse {
             frequency,
@@ -365,10 +412,83 @@ impl ResponseParser {
         Ok(Response::MemoryChannel(ch))
     }
 
+    /// Parse the `MR` (memory read) response.
+    ///
+    /// Wire format (params after `MR`):
+    /// ```text
+    /// Pos  Len  Field
+    ///   0    1  P1 — split (0=simplex, 1=split TX)
+    ///   1    1  space (literal)
+    ///   2    2  P3 — channel number 00–99
+    ///   4   11  P4 — frequency in Hz (zero-padded)
+    ///  15    1  P5 — mode (1–9; 0 = vacant)
+    ///  16    1  P6 — lockout (0=off, 1=on)
+    ///  17    1  P7 — tone type (0=off, 1=tone, 2=CTCSS)
+    ///  18    2  P8 — tone number 00–39
+    /// ```
+    /// Total: 20 characters.
+    ///
+    /// Vacant channel: freq field is all zeros (`00000000000`).
+    fn parse_memory_read(params: &str) -> RadioResult<Response> {
+        // Expected: 20 chars exactly
+        if params.len() != 20 {
+            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        }
+
+        // P1: split
+        let split = &params[0..1] != "0";
+
+        // params[1] must be a space
+        if &params[1..2] != " " {
+            return Err(RadioError::InvalidProtocolString(params.to_string()));
+        }
+
+        // P3: channel 00–99
+        let channel = params[2..4]
+            .parse::<u8>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+
+        // P4: frequency (11 digits)
+        let freq_hz = params[4..15]
+            .parse::<u64>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+
+        // P5: mode
+        let mode = params[15..16]
+            .parse::<u8>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+
+        // P6: lockout
+        let lockout = &params[16..17] != "0";
+
+        // P7: tone type
+        let tone_type = params[17..18]
+            .parse::<u8>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+
+        // P8: tone number (2 digits)
+        let tone_number = params[18..20]
+            .parse::<u8>()
+            .map_err(|_| RadioError::InvalidProtocolString(params.to_string()))?;
+
+        let vacant = freq_hz == 0;
+
+        Ok(Response::MemoryRead(MemoryChannelEntry {
+            channel,
+            split,
+            freq_hz,
+            mode,
+            lockout,
+            tone_type,
+            tone_number,
+            vacant,
+        }))
+    }
+
     /// Parse the `IS` (IF shift) response.
     ///
-    /// Wire format: `IS<direction><freq:04>` where direction is `+` or `-` and
-    /// freq is 4 digits.
+    /// Wire format: `IS<direction><freq:04>` where direction is `+`, `-`, or
+    /// `' '` (space = no shift / center) and freq is 4 digits.
     fn parse_if_shift(params: &str) -> RadioResult<Response> {
         if params.len() != 5 {
             return Err(RadioError::InvalidProtocolString(params.to_string()));
@@ -377,7 +497,7 @@ impl ResponseParser {
             .chars()
             .next()
             .ok_or_else(|| RadioError::InvalidProtocolString(params.to_string()))?;
-        if direction != '+' && direction != '-' {
+        if direction != '+' && direction != '-' && direction != ' ' {
             return Err(RadioError::InvalidProtocolString(params.to_string()));
         }
         let freq = params[1..]
@@ -412,7 +532,7 @@ impl ResponseParser {
             .parse::<i32>()
             .map_err(|_| RadioError::InvalidProtocolString(s.to_string()))?;
         match sign {
-            "+" => Ok(magnitude),
+            "+" | " " => Ok(magnitude),
             "-" => Ok(-magnitude),
             _ => Err(RadioError::InvalidProtocolString(s.to_string())),
         }
@@ -538,21 +658,37 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_parse_sm_main() {
+    fn test_parse_sm_canonical() {
+        // Manual p.80: canonical answer is SM<4digits>; — no selector prefix.
+        let resp = ResponseParser::parse("SM0015;").unwrap();
+        assert_eq!(resp, Response::SMeter(0, 15));
+    }
+
+    #[test]
+    fn test_parse_sm_zero() {
+        let resp = ResponseParser::parse("SM0000;").unwrap();
+        assert_eq!(resp, Response::SMeter(0, 0));
+    }
+
+    #[test]
+    fn test_parse_sm_max() {
+        // Manual format 22: SM range 0000–0015.
+        let resp = ResponseParser::parse("SM0015;").unwrap();
+        assert_eq!(resp, Response::SMeter(0, 15));
+    }
+
+    #[test]
+    fn test_parse_sm_legacy_5char_with_selector() {
+        // Legacy 5-char form with selector digit (backward compat).
         let resp = ResponseParser::parse("SM00015;").unwrap();
         assert_eq!(resp, Response::SMeter(0, 15));
     }
 
     #[test]
-    fn test_parse_sm_sub() {
+    fn test_parse_sm_legacy_5char_sub() {
+        // Legacy 5-char form, selector=1.
         let resp = ResponseParser::parse("SM10030;").unwrap();
         assert_eq!(resp, Response::SMeter(1, 30));
-    }
-
-    #[test]
-    fn test_parse_sm_zero() {
-        let resp = ResponseParser::parse("SM00000;").unwrap();
-        assert_eq!(resp, Response::SMeter(0, 0));
     }
 
     // -----------------------------------------------------------------------
@@ -560,13 +696,34 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_parse_ag_main() {
+    fn test_parse_ag_canonical() {
+        // Manual p.75: canonical answer is AG<3digits>; — no selector prefix.
+        let resp = ResponseParser::parse("AG128;").unwrap();
+        assert_eq!(resp, Response::AfGain(0, 128));
+    }
+
+    #[test]
+    fn test_parse_ag_zero() {
+        let resp = ResponseParser::parse("AG000;").unwrap();
+        assert_eq!(resp, Response::AfGain(0, 0));
+    }
+
+    #[test]
+    fn test_parse_ag_max() {
+        let resp = ResponseParser::parse("AG255;").unwrap();
+        assert_eq!(resp, Response::AfGain(0, 255));
+    }
+
+    #[test]
+    fn test_parse_ag_legacy_4char_main() {
+        // Legacy 4-char form with selector digit (backward compat).
         let resp = ResponseParser::parse("AG0128;").unwrap();
         assert_eq!(resp, Response::AfGain(0, 128));
     }
 
     #[test]
-    fn test_parse_ag_sub() {
+    fn test_parse_ag_legacy_4char_sub() {
+        // Legacy 4-char form, selector=1.
         let resp = ResponseParser::parse("AG1200;").unwrap();
         assert_eq!(resp, Response::AfGain(1, 200));
     }
@@ -631,13 +788,13 @@ mod tests {
 
     /// Build a valid IF payload string for test use.
     ///
-    /// Layout (37 chars):
-    ///   [0..11]  frequency
-    ///   [11..15] step (4 chars)
-    ///   [15..20] rit/xit offset (+NNNN or -NNNN)
-    ///   [20]     rit enabled
-    ///   [21]     xit enabled
-    ///   [22..24] memory bank (2 chars)
+    /// Layout (34 chars):
+    ///   [0..11]  freq (11 chars)
+    ///   [11..16] step (5 chars)
+    ///   [16..21] rit/xit offset (sign + 4 digits; sign is '+'/'-'/' ')
+    ///   [21]     rit enabled
+    ///   [22]     xit enabled
+    ///   [23]     memory bank (1 char; space = VFO mode)
     ///   [24..26] memory channel (2 chars)
     ///   [26]     tx/rx
     ///   [27]     mode
@@ -645,9 +802,7 @@ mod tests {
     ///   [29]     scan status
     ///   [30]     split
     ///   [31..33] ctcss tone (2 chars)
-    ///   [33..35] tone number (2 chars)
-    ///   [35]     offset indicator
-    ///   [36]     (reserved / unused)
+    ///   [33]     tone number (1 char)
     fn make_if_string(
         freq_hz: u64,
         step: u32,
@@ -667,7 +822,7 @@ mod tests {
         let sign = if rit_xit_offset >= 0 { '+' } else { '-' };
         let offset_abs = rit_xit_offset.unsigned_abs();
         format!(
-            "IF{:011}{:04}{}{:04}{}{}{:02}{:02}{}{}{}{}{}{:02}{:02}00;",
+            "IF{:011}{:05}{}{:04}{}{}{:1}{:02}{}{}{}{}{}{:02}{:01};",
             freq_hz,
             step,
             sign,
