@@ -1198,7 +1198,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                         let m = &state.memory_channels[ch];
                         if m.freq == 0 {
                             // Vacant: all zeros except channel number
-                            query!(format!("MR{} {:02}00000000000000000000;", split_type, ch))
+                            query!(format!("MR{} {:02}0000000000000000;", split_type, ch))
                         } else {
                             query!(format!(
                                 "MR{} {:02}{:011}{}{}{}{:02};",
