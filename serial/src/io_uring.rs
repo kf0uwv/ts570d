@@ -447,12 +447,25 @@ mod tests {
     fn test_transport_read_from_master() {
         let pair = PtyPair::new().expect("PTY creation failed");
         let slave = pair.slave_path().to_string();
+        let master_fd = pair.master_raw_fd();
 
-        // Write test data to master BEFORE starting the runtime so it is
-        // already in the PTY buffer when the async read begins.
-        let expected = b"FA;";
-        write_to_master(pair.master_raw_fd(), expected);
+        // Write from a background thread after a short delay so the data
+        // arrives AFTER the io_uring read is submitted.  Pre-writing before
+        // the runtime starts does not trigger a completion event on PTY fds
+        // with IORING_OP_READV on kernel 5.15 (GitHub Actions runner).
+        let expected: &'static [u8] = b"FA;";
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            unsafe {
+                libc::write(
+                    master_fd,
+                    expected.as_ptr() as *const libc::c_void,
+                    expected.len(),
+                )
+            };
+        });
 
+        let _pair = pair; // keep master fd alive
         let result = make_runtime().block_on(async {
             let mut port =
                 SerialPort::open(&slave, SerialConfig::default()).expect("SerialPort::open failed");
@@ -601,8 +614,20 @@ mod tests {
         );
 
         // --- master → slave direction ---
-        let master_to_slave_msg = b"FA00014000000;";
-        write_to_master(master_fd, master_to_slave_msg);
+        // Write from a background thread so data arrives after the io_uring
+        // read is submitted (pre-writing does not fire a completion on PTY fds
+        // with IORING_OP_READV on kernel 5.15).
+        let master_to_slave_msg: &'static [u8] = b"FA00014000000;";
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            unsafe {
+                libc::write(
+                    master_fd,
+                    master_to_slave_msg.as_ptr() as *const libc::c_void,
+                    master_to_slave_msg.len(),
+                )
+            };
+        });
         let received_on_slave = make_runtime().block_on(async {
             let mut port =
                 SerialPort::open(&slave, SerialConfig::default()).expect("SerialPort::open failed");
