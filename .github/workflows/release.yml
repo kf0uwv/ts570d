@@ -52,5 +52,5 @@ jobs:
       - name: Upload .deb to release
         uses: softprops/action-gh-release@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.AUTH_TOKEN }}
           files: "*.deb"
