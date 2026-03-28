@@ -13,7 +13,7 @@ ts570d-emulator
 The emulator creates a PTY pair and prints the slave device path (e.g. `/dev/pts/4`) to the header bar. Point `ts570d-control` at that path:
 
 ```sh
-ts570d-control /dev/pts/4
+ts570d-control --port /dev/pts/4
 ```
 
 ## Interface
@@ -32,30 +32,34 @@ The emulator TUI has two panels:
 
 ## Supported commands
 
-The emulator implements all CAT commands in the TS-570D manual (pages 70–81):
+The emulator implements the following CAT commands from the TS-570D manual (pages 70–81):
 
 | Category | Commands |
 |----------|----------|
 | Frequency | FA, FB, IF |
 | Mode | MD |
 | VFO/Memory | FR, FT, MC, MR, MW |
+| Tuning steps | DN, UP |
 | Meters | SM, RM |
 | Gain | AG, RG, MG |
 | Squelch | SQ |
 | Power | PC, PS |
+| TX/RX | TX, RX |
 | Noise | NB, NR |
-| Filters | SH, SL, BC, IS |
-| Antenna | AN |
+| Filters | SH, SL, BC, IS, FW |
+| Antenna | AN, AC |
 | RIT/XIT | RT, XT, RC, RD, RU |
 | Scan | SC |
-| Lock | LK, FS |
+| Lock / Step | LK, FS |
 | VOX | VX, VG, VD |
 | Tones | CN, CT, TN, TO |
-| CW | KS, PT, SD, CA |
-| Speech | PR |
+| CW | KS, PT, SD, CA, KY |
+| Speech | PR, VR, LM, PB |
 | Preamp/Att | PA, RA |
 | AGC | GT |
-| Misc | BY, ID |
+| Auto info | AI |
+| Menu | EX |
+| Misc | BY, ID, FV, SR |
 
 SET commands update emulator state immediately; subsequent query commands reflect the new state.
 

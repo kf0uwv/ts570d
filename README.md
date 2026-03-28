@@ -18,30 +18,43 @@ Terminal-based CAT control for the Kenwood TS-570D/S HF transceiver. Built with 
 Download the latest `.deb` from the releases page and install:
 
 ```sh
-sudo dpkg -i ts570d-radio-control_0.1.0_amd64.deb
+sudo dpkg -i ts570d-radio-control_<version>_amd64.deb
 ```
+
+Installs three binaries to `/usr/bin/`:
+
+| Binary | Description |
+|--------|-------------|
+| `ts570d-control` | Main control application |
+| `ts570d-emulator` | Virtual radio emulator |
+| `rs232c-pintest` | RS-232C wiring/pin diagnostic |
 
 ### Build from source
 
 ```sh
-cargo build --release
+cargo build --release        # ts570d and pin-test
+cargo build --release -p emulator
 ```
 
-Binaries are placed in `target/release/`:
-
-| Binary | Description |
-|--------|-------------|
-| `ts570d` | Main control application |
-| `emulator` | Virtual radio emulator |
-| `pin-test` | RS-232C pin/wiring diagnostic |
+Binaries are placed in `target/release/` as `ts570d`, `emulator`, and `pin-test`.
 
 ## Usage
 
 ```sh
-ts570d-control /dev/ttyS0
+ts570d-control --port /dev/ttyS0
 ```
 
-The serial port defaults to 4800 baud, 8N2, no flow control — matching the TS-570D factory default. Pass `--help` for all options.
+Full options:
+
+```
+Usage: ts570d-control --port <path> [--baud <rate>] [--stop-bits <n>]
+
+  --port      Serial port path (required)
+  --baud      Baud rate: 1200, 2400, 4800, 9600  (default: 9600)
+  --stop-bits Stop bits: 1 or 2                  (default: 1)
+```
+
+The TS-570D factory default is 9600 baud, 8N1. If your radio has been configured differently, pass `--baud` and `--stop-bits` accordingly.
 
 ### Key bindings
 
@@ -55,7 +68,7 @@ The serial port defaults to 4800 baud, 8N2, no flow control — matching the TS-
 | `C` | CW keyer settings |
 | `O` | Tones (CTCSS/tone squelch) |
 | `S` | System settings |
-| `D` | Diagnostics (runs all 104 CAT commands) |
+| `D` | Diagnostics (runs 99 CAT command round-trips) |
 | `Q` | Quit |
 
 ## Emulator
