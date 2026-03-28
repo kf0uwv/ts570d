@@ -7,13 +7,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-permissions:
-  contents: write
-
 jobs:
   build-deb:
     name: Build Debian package
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -52,4 +52,5 @@ jobs:
       - name: Upload .deb to release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           files: "*.deb"
