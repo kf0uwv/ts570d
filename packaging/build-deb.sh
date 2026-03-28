@@ -39,28 +39,24 @@ install -m 0755 "${RELEASE}/pin-test"  "${STAGING}/usr/bin/rs232c-pintest"
 sed "s/^Version:.*/Version: ${VERSION}/" \
     "${SCRIPT_DIR}/DEBIAN/control" > "${STAGING}/DEBIAN/control"
 
-# Copyright
-cat > "${STAGING}/usr/share/doc/ts570d-radio-control/copyright" <<'EOF'
+# Copyright — DEP-5 format with full Apache 2.0 license text from LICENSE.txt
+{
+    cat <<HEADER
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: ts570d-radio-control
 Upstream-Contact: Matt Franklin <radiombf@gmail.com>
 Source: https://github.com/kf0uwv/ts570d
 
 Files: *
-Copyright: 2024 Matt Franklin <radiombf@gmail.com>
-License: MIT or Apache-2.0
-
-License: MIT
- Permission is hereby granted, free of charge, to any person obtaining a copy
- of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights
- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- copies of the Software, and to permit persons to whom the Software is
- furnished to do so, subject to the following conditions: [...]
+Copyright: 2026 Matt Franklin <radiombf@gmail.com>
+License: Apache-2.0
 
 License: Apache-2.0
- Licensed under the Apache License, Version 2.0 (the "License"); [...]
-EOF
+HEADER
+    # Indent every line of the license text by one space (DEP-5 requirement).
+    # Blank lines become a single " ." to preserve paragraph breaks.
+    sed 's/^$/ ./; s/^/ /' "${ROOT}/LICENSE.txt"
+} > "${STAGING}/usr/share/doc/ts570d-radio-control/copyright"
 
 # ── 3. Build .deb ────────────────────────────────────────────────────────────
 OUT="${ROOT}/${PKG}.deb"
