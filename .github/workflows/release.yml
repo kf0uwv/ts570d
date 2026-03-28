@@ -18,6 +18,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.AUTH_TOKEN }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -53,3 +56,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.AUTH_TOKEN }}
         run: gh release upload ${{ github.ref_name }} *.deb --clobber
+
+      - name: Bump minor version on main
+        run: |
+          # Parse current version from Cargo.toml
+          CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          NEXT="${MAJOR}.$((MINOR + 1)).0"
+
+          echo "Bumping ${CURRENT} → ${NEXT}"
+          sed -i "s/^version = \"${CURRENT}\"/version = \"${NEXT}\"/" Cargo.toml
+
+          # Update Cargo.lock to reflect the new version
+          cargo check --quiet
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: bump version ${CURRENT} → ${NEXT} [skip ci]"
+          git push origin main
