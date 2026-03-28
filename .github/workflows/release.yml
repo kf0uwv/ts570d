@@ -50,7 +50,6 @@ jobs:
         run: ./packaging/build-deb.sh --skip-build
 
       - name: Upload .deb to release
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ secrets.AUTH_TOKEN }}
-          files: "*.deb"
+        env:
+          GH_TOKEN: ${{ secrets.AUTH_TOKEN }}
+        run: gh release upload ${{ github.ref_name }} *.deb --clobber
