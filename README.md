@@ -69,4 +69,4 @@ PDF: <https://www.kenwood.com/usa/Support/pdf/TS-570-English.pdf>
 
 ## License
 
-MIT OR Apache-2.0
+Copyright 2026 Matt Franklin. Licensed under the [Apache License, Version 2.0](LICENSE.txt).
