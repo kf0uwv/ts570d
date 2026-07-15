@@ -41,7 +41,22 @@ pub mod client;
 pub mod commands;
 pub mod protocol;
 pub mod ts570d;
+pub mod ts570d_radio;
+
+mod logger {
+    pub type StateChange = crate::ts570d_radio::Ts570dEvent;
+}
+
+mod radio_state {
+    pub use crate::ts570d_radio::MemoryChannel;
+    pub type RadioState = crate::ts570d_radio::Ts570dState;
+}
+
+mod ts570d_radio_handlers;
 
 pub use client::RadioClient;
 pub use protocol::{Response, ResponseFramer, ResponseParser};
 pub use ts570d::Ts570d;
+pub use ts570d_radio::{
+    Ts570dCommandId, Ts570dEvent, Ts570dRadio, Ts570dState, TS570D_COMMAND_TABLE,
+};

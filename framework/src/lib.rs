@@ -23,12 +23,18 @@
 //! - **Radio trait** - Typed radio command abstraction
 
 // Framework modules
+pub mod cat;
 pub mod errors;
 pub mod radio;
 pub mod state_machine;
 pub mod transport;
 
 // Re-export main framework components
+pub use cat::{
+    CatCommandCatalog, CatFramework, CatFrameworkError, CatRadio, CommandDefinition, CommandForm,
+    CommandId, CommandOperation, CommandOutcome, CommandRequest, CommandTable, ParameterValues,
+    ParseError, ProtocolErrorKind, ResponseBuildError, ResponseBuilder, ResponseDisposition,
+};
 pub use errors::{FrameworkError, FrameworkResult, TransportError};
 pub use radio::{Frequency, InformationResponse, Mode, NopRadio, Radio, RadioError, RadioResult};
 pub use state_machine::{ApplicationStateMachine, State};

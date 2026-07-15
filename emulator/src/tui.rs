@@ -21,7 +21,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::radio_state::{RadioState, VfoSel};
+use radio::ts570d_radio::{Ts570dState as RadioState, VfoSel};
 
 /// Look up the human-readable description for a 2-character CAT command code.
 fn lookup_description(code: &str) -> Option<&'static str> {

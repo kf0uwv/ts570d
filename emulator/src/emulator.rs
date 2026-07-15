@@ -23,11 +23,12 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use serialport::SerialPort;
 
-use crate::commands;
+use framework::CatFramework;
+use radio::Ts570dRadio;
+
 use crate::io::EmulatorIo;
 use crate::logger::{now_ms, BackgroundLogger, LogEvent};
 use crate::pty::PtyPair;
-use crate::radio_state::RadioState;
 use crate::tui;
 use crate::EmulatorError;
 
@@ -45,7 +46,7 @@ pub struct Emulator {
     /// Cached slave device path.
     slave_path: String,
     io: EmulatorIo,
-    state: RadioState,
+    framework: CatFramework<Ts570dRadio>,
     /// Rolling command/response log for the TUI command panel.
     log: VecDeque<String>,
 }
@@ -60,12 +61,12 @@ impl Emulator {
         // Take the master port out of PtyPair for use by EmulatorIo.
         let master = pty.take_master();
         let io = EmulatorIo::from_port(master);
-        let state = RadioState::default();
+        let framework = CatFramework::new(Ts570dRadio::new());
         Ok(Emulator {
             _pty: Some(pty),
             slave_path,
             io,
-            state,
+            framework,
             log: VecDeque::new(),
         })
     }
@@ -76,12 +77,12 @@ impl Emulator {
     /// The caller is responsible for printing status before calling this.
     pub fn from_port(port: Box<dyn SerialPort>, slave_path: String) -> Self {
         let io = EmulatorIo::from_port(port);
-        let state = RadioState::default();
+        let framework = CatFramework::new(Ts570dRadio::new());
         Emulator {
             _pty: None,
             slave_path,
             io,
-            state,
+            framework,
             log: VecDeque::new(),
         }
     }
@@ -101,9 +102,12 @@ impl Emulator {
             match self.io.read_commands() {
                 Ok(cmds) => {
                     for cmd in cmds {
-                        let (response, _changes) = commands::handle(&cmd, &mut self.state);
+                        let mut response = Vec::new();
+                        let frame = format!("{};", cmd);
+                        let _ = self.framework.process_frame(&frame, &mut response);
                         if !response.is_empty() {
-                            self.io.write_response(&response)?;
+                            self.io
+                                .write_response(&String::from_utf8_lossy(&response))?;
                         }
                     }
                 }
@@ -144,21 +148,24 @@ impl Emulator {
             match self.io.read_commands() {
                 Ok(cmds) => {
                     for cmd in cmds {
-                        let (response, changes) = commands::handle(&cmd, &mut self.state);
-                        if !response.is_empty() {
-                            self.io.write_response(&response)?;
+                        let mut response = Vec::new();
+                        let frame = format!("{};", cmd);
+                        let outcome = self.framework.process_frame(&frame, &mut response).ok();
+                        let response_text = String::from_utf8_lossy(&response).into_owned();
+                        if !response_text.is_empty() {
+                            self.io.write_response(&response_text)?;
                         }
 
                         // Log the raw command + response.
                         let cmd_event = LogEvent::Command {
                             ts: now_ms(),
                             raw: &format!("{};", cmd),
-                            response: &response,
+                            response: &response_text,
                         };
                         logger.log_event(&cmd_event);
 
                         // Log each state change.
-                        for change in &changes {
+                        for change in outcome.iter().flat_map(|outcome| outcome.events.iter()) {
                             let sc_event = LogEvent::StateChange {
                                 ts: now_ms(),
                                 field: change.field,
@@ -227,7 +234,8 @@ impl Emulator {
             // 1. Draw the current state.
             let slave_path = self.slave_path.clone();
             let log_slice: Vec<String> = self.log.iter().cloned().collect();
-            terminal.draw(|f| tui::draw(f, &self.state, &slave_path, &log_slice))?;
+            terminal
+                .draw(|f| tui::draw(f, self.framework.radio().state(), &slave_path, &log_slice))?;
 
             // 2. Poll for keyboard events (non-blocking, 10 ms window).
             if event::poll(Duration::from_millis(10))? {
@@ -252,7 +260,10 @@ impl Emulator {
                 Ok(cmds) => {
                     // 4. Handle each command, updating state.
                     for cmd in cmds {
-                        let (response, _changes) = commands::handle(&cmd, &mut self.state);
+                        let mut response = Vec::new();
+                        let frame = format!("{};", cmd);
+                        let _ = self.framework.process_frame(&frame, &mut response);
+                        let response = String::from_utf8_lossy(&response).into_owned();
                         // 5. Append to command log.
                         self.log_entry(&cmd, &response);
                         // 6. Write response (silent for SET commands).
