@@ -23,7 +23,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use framework::radio::{Frequency, MemoryChannelEntry, Mode, Radio};
+use radio::{Frequency, MemoryChannelEntry, Mode, Radio};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::{
@@ -177,7 +177,7 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
     poll!(
         "IF",
         radio.get_information(),
-        |info: framework::radio::InformationResponse| {
+        |info: radio::InformationResponse| {
             state.vfo_a_hz = info.frequency.hz();
             state.mode = info.mode.name().to_string();
             state.tx = info.tx_rx;
@@ -194,7 +194,7 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
     poll!(
         "VFO-B",
         radio.get_vfo_b(),
-        |freq: framework::radio::Frequency| {
+        |freq: radio::Frequency| {
             state.vfo_b_hz = freq.hz();
         }
     );
@@ -360,9 +360,9 @@ macro_rules! diag_get {
 /// A snapshot of all readable radio state that has a corresponding setter.
 /// Every field is `Option<T>` so that individual getter failures are non-fatal.
 struct RadioSnapshot {
-    vfo_a: Option<framework::radio::Frequency>,
-    vfo_b: Option<framework::radio::Frequency>,
-    mode: Option<framework::radio::Mode>,
+    vfo_a: Option<radio::Frequency>,
+    vfo_b: Option<radio::Frequency>,
+    mode: Option<radio::Mode>,
     af_gain: Option<u8>,
     rf_gain: Option<u8>,
     squelch: Option<u8>,
@@ -2268,8 +2268,8 @@ async fn execute_action<R: Radio>(
     radio: &mut R,
     action: ExecuteAction,
     if_shift_dir: &mut char,
-) -> (&'static str, framework::radio::RadioResult<String>) {
-    use framework::radio::{MemoryChannelEntry, RadioResult};
+) -> (&'static str, radio::RadioResult<String>) {
+    use radio::{MemoryChannelEntry, RadioResult};
     use ExecuteAction::*;
 
     // Helper to convert a unit result to a String result

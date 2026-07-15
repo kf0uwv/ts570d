@@ -37,7 +37,7 @@
 use framework::transport::Transport;
 
 use crate::commands::CommandMetadata;
-use framework::radio::{RadioError, RadioResult};
+use crate::{RadioError, RadioResult};
 
 /// Sends CAT commands over a [`Transport`] and reads back responses.
 ///

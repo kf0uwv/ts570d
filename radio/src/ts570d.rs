@@ -38,7 +38,7 @@
 
 use framework::transport::Transport;
 
-use framework::radio::{Frequency, MemoryChannelEntry, Mode, RadioError, RadioResult};
+use crate::{Frequency, MemoryChannelEntry, Mode, RadioError, RadioResult};
 
 use crate::client::RadioClient;
 use crate::protocol::{InformationResponse, Response, ResponseParser};
@@ -1096,366 +1096,366 @@ impl<T: Transport> Ts570d<T> {
 // ---------------------------------------------------------------------------
 
 #[async_trait::async_trait(?Send)]
-impl<T: framework::transport::Transport> framework::radio::Radio for Ts570d<T> {
-    async fn get_vfo_a(&mut self) -> framework::radio::RadioResult<framework::radio::Frequency> {
+impl<T: framework::transport::Transport> crate::Radio for Ts570d<T> {
+    async fn get_vfo_a(&mut self) -> crate::RadioResult<crate::Frequency> {
         Ts570d::get_vfo_a(self).await
     }
 
     async fn set_vfo_a(
         &mut self,
-        freq: framework::radio::Frequency,
-    ) -> framework::radio::RadioResult<()> {
+        freq: crate::Frequency,
+    ) -> crate::RadioResult<()> {
         Ts570d::set_vfo_a(self, freq).await
     }
 
-    async fn get_vfo_b(&mut self) -> framework::radio::RadioResult<framework::radio::Frequency> {
+    async fn get_vfo_b(&mut self) -> crate::RadioResult<crate::Frequency> {
         Ts570d::get_vfo_b(self).await
     }
 
     async fn set_vfo_b(
         &mut self,
-        freq: framework::radio::Frequency,
-    ) -> framework::radio::RadioResult<()> {
+        freq: crate::Frequency,
+    ) -> crate::RadioResult<()> {
         Ts570d::set_vfo_b(self, freq).await
     }
 
-    async fn get_mode(&mut self) -> framework::radio::RadioResult<framework::radio::Mode> {
+    async fn get_mode(&mut self) -> crate::RadioResult<crate::Mode> {
         Ts570d::get_mode(self).await
     }
 
     async fn set_mode(
         &mut self,
-        mode: framework::radio::Mode,
-    ) -> framework::radio::RadioResult<()> {
+        mode: crate::Mode,
+    ) -> crate::RadioResult<()> {
         Ts570d::set_mode(self, mode).await
     }
 
-    async fn get_smeter(&mut self) -> framework::radio::RadioResult<u16> {
+    async fn get_smeter(&mut self) -> crate::RadioResult<u16> {
         Ts570d::get_smeter(self).await
     }
 
-    async fn transmit(&mut self) -> framework::radio::RadioResult<()> {
+    async fn transmit(&mut self) -> crate::RadioResult<()> {
         Ts570d::transmit(self).await
     }
 
-    async fn receive(&mut self) -> framework::radio::RadioResult<()> {
+    async fn receive(&mut self) -> crate::RadioResult<()> {
         Ts570d::receive(self).await
     }
 
-    async fn get_id(&mut self) -> framework::radio::RadioResult<u16> {
+    async fn get_id(&mut self) -> crate::RadioResult<u16> {
         Ts570d::get_id(self).await
     }
 
     async fn get_information(
         &mut self,
-    ) -> framework::radio::RadioResult<framework::radio::InformationResponse> {
+    ) -> crate::RadioResult<crate::InformationResponse> {
         Ts570d::get_information(self).await
     }
 
-    async fn get_af_gain(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_af_gain(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_af_gain(self).await
     }
 
-    async fn set_af_gain(&mut self, level: u8) -> framework::radio::RadioResult<()> {
+    async fn set_af_gain(&mut self, level: u8) -> crate::RadioResult<()> {
         Ts570d::set_af_gain(self, level).await
     }
 
-    async fn get_rf_gain(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_rf_gain(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_rf_gain(self).await
     }
 
-    async fn set_rf_gain(&mut self, level: u8) -> framework::radio::RadioResult<()> {
+    async fn set_rf_gain(&mut self, level: u8) -> crate::RadioResult<()> {
         Ts570d::set_rf_gain(self, level).await
     }
 
-    async fn get_power(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_power(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_power(self).await
     }
 
-    async fn set_power(&mut self, watts: u8) -> framework::radio::RadioResult<()> {
+    async fn set_power(&mut self, watts: u8) -> crate::RadioResult<()> {
         Ts570d::set_power(self, watts).await
     }
 
-    async fn get_noise_blanker(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_noise_blanker(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_noise_blanker(self).await
     }
 
-    async fn set_noise_blanker(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_noise_blanker(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_noise_blanker(self, on).await
     }
 
-    async fn get_noise_reduction(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_noise_reduction(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_noise_reduction(self).await
     }
 
-    async fn set_noise_reduction(&mut self, level: u8) -> framework::radio::RadioResult<()> {
+    async fn set_noise_reduction(&mut self, level: u8) -> crate::RadioResult<()> {
         Ts570d::set_noise_reduction(self, level).await
     }
 
-    async fn get_preamp(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_preamp(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_preamp(self).await
     }
 
-    async fn set_preamp(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_preamp(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_preamp(self, on).await
     }
 
-    async fn get_attenuator(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_attenuator(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_attenuator(self).await
     }
 
-    async fn set_attenuator(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_attenuator(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_attenuator(self, on).await
     }
 
-    async fn get_squelch(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_squelch(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_squelch(self).await
     }
 
-    async fn set_squelch(&mut self, level: u8) -> framework::radio::RadioResult<()> {
+    async fn set_squelch(&mut self, level: u8) -> crate::RadioResult<()> {
         Ts570d::set_squelch(self, level).await
     }
 
-    async fn get_mic_gain(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_mic_gain(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_mic_gain(self).await
     }
 
-    async fn set_mic_gain(&mut self, gain: u8) -> framework::radio::RadioResult<()> {
+    async fn set_mic_gain(&mut self, gain: u8) -> crate::RadioResult<()> {
         Ts570d::set_mic_gain(self, gain).await
     }
 
-    async fn get_agc(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_agc(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_agc(self).await
     }
 
-    async fn set_agc(&mut self, constant: u8) -> framework::radio::RadioResult<()> {
+    async fn set_agc(&mut self, constant: u8) -> crate::RadioResult<()> {
         Ts570d::set_agc(self, constant).await
     }
 
-    async fn get_rit(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_rit(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_rit(self).await
     }
 
-    async fn set_rit(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_rit(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_rit(self, on).await
     }
 
-    async fn clear_rit(&mut self) -> framework::radio::RadioResult<()> {
+    async fn clear_rit(&mut self) -> crate::RadioResult<()> {
         Ts570d::clear_rit(self).await
     }
 
-    async fn rit_up(&mut self) -> framework::radio::RadioResult<()> {
+    async fn rit_up(&mut self) -> crate::RadioResult<()> {
         Ts570d::rit_up(self).await
     }
 
-    async fn rit_down(&mut self) -> framework::radio::RadioResult<()> {
+    async fn rit_down(&mut self) -> crate::RadioResult<()> {
         Ts570d::rit_down(self).await
     }
 
-    async fn get_xit(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_xit(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_xit(self).await
     }
 
-    async fn set_xit(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_xit(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_xit(self, on).await
     }
 
-    async fn get_scan(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_scan(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_scan(self).await
     }
 
-    async fn set_scan(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_scan(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_scan(self, on).await
     }
 
-    async fn get_vox(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_vox(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_vox(self).await
     }
 
-    async fn set_vox(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_vox(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_vox(self, on).await
     }
 
-    async fn get_vox_gain(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_vox_gain(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_vox_gain(self).await
     }
 
-    async fn set_vox_gain(&mut self, gain: u8) -> framework::radio::RadioResult<()> {
+    async fn set_vox_gain(&mut self, gain: u8) -> crate::RadioResult<()> {
         Ts570d::set_vox_gain(self, gain).await
     }
 
-    async fn get_vox_delay(&mut self) -> framework::radio::RadioResult<u16> {
+    async fn get_vox_delay(&mut self) -> crate::RadioResult<u16> {
         Ts570d::get_vox_delay(self).await
     }
 
-    async fn set_vox_delay(&mut self, ms: u16) -> framework::radio::RadioResult<()> {
+    async fn set_vox_delay(&mut self, ms: u16) -> crate::RadioResult<()> {
         Ts570d::set_vox_delay(self, ms).await
     }
 
-    async fn get_rx_vfo(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_rx_vfo(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_rx_vfo(self).await
     }
 
-    async fn set_rx_vfo(&mut self, vfo: u8) -> framework::radio::RadioResult<()> {
+    async fn set_rx_vfo(&mut self, vfo: u8) -> crate::RadioResult<()> {
         Ts570d::set_rx_vfo(self, vfo).await
     }
 
-    async fn get_tx_vfo(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_tx_vfo(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_tx_vfo(self).await
     }
 
-    async fn set_tx_vfo(&mut self, vfo: u8) -> framework::radio::RadioResult<()> {
+    async fn set_tx_vfo(&mut self, vfo: u8) -> crate::RadioResult<()> {
         Ts570d::set_tx_vfo(self, vfo).await
     }
 
-    async fn get_frequency_lock(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_frequency_lock(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_frequency_lock(self).await
     }
 
-    async fn set_frequency_lock(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_frequency_lock(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_frequency_lock(self, on).await
     }
 
-    async fn get_power_on(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_power_on(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_power_on(self).await
     }
 
-    async fn set_power_on(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_power_on(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_power_on(self, on).await
     }
 
-    async fn is_busy(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn is_busy(&mut self) -> crate::RadioResult<bool> {
         Ts570d::is_busy(self).await
     }
 
-    async fn get_speech_processor(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_speech_processor(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_speech_processor(self).await
     }
 
-    async fn set_speech_processor(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_speech_processor(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_speech_processor(self, on).await
     }
 
-    async fn get_memory_channel(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_memory_channel(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_memory_channel(self).await
     }
 
-    async fn set_memory_channel(&mut self, ch: u8) -> framework::radio::RadioResult<()> {
+    async fn set_memory_channel(&mut self, ch: u8) -> crate::RadioResult<()> {
         Ts570d::set_memory_channel(self, ch).await
     }
 
     async fn read_memory_channel(
         &mut self,
         ch: u8,
-    ) -> framework::radio::RadioResult<framework::radio::MemoryChannelEntry> {
+    ) -> crate::RadioResult<crate::MemoryChannelEntry> {
         Ts570d::read_memory_channel(self, ch).await
     }
 
     async fn write_memory_channel(
         &mut self,
         ch: u8,
-        entry: framework::radio::MemoryChannelEntry,
-    ) -> framework::radio::RadioResult<()> {
+        entry: crate::MemoryChannelEntry,
+    ) -> crate::RadioResult<()> {
         Ts570d::write_memory_channel(self, ch, entry).await
     }
 
-    async fn clear_memory_channel(&mut self, ch: u8) -> framework::radio::RadioResult<()> {
+    async fn clear_memory_channel(&mut self, ch: u8) -> crate::RadioResult<()> {
         Ts570d::clear_memory_channel(self, ch).await
     }
 
-    async fn get_antenna(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_antenna(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_antenna(self).await
     }
 
-    async fn set_antenna(&mut self, ant: u8) -> framework::radio::RadioResult<()> {
+    async fn set_antenna(&mut self, ant: u8) -> crate::RadioResult<()> {
         Ts570d::set_antenna(self, ant).await
     }
 
-    async fn send_cw(&mut self, message: &str) -> framework::radio::RadioResult<()> {
+    async fn send_cw(&mut self, message: &str) -> crate::RadioResult<()> {
         Ts570d::send_cw(self, message).await
     }
 
-    async fn get_keyer_speed(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_keyer_speed(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_keyer_speed(self).await
     }
 
-    async fn set_keyer_speed(&mut self, wpm: u8) -> framework::radio::RadioResult<()> {
+    async fn set_keyer_speed(&mut self, wpm: u8) -> crate::RadioResult<()> {
         Ts570d::set_keyer_speed(self, wpm).await
     }
 
-    async fn get_cw_pitch(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_cw_pitch(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_cw_pitch(self).await
     }
 
-    async fn set_cw_pitch(&mut self, pitch: u8) -> framework::radio::RadioResult<()> {
+    async fn set_cw_pitch(&mut self, pitch: u8) -> crate::RadioResult<()> {
         Ts570d::set_cw_pitch(self, pitch).await
     }
 
-    async fn set_antenna_tuner_thru(&mut self, thru: bool) -> framework::radio::RadioResult<()> {
+    async fn set_antenna_tuner_thru(&mut self, thru: bool) -> crate::RadioResult<()> {
         Ts570d::set_antenna_tuner_thru(self, thru).await
     }
 
-    async fn start_antenna_tuning(&mut self) -> framework::radio::RadioResult<()> {
+    async fn start_antenna_tuning(&mut self) -> crate::RadioResult<()> {
         Ts570d::start_antenna_tuning(self).await
     }
 
-    async fn get_high_cutoff(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_high_cutoff(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_high_cutoff(self).await
     }
 
-    async fn set_high_cutoff(&mut self, val: u8) -> framework::radio::RadioResult<()> {
+    async fn set_high_cutoff(&mut self, val: u8) -> crate::RadioResult<()> {
         Ts570d::set_high_cutoff(self, val).await
     }
 
-    async fn get_low_cutoff(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_low_cutoff(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_low_cutoff(self).await
     }
 
-    async fn set_low_cutoff(&mut self, val: u8) -> framework::radio::RadioResult<()> {
+    async fn set_low_cutoff(&mut self, val: u8) -> crate::RadioResult<()> {
         Ts570d::set_low_cutoff(self, val).await
     }
 
-    async fn get_ctcss_tone_number(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_ctcss_tone_number(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_ctcss_tone_number(self).await
     }
 
-    async fn set_ctcss_tone_number(&mut self, n: u8) -> framework::radio::RadioResult<()> {
+    async fn set_ctcss_tone_number(&mut self, n: u8) -> crate::RadioResult<()> {
         Ts570d::set_ctcss_tone_number(self, n).await
     }
 
-    async fn get_ctcss(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_ctcss(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_ctcss(self).await
     }
 
-    async fn set_ctcss(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_ctcss(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_ctcss(self, on).await
     }
 
-    async fn get_tone_number(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_tone_number(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_tone_number(self).await
     }
 
-    async fn set_tone_number(&mut self, n: u8) -> framework::radio::RadioResult<()> {
+    async fn set_tone_number(&mut self, n: u8) -> crate::RadioResult<()> {
         Ts570d::set_tone_number(self, n).await
     }
 
-    async fn get_tone(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_tone(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_tone(self).await
     }
 
-    async fn set_tone(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_tone(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_tone(self, on).await
     }
 
-    async fn get_beat_cancel(&mut self) -> framework::radio::RadioResult<u8> {
+    async fn get_beat_cancel(&mut self) -> crate::RadioResult<u8> {
         Ts570d::get_beat_cancel(self).await
     }
 
-    async fn set_beat_cancel(&mut self, mode: u8) -> framework::radio::RadioResult<()> {
+    async fn set_beat_cancel(&mut self, mode: u8) -> crate::RadioResult<()> {
         Ts570d::set_beat_cancel(self, mode).await
     }
 
-    async fn get_if_shift(&mut self) -> framework::radio::RadioResult<(char, u16)> {
+    async fn get_if_shift(&mut self) -> crate::RadioResult<(char, u16)> {
         Ts570d::get_if_shift(self).await
     }
 
@@ -1463,55 +1463,55 @@ impl<T: framework::transport::Transport> framework::radio::Radio for Ts570d<T> {
         &mut self,
         direction: char,
         freq: u16,
-    ) -> framework::radio::RadioResult<()> {
+    ) -> crate::RadioResult<()> {
         Ts570d::set_if_shift(self, direction, freq).await
     }
 
-    async fn voice_recall(&mut self, voice: u8) -> framework::radio::RadioResult<()> {
+    async fn voice_recall(&mut self, voice: u8) -> crate::RadioResult<()> {
         Ts570d::voice_recall(self, voice).await
     }
 
-    async fn reset(&mut self, full: bool) -> framework::radio::RadioResult<()> {
+    async fn reset(&mut self, full: bool) -> crate::RadioResult<()> {
         Ts570d::reset(self, full).await
     }
 
-    async fn get_meter(&mut self, meter: u8) -> framework::radio::RadioResult<u16> {
+    async fn get_meter(&mut self, meter: u8) -> crate::RadioResult<u16> {
         Ts570d::get_meter(self, meter).await
     }
 
-    async fn get_semi_break_in_delay(&mut self) -> framework::radio::RadioResult<u16> {
+    async fn get_semi_break_in_delay(&mut self) -> crate::RadioResult<u16> {
         Ts570d::get_semi_break_in_delay(self).await
     }
 
-    async fn set_semi_break_in_delay(&mut self, ms: u16) -> framework::radio::RadioResult<()> {
+    async fn set_semi_break_in_delay(&mut self, ms: u16) -> crate::RadioResult<()> {
         Ts570d::set_semi_break_in_delay(self, ms).await
     }
 
-    async fn get_cw_auto_zerobeat(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_cw_auto_zerobeat(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_cw_auto_zerobeat(self).await
     }
 
-    async fn set_cw_auto_zerobeat(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_cw_auto_zerobeat(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_cw_auto_zerobeat(self, on).await
     }
 
-    async fn get_fine_step(&mut self) -> framework::radio::RadioResult<bool> {
+    async fn get_fine_step(&mut self) -> crate::RadioResult<bool> {
         Ts570d::get_fine_step(self).await
     }
 
-    async fn set_fine_step(&mut self, on: bool) -> framework::radio::RadioResult<()> {
+    async fn set_fine_step(&mut self, on: bool) -> crate::RadioResult<()> {
         Ts570d::set_fine_step(self, on).await
     }
 
-    async fn set_auto_info(&mut self, mode: u8) -> framework::radio::RadioResult<()> {
+    async fn set_auto_info(&mut self, mode: u8) -> crate::RadioResult<()> {
         Ts570d::set_auto_info(self, mode).await
     }
 
-    async fn mic_up(&mut self) -> framework::radio::RadioResult<()> {
+    async fn mic_up(&mut self) -> crate::RadioResult<()> {
         Ts570d::mic_up(self).await
     }
 
-    async fn mic_down(&mut self) -> framework::radio::RadioResult<()> {
+    async fn mic_down(&mut self) -> crate::RadioResult<()> {
         Ts570d::mic_down(self).await
     }
 

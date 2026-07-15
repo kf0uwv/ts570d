@@ -18,7 +18,7 @@
 //! by the radio) into typed [`Response`] values.
 
 use crate::protocol::response::{InformationResponse, Response};
-use framework::radio::{Frequency, MemoryChannelEntry, Mode, RadioError, RadioResult};
+use crate::{Frequency, MemoryChannelEntry, Mode, RadioError, RadioResult};
 
 /// Parses raw TS-570D response strings into typed [`Response`] values.
 ///

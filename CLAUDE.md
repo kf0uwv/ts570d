@@ -42,52 +42,80 @@
 
 ## Crate Dependency Model (MANDATORY — ALL AGENTS MUST FOLLOW)
 
-This project uses strict dependency inversion. Crates depend on **traits**, never on concrete implementations.
+This project uses strict dependency inversion. `framework` is a **radio-independent
+generic CAT engine**. All TS-570D-specific knowledge lives in the `radio` crate.
 
 ```
-framework  (no local crate dependencies)
-  └── defines: Transport trait, Radio trait
-  └── defines: TransportError, RadioError, RadioResult, domain types (Frequency, Mode, etc.)
+framework  (NO local crate dependencies — generic, radio-independent)
+  └── defines: generic CAT engine — CommandTable<C>, CommandDefinition<C>, CommandForm,
+               CommandOperation, CommandRequest, ParameterValues, ResponseBuilder,
+               CommandOutcome, CatCommandCatalog / CatRadio traits, CatFramework<R>
+  └── defines: Transport trait, FrameworkError, TransportError, ApplicationStateMachine
+  └── contains NO radio-specific command ids, modes, frequencies, state, or handlers
 
 serial  (depends on: framework only)
   └── implements: Transport trait for SerialPort
 
 radio  (depends on: framework only)
-  └── implements: Radio trait for Ts570d<T: Transport>
+  └── defines: Ts570dCommandId, TS570D_COMMAND_TABLE (the single command table)
+  └── defines: Ts570dRadio (CatRadio impl + emulator state machine), Ts570dState, Ts570dEvent
+  └── defines: Radio trait + TS-570D domain types (Frequency, Mode, InformationResponse,
+               MemoryChannelEntry, RadioError, RadioResult) — controller/UI-facing
+  └── implements: Radio trait for Ts570d<T: Transport> (controller client)
   └── Ts570d is generic over T: Transport — never imports serial directly
 
-ui  (depends on: framework only)
-  └── uses: Radio trait abstraction (ui::run<R: Radio>(radio: &mut R))
-  └── NEVER imports from radio or serial crates
+ui  (depends on: framework + radio)
+  └── uses: radio::Radio trait abstraction (ui::run<R: Radio>(radio: &mut R))
+  └── uses: radio domain types (Frequency, Mode, ...) for display
+  └── NEVER imports from serial
 
-emulator  (depends on: nix, serial internals for PTY — test infrastructure only)
+emulator  (depends on: framework + radio)
+  └── runs CatFramework<Ts570dRadio>; owns PTY hosting, logging, TUI display
 
 app/src/main.rs  (depends on: all crates — the wiring layer only)
   └── creates Ts570d<SerialPort> and passes &mut radio to ui::run()
 ```
 
 ### Rules (violation is a blocking issue)
-1. **`framework`** has NO local crate dependencies. It defines traits and types only.
-2. **`radio`** NEVER imports from `serial`. Transport is injected by the app via generics.
-3. **`ui`** NEVER imports from `radio` or `serial`. It uses the `Radio` trait from `framework`.
-4. **`app/main.rs`** is the ONLY place concrete types are wired together.
-5. Unit tests use **mock/fake implementations** of the trait — never the real impl from another crate.
+1. **`framework`** has NO local crate dependencies and contains NO radio-specific types.
+   It defines the generic CAT engine, `Transport`, and generic errors/state only.
+2. **`framework`** NEVER depends on `radio`, `serial`, `ui`, or `emulator`. Verify with
+   `cargo tree -p framework` — no local crate must appear.
+3. **`radio`** NEVER imports from `serial`. Transport is injected by the app via generics.
+4. **`radio`** owns the single source of truth for the command table
+   (`TS570D_COMMAND_TABLE`). There must be exactly ONE command table.
+5. **`ui`** may depend on `radio` (for the `Radio` trait and domain types) but NEVER on
+   `serial`. It uses the `Radio` trait, not concrete transports.
+6. **`app/main.rs`** is the ONLY place concrete types are wired together.
+7. Unit tests use **mock/fake implementations** of the relevant trait — never the real impl
+   from another crate.
+   - `framework` tests use an in-crate fake `CommandId`/`CatRadio` (NEVER import `radio`)
    - `radio` tests use an in-crate `FakeTransport` (not `serial::SerialPort`)
    - `ui` tests use an in-crate `MockRadio` impl of the `Radio` trait
 
+### Generic framework vs. TS-570D responsibilities
+The generic `framework` knows how to **process** a command: framing, command lookup,
+syntactic parsing, structural parameter validation, generic dispatch lifecycle, and
+response construction — all generic over a radio-defined `CommandId`.
+
+The `radio` crate knows what a command **means**: command identifiers, command definitions,
+radio state and transitions, state-dependent validation, command semantics, response values,
+and protocol-specific errors. It implements `framework::CatRadio` to receive parsed commands.
+
 ### Radio trait scope
-The `Radio` trait in `framework` contains **abstract radio concepts** applicable to any transceiver:
-frequency control, mode, PTT, meters, gain controls, power, scan, RIT/XIT, noise blanker,
-memory channels, squelch, preamplifier, attenuator, VOX, etc.
+The `Radio` trait (defined in the `radio` crate, controller/UI-facing) contains abstract
+radio concepts: frequency control, mode, PTT, meters, gain controls, power, scan, RIT/XIT,
+noise blanker, memory channels, squelch, preamplifier, attenuator, VOX, etc.
 
 TS-570D-specific features (keyer, voice synthesizer, antenna tuner, menu access) live in the
 `radio` crate as inherent methods on `Ts570d`, NOT in the `Radio` trait.
 
 ## Architecture
-- serial/: Custom io_uring RS-232 implementation
-- radio/: TS-570D protocol handling + Radio trait implementation
-- ui/: Ratatui terminal interface (depends only on framework)
-- emulator/: Virtual TTY and radio emulator
+- framework/: Generic radio-independent CAT engine (command table, parser, dispatch, response builder) + Transport trait
+- serial/: Custom io_uring RS-232 implementation (implements Transport)
+- radio/: TS-570D command table, CatRadio impl, controller client, Radio trait + domain types
+- ui/: Ratatui terminal interface (depends on framework + radio)
+- emulator/: Virtual TTY + radio emulator, runs CatFramework<Ts570dRadio>
 
 ## Code Style
 - Imports: std → external → local

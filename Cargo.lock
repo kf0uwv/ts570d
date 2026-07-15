@@ -1152,6 +1152,7 @@ dependencies = [
  "crossterm",
  "framework",
  "monoio",
+ "radio",
  "ratatui",
  "thiserror 1.0.69",
 ]

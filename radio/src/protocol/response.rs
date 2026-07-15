@@ -18,9 +18,9 @@
 //! [`InformationResponse`] is defined in `framework::radio` and re-exported
 //! here for convenience.
 
-pub use framework::radio::InformationResponse;
+pub use crate::InformationResponse;
 
-use framework::radio::{Frequency, MemoryChannelEntry, Mode};
+use crate::{Frequency, MemoryChannelEntry, Mode};
 
 /// A parsed response from the TS-570D radio.
 ///

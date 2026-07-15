@@ -12,20 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! TS-570D Framework
+//! Generic CAT Framework
 //!
-//! Shared infrastructure for all workspace crates.
+//! Radio-independent infrastructure shared across workspace crates.
 //!
 //! This framework provides:
-//! - **State machine** - Application state management and transitions
-//! - **Error types** - Common error handling
-//! - **Transport trait** - Byte-level I/O interface decoupling radio from serial
-//! - **Radio trait** - Typed radio command abstraction
+//! - **Generic CAT engine** (`cat`) - command table, parsing, structural
+//!   validation, dispatch lifecycle, and response building, generic over a
+//!   radio-defined command identifier
+//! - **Transport trait** - byte-level I/O interface decoupling radio from serial
+//! - **Error types** - generic framework and transport errors
+//! - **State machine** - generic application state management
+//!
+//! The framework contains **no radio-specific** command definitions, modes,
+//! frequencies, state, or handlers. Those live in radio crates such as `radio`
+//! (TS-570D), which implement the [`cat::CatRadio`] trait.
 
 // Framework modules
 pub mod cat;
 pub mod errors;
-pub mod radio;
 pub mod state_machine;
 pub mod transport;
 
@@ -36,7 +41,6 @@ pub use cat::{
     ParseError, ProtocolErrorKind, ResponseBuildError, ResponseBuilder, ResponseDisposition,
 };
 pub use errors::{FrameworkError, FrameworkResult, TransportError};
-pub use radio::{Frequency, InformationResponse, Mode, NopRadio, Radio, RadioError, RadioResult};
 pub use state_machine::{ApplicationStateMachine, State};
 pub use transport::Transport;
 

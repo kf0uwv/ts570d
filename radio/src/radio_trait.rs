@@ -12,22 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Radio trait and shared protocol types.
+//! TS-570D controller-facing `Radio` trait and shared protocol domain types.
 //!
-//! This module defines the [`Radio`] trait that UI and other framework
-//! consumers depend on, plus the protocol types that cross the boundary:
-//! [`Frequency`], [`Mode`], [`InformationResponse`], [`RadioError`], and
-//! [`RadioResult`].
+//! This module defines the [`Radio`] trait that the `ui` and controller
+//! consume, plus the TS-570D domain types that cross that boundary:
+//! [`Frequency`], [`Mode`], [`InformationResponse`], [`MemoryChannelEntry`],
+//! [`RadioError`], and [`RadioResult`].
 //!
-//! Placing these types in `framework` keeps `ui` decoupled from the concrete
-//! `radio` crate — `ui` imports only from `framework`.
+//! These types are TS-570D-specific (frequency range, mode encoding, `IF`
+//! response layout) and therefore live in the `radio` crate, not in the
+//! generic `framework`. `ui` depends on `radio` for them.
 
 use std::fmt;
 
 use async_trait::async_trait;
+use framework::TransportError;
 use thiserror::Error;
-
-use crate::errors::TransportError;
 
 // ---------------------------------------------------------------------------
 // Error types
