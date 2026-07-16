@@ -89,8 +89,9 @@ specifics isolated in one crate:
 | `emulator` | Virtual radio; runs `CatFramework<Ts570dRadio>`. |
 
 A single `TS570D_COMMAND_TABLE` backs both the controller and the emulator.
-See [docs/framework-refactor.md](docs/framework-refactor.md) for the full design,
-dependency graph, and how a second radio would implement the generic traits.
+Key decisions are recorded as [ADRs](docs/adr/); the full design narrative,
+dependency graph, and how a second radio would implement the generic traits are in
+[docs/framework-refactor.md](docs/framework-refactor.md).
 
 ## Protocol
 
