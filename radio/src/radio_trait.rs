@@ -262,7 +262,7 @@ pub struct MemoryChannelEntry {
 
 /// Abstraction over a TS-570D (or compatible) radio.
 ///
-/// Implemented by `radio::Ts570d<T: Transport>`.  UI and other framework
+/// Implemented by `radio::Ts570d<S: CatSession>`.  UI and other framework
 /// consumers depend only on this trait, not on the concrete radio crate.
 ///
 /// Uses `#[async_trait(?Send)]` — no `Send` bounds, compatible with monoio's

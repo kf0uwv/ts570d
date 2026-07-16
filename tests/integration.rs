@@ -33,6 +33,7 @@
 use std::time::Duration;
 
 use emulator::emulator::Emulator;
+use framework::SerialCatSession;
 use monoio::RuntimeBuilder;
 use radio::Ts570d;
 use radio::{Frequency, Mode};
@@ -56,17 +57,18 @@ fn start_emulator() -> String {
     slave_path
 }
 
-/// Open a `Ts570d<SerialPort>` on the given slave PTY path at 4800 baud (8N2).
+/// Open a `Ts570d<SerialCatSession<SerialPort>>` on the given slave PTY path
+/// at 4800 baud (8N2).
 ///
 /// Must be called from within an active monoio runtime context.
-fn open_radio(slave_path: &str) -> Ts570d<SerialPort> {
+fn open_radio(slave_path: &str) -> Ts570d<SerialCatSession<SerialPort>> {
     let cfg = SerialConfig {
         baud_rate: 4800,
         ..SerialConfig::default()
     };
     let port = SerialPort::open(slave_path, cfg)
         .unwrap_or_else(|e| panic!("SerialPort::open({}) failed: {}", slave_path, e));
-    Ts570d::new(port)
+    Ts570d::new(SerialCatSession::new(port))
 }
 
 /// Build a monoio IoUring runtime for use in tests.

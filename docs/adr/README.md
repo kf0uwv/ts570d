@@ -9,6 +9,7 @@ Decisions are recorded as [ADRs](https://cognitect.com/blog/2011/11/15/documenti
 | [0002](0002-domain-types-in-radio.md) | TS-570D domain types live in `radio`; `ui` depends on `radio` | Accepted |
 | [0003](0003-single-command-table.md) | One command table for controller and emulator | Accepted |
 | [0004](0004-extraction-boundary.md) | Extraction boundary for a shared CAT library | Accepted |
+| [0005](0005-network-transport-readiness.md) | Network transport and server/control mode readiness | Accepted |
 
 ## Refactor status (branch `refactor/generic-cat-framework`)
 
@@ -29,3 +30,6 @@ release builds, and the CAT diagnostics run.
   catalog (behavior currently unchanged).
 - Implement the 9 controller-catalog commands the emulator does not yet emulate
   (`FC FN NL ST SP OS BK QR MF`) — see ADR 0003.
+- Implement `CatSession` (`SerialCatSession`, `ScriptedCatSession`) and migrate
+  `RadioClient`/`Ts570d` onto it — see ADR 0005; tracked in
+  `planning/architect/task_plan.md`.

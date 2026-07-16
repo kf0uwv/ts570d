@@ -14,7 +14,7 @@
 
 //! Generic CAT command sender for the TS-570D.
 //!
-//! [`RadioClient`] wraps any [`Transport`] implementation and provides
+//! [`RadioClient`] wraps any [`CatSession`] implementation and provides
 //! high-level `query` and `set` methods that validate command codes against
 //! the [`TS570D_COMMAND_TABLE`](crate::TS570D_COMMAND_TABLE) before placing bytes on the wire.
 //!
@@ -29,41 +29,45 @@
 //! ```no_run
 //! use radio::RadioClient;
 //!
-//! // construct with any Transport implementation
-//! // let mut client = RadioClient::new(my_transport);
+//! // construct with any CatSession implementation
+//! // let mut client = RadioClient::new(my_session);
 //! // let response = client.query("FA").await.unwrap();
 //! ```
 
-use framework::transport::Transport;
-use framework::CommandDefinition;
+use framework::errors::TransportError;
+use framework::session::CatSession;
+use framework::{CommandDefinition, ResponseDisposition};
 
 use crate::ts570d_radio::{Ts570dCommandId, TS570D_COMMAND_TABLE};
 use crate::{RadioError, RadioResult};
 
-/// Sends CAT commands over a [`Transport`] and reads back responses.
+/// Sends CAT commands over a [`CatSession`] and reads back responses.
 ///
 /// All methods validate the command code against [`TS570D_COMMAND_TABLE`](crate::TS570D_COMMAND_TABLE)
-/// before touching the transport.
-pub struct RadioClient<T: Transport> {
-    pub(crate) transport: T,
+/// before touching the session.
+pub struct RadioClient<S: CatSession> {
+    pub(crate) session: S,
 }
 
-impl<T: Transport> RadioClient<T> {
-    /// Create a new `RadioClient` wrapping the given transport.
-    pub fn new(transport: T) -> Self {
-        Self { transport }
+impl<S> RadioClient<S>
+where
+    S: CatSession<Error = TransportError>,
+{
+    /// Create a new `RadioClient` wrapping the given session.
+    pub fn new(session: S) -> Self {
+        Self { session }
     }
 
     /// Send a query command and return the radio's response string.
     ///
-    /// Formats the wire bytes as `"<code>;"` and reads back the response up to
-    /// and including the terminating `';'`.
+    /// Formats the wire bytes as `"<code>;"` and returns the response the
+    /// session reports back for that exchange.
     ///
     /// # Errors
     ///
     /// - [`RadioError::UnknownCommand`] — `code` is not in the command table
     /// - [`RadioError::CommandNotReadable`] — command does not support read
-    /// - [`RadioError::Transport`] — I/O error on the underlying transport
+    /// - [`RadioError::Transport`] — I/O error on the underlying session
     pub async fn query(&mut self, code: &str) -> RadioResult<String> {
         let meta = Self::validate_code(code)?;
         if !meta.is_readable() {
@@ -71,23 +75,20 @@ impl<T: Transport> RadioClient<T> {
         }
 
         let wire = format!("{};", code);
-        self.transport.write(wire.as_bytes()).await?;
-        self.transport.flush().await?;
-        self.read_response().await
+        self.execute_query(wire.as_bytes()).await
     }
 
     /// Send a query command with a parameter prefix and return the radio's response string.
     ///
-    /// Formats the wire bytes as `"<code><params>;"` and reads back the response up to
-    /// and including the terminating `';'`.  Use this when the command requires a
-    /// selector or sub-address appended directly to the command code before the
-    /// semicolon, e.g. `"SM0;"` or `"RM1;"`.
+    /// Formats the wire bytes as `"<code><params>;"`.  Use this when the command
+    /// requires a selector or sub-address appended directly to the command code
+    /// before the semicolon, e.g. `"SM0;"` or `"RM1;"`.
     ///
     /// # Errors
     ///
     /// - [`RadioError::UnknownCommand`] — `code` is not in the command table
     /// - [`RadioError::CommandNotReadable`] — command does not support read
-    /// - [`RadioError::Transport`] — I/O error on the underlying transport
+    /// - [`RadioError::Transport`] — I/O error on the underlying session
     pub async fn query_with_param(&mut self, code: &str, params: &str) -> RadioResult<String> {
         let meta = Self::validate_code(code)?;
         if !meta.is_readable() {
@@ -95,22 +96,21 @@ impl<T: Transport> RadioClient<T> {
         }
 
         let wire = format!("{}{};", code, params);
-        self.transport.write(wire.as_bytes()).await?;
-        self.transport.flush().await?;
-        self.read_response().await
+        self.execute_query(wire.as_bytes()).await
     }
 
     /// Send a set command with parameters.
     ///
-    /// Formats the wire bytes as `"<code><params>;"` and does not read a
+    /// Formats the wire bytes as `"<code><params>;"` and does not wait for a
     /// response (set commands on the TS-570D are fire-and-forget unless AI
-    /// mode is active).
+    /// mode is active) — delegates to [`CatSession::send`], which real
+    /// sessions implement without blocking on a read.
     ///
     /// # Errors
     ///
     /// - [`RadioError::UnknownCommand`] — `code` is not in the command table
     /// - [`RadioError::CommandNotWritable`] — command does not support write
-    /// - [`RadioError::Transport`] — I/O error on the underlying transport
+    /// - [`RadioError::Transport`] — I/O error on the underlying session
     pub async fn set(&mut self, code: &str, params: &str) -> RadioResult<()> {
         let meta = Self::validate_code(code)?;
         if !meta.is_writable() {
@@ -118,8 +118,7 @@ impl<T: Transport> RadioClient<T> {
         }
 
         let wire = format!("{}{};", code, params);
-        self.transport.write(wire.as_bytes()).await?;
-        self.transport.flush().await?;
+        self.session.send(wire.as_bytes()).await?;
         Ok(())
     }
 
@@ -134,24 +133,19 @@ impl<T: Transport> RadioClient<T> {
             .ok_or_else(|| RadioError::UnknownCommand(code.to_string()))
     }
 
-    /// Read bytes from the transport until a `';'` terminator is encountered.
-    async fn read_response(&mut self) -> RadioResult<String> {
+    /// Execute one query-shaped exchange through the session and decode the
+    /// response bytes into a `String` matching the wire text the radio sent.
+    async fn execute_query(&mut self, wire: &[u8]) -> RadioResult<String> {
         let mut response = Vec::new();
-        let mut buf = [0u8; 1];
-
-        loop {
-            let n = self.transport.read(&mut buf).await?;
-            if n == 0 {
-                // EOF — return whatever we have (may be empty)
-                break;
-            }
-            response.push(buf[0]);
-            if buf[0] == b';' {
-                break;
+        let disposition = self.session.execute(wire, &mut response).await?;
+        match disposition {
+            ResponseDisposition::ProtocolError(kind) => Err(RadioError::InvalidProtocolString(
+                format!("session reported a protocol error: {:?}", kind),
+            )),
+            ResponseDisposition::ResponseWritten | ResponseDisposition::NoResponse => {
+                Ok(String::from_utf8_lossy(&response).into_owned())
             }
         }
-
-        Ok(String::from_utf8_lossy(&response).into_owned())
     }
 }
 
@@ -162,62 +156,19 @@ impl<T: Transport> RadioClient<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use framework::errors::TransportError;
-    use framework::transport::Transport;
-    use std::collections::VecDeque;
+    use framework::test_support::{Exchange, ScriptedCatSession};
 
     // -----------------------------------------------------------------------
-    // Mock Transport
+    // Helper
     // -----------------------------------------------------------------------
 
-    /// A simple in-memory transport for testing.
-    ///
-    /// `writes` accumulates every byte written by the client.
-    /// `reads` is a queue of bytes the client will read back.
-    struct MockTransport {
-        writes: Vec<u8>,
-        reads: VecDeque<u8>,
-    }
-
-    impl MockTransport {
-        fn new() -> Self {
-            Self {
-                writes: Vec::new(),
-                reads: VecDeque::new(),
-            }
-        }
-
-        /// Enqueue bytes that `read()` will return to the client.
-        fn enqueue_response(&mut self, response: &str) {
-            self.reads.extend(response.as_bytes());
-        }
-
-        /// Return everything that was written via `write()`.
-        fn written(&self) -> &[u8] {
-            &self.writes
-        }
-    }
-
-    #[async_trait(?Send)]
-    impl Transport for MockTransport {
-        async fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
-            self.writes.extend_from_slice(data);
-            Ok(data.len())
-        }
-
-        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-            if let Some(byte) = self.reads.pop_front() {
-                buf[0] = byte;
-                Ok(1)
-            } else {
-                Ok(0)
-            }
-        }
-
-        async fn flush(&mut self) -> Result<(), TransportError> {
-            Ok(())
-        }
+    /// Build a `RadioClient` around a `ScriptedCatSession` pre-loaded with
+    /// `script`. Supersedes the old ad hoc `MockTransport` — see
+    /// `framework::test_support` for the shared implementation.
+    fn client_with_script<I: IntoIterator<Item = Exchange>>(
+        script: I,
+    ) -> RadioClient<ScriptedCatSession> {
+        RadioClient::new(ScriptedCatSession::with_script(script))
     }
 
     // -----------------------------------------------------------------------
@@ -226,30 +177,26 @@ mod tests {
 
     #[monoio::test(driver = "legacy")]
     async fn test_query_fa_formats_correctly() {
-        let mut transport = MockTransport::new();
-        transport.enqueue_response("FA00014250000;");
+        let mut client = client_with_script([Exchange::new("FA;", "FA00014250000;")]);
 
-        let mut client = RadioClient::new(transport);
         let response = client.query("FA").await.unwrap();
 
-        assert_eq!(client.transport.written(), b"FA;");
+        assert_eq!(client.session.written(), b"FA;");
         assert_eq!(response, "FA00014250000;");
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_set_fa_formats_correctly() {
-        let transport = MockTransport::new();
-        let mut client = RadioClient::new(transport);
+        let mut client = client_with_script([Exchange::new("FA00014250000;", "")]);
 
         client.set("FA", "00014250000").await.unwrap();
 
-        assert_eq!(client.transport.written(), b"FA00014250000;");
+        assert_eq!(client.session.written(), b"FA00014250000;");
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_query_unknown_command_returns_error() {
-        let transport = MockTransport::new();
-        let mut client = RadioClient::new(transport);
+        let mut client = client_with_script([]);
 
         let result = client.query("ZZ").await;
 
@@ -263,8 +210,7 @@ mod tests {
     #[monoio::test(driver = "legacy")]
     async fn test_set_read_only_command_returns_error() {
         // IF is read-only (supports_write = false)
-        let transport = MockTransport::new();
-        let mut client = RadioClient::new(transport);
+        let mut client = client_with_script([]);
 
         let result = client.set("IF", "").await;
 
@@ -278,8 +224,7 @@ mod tests {
     #[monoio::test(driver = "legacy")]
     async fn test_query_write_only_command_returns_error() {
         // TX is write-only (supports_read = false)
-        let transport = MockTransport::new();
-        let mut client = RadioClient::new(transport);
+        let mut client = client_with_script([]);
 
         let result = client.query("TX").await;
 
@@ -292,25 +237,26 @@ mod tests {
 
     #[monoio::test(driver = "legacy")]
     async fn test_set_does_not_read_response() {
-        // set() must not call read() — the mock read queue is empty, which
-        // would cause a panic or return 0 bytes. If this test passes, set()
-        // never attempted to read.
-        let transport = MockTransport::new();
-        let mut client = RadioClient::new(transport);
+        // set() must call session.send(), never session.execute() with a
+        // read-shaped expectation. The dedicated regression test for "send()
+        // must not block on a read" lives in
+        // `framework::session::tests::send_writes_without_reading`, which
+        // uses a Transport whose read() panics — a real behavioral proof
+        // that in-memory sessions like this one cannot provide. Here we only
+        // confirm set() succeeds against a single fire-and-forget exchange.
+        let mut client = client_with_script([Exchange::new("FA00014250000;", "")]);
 
         client.set("FA", "00014250000").await.unwrap();
-        // No panic — reads were never called.
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_query_set_unknown_command_does_not_write() {
-        let transport = MockTransport::new();
-        let mut client = RadioClient::new(transport);
+        let mut client = client_with_script([]);
 
         let _ = client.query("ZZ").await;
 
         assert!(
-            client.transport.written().is_empty(),
+            client.session.written().is_empty(),
             "nothing should be written for unknown command"
         );
     }
@@ -320,32 +266,27 @@ mod tests {
         // Tests the client's query_with_param mechanism (sends "SM0;").
         // Note: per manual p.80 the canonical SM query is "SM;" not "SM0;",
         // and the canonical answer is "SM<4digits>;" (no selector).
-        let mut transport = MockTransport::new();
-        transport.enqueue_response("SM0015;");
+        let mut client = client_with_script([Exchange::new("SM0;", "SM0015;")]);
 
-        let mut client = RadioClient::new(transport);
         let response = client.query_with_param("SM", "0").await.unwrap();
 
-        assert_eq!(client.transport.written(), b"SM0;");
+        assert_eq!(client.session.written(), b"SM0;");
         assert_eq!(response, "SM0015;");
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_query_with_param_rm1_formats_correctly() {
-        let mut transport = MockTransport::new();
-        transport.enqueue_response("RM10023;");
+        let mut client = client_with_script([Exchange::new("RM1;", "RM10023;")]);
 
-        let mut client = RadioClient::new(transport);
         let response = client.query_with_param("RM", "1").await.unwrap();
 
-        assert_eq!(client.transport.written(), b"RM1;");
+        assert_eq!(client.session.written(), b"RM1;");
         assert_eq!(response, "RM10023;");
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_query_with_param_unknown_command_returns_error() {
-        let transport = MockTransport::new();
-        let mut client = RadioClient::new(transport);
+        let mut client = client_with_script([]);
 
         let result = client.query_with_param("ZZ", "0").await;
 

@@ -23,6 +23,7 @@
 
 use tracing::info;
 
+use framework::SerialCatSession;
 use radio::Ts570d;
 use serial::{SerialConfig, SerialPort};
 
@@ -146,8 +147,8 @@ async fn main() {
         args.port, args.baud, args.stop_bits
     );
 
-    // 4. Wrap in the typed TS-570D client.
-    let radio = Ts570d::new(port);
+    // 4. Wrap in a CatSession (serial framing), then the typed TS-570D client.
+    let radio = Ts570d::new(SerialCatSession::new(port));
 
     // 5. Run the radio + UI event loop.
     if let Err(e) = ui::run(radio).await {

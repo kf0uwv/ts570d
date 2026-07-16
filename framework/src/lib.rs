@@ -21,6 +21,8 @@
 //!   validation, dispatch lifecycle, and response building, generic over a
 //!   radio-defined command identifier
 //! - **Transport trait** - byte-level I/O interface decoupling radio from serial
+//! - **CatSession trait** (`session`) - request/response abstraction above
+//!   `Transport`, so a future transport can own its own framing
 //! - **Error types** - generic framework and transport errors
 //! - **State machine** - generic application state management
 //!
@@ -31,7 +33,9 @@
 // Framework modules
 pub mod cat;
 pub mod errors;
+pub mod session;
 pub mod state_machine;
+pub mod test_support;
 pub mod transport;
 
 // Re-export main framework components
@@ -41,6 +45,7 @@ pub use cat::{
     ParseError, ProtocolErrorKind, ResponseBuildError, ResponseBuilder, ResponseDisposition,
 };
 pub use errors::{FrameworkError, FrameworkResult, TransportError};
+pub use session::{CatSession, SerialCatSession};
 pub use state_machine::{ApplicationStateMachine, State};
 pub use transport::Transport;
 

@@ -24,7 +24,8 @@ use crate::errors::TransportError;
 /// Byte-level transport interface for serial communication.
 ///
 /// Implemented by `serial::SerialPort` (production) and test doubles.
-/// Used by `radio::Ts570d<T: Transport>` without the radio crate
+/// Wrapped by [`crate::session::SerialCatSession`], which
+/// `radio::Ts570d<S: CatSession>` depends on, without the radio crate
 /// depending on the serial crate directly.
 ///
 /// # monoio compatibility

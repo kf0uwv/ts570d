@@ -21,7 +21,7 @@
 //!
 //! # Architecture
 //!
-//! - `client`: Generic `RadioClient<T: Transport>` for sending commands and reading responses
+//! - `client`: Generic `RadioClient<S: CatSession>` for sending commands and reading responses
 //! - `ts570d_radio`: The single [`TS570D_COMMAND_TABLE`] and the `Ts570dRadio` state machine
 //! - `radio_trait`: Controller/UI-facing `Radio` trait + domain types (`Mode`, `Frequency`, ...)
 //! - `protocol`: Typed TS-570D response parsing
