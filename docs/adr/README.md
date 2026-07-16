@@ -8,8 +8,7 @@ Decisions are recorded as [ADRs](https://cognitect.com/blog/2011/11/15/documenti
 | [0001](0001-generic-cat-framework.md) | Radio-independent generic CAT framework | Accepted |
 | [0002](0002-domain-types-in-radio.md) | TS-570D domain types live in `radio`; `ui` depends on `radio` | Accepted |
 | [0003](0003-single-command-table.md) | One command table for controller and emulator | Accepted |
-
-The narrative design overview lives in [framework-refactor.md](../framework-refactor.md).
+| [0004](0004-extraction-boundary.md) | Extraction boundary for a shared CAT library | Accepted |
 
 ## Refactor status (branch `refactor/generic-cat-framework`)
 

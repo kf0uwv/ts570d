@@ -73,7 +73,7 @@ pub enum Ts570dCommandId {
     Fv,
     // Commands the controller catalog knows but the emulator does not yet
     // emulate (it answers "?;"). Present so the single command table is the
-    // documented superset. See docs/framework-refactor.md.
+    // documented superset. See docs/adr/0003-single-command-table.md.
     Fc,
     Fn,
     Nl,

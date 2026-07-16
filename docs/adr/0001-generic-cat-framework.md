@@ -43,3 +43,31 @@ commands and contains no TS-570D command ids, modes, frequencies, state, or hand
 - Framework unit tests use a fake in-crate `CommandId`/table (never import `radio`),
   proving the boundary.
 - `cargo tree -p framework` must show no local crate dependency.
+
+## Target dependency graph
+
+Acyclic, pointing inward toward the generic crate:
+
+```text
+ui ──▶ framework
+ │       ▲
+ └──▶ radio ──▶ framework
+serial ─────────▶ framework
+emulator ──▶ { framework, radio }
+app (src/main.rs) ──▶ all crates (wiring only)
+```
+
+`framework` depends on no local crate. `radio` never imports `serial`; transport is
+injected via generics. See also [ADR 0002](0002-domain-types-in-radio.md).
+
+## Command processing sequence
+
+```text
+receive complete semicolon-terminated frame
+  → CommandTable<C>::parse: lookup code, classify operation, structural validation
+  → CommandRequest<C> handed to CatRadio::handle_command (radio semantics + state)
+  → ResponseBuilder emits the wire response
+  → CommandOutcome<E> returned (response disposition + events)
+```
+
+The framework never `match`es on a TS-570D command; dispatch is a radio-local concern.
