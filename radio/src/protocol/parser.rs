@@ -561,7 +561,7 @@ impl ResponseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::response::{InformationResponse, Response};
+    use crate::protocol::response::Response;
 
     // -----------------------------------------------------------------------
     // Error response
@@ -818,6 +818,7 @@ mod tests {
     ///   [30]     split
     ///   [31..33] ctcss tone (2 chars)
     ///   [33]     tone number (1 char)
+    #[allow(clippy::too_many_arguments)]
     fn make_if_string(
         freq_hz: u64,
         step: u32,

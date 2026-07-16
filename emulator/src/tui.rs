@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use radio::commands::COMMAND_TABLE;
+use radio::TS570D_COMMAND_TABLE;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -25,10 +25,7 @@ use radio::ts570d_radio::{Ts570dState as RadioState, VfoSel};
 
 /// Look up the human-readable description for a 2-character CAT command code.
 fn lookup_description(code: &str) -> Option<&'static str> {
-    COMMAND_TABLE
-        .iter()
-        .find(|cmd| cmd.code == code)
-        .map(|cmd| cmd.description)
+    TS570D_COMMAND_TABLE.find(code).map(|cmd| cmd.description)
 }
 
 // ─── 5-row block-character digit font ────────────────────────────────────────

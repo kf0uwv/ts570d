@@ -191,13 +191,9 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
             state.ctcss = info.ctcss_tone != 0;
         }
     );
-    poll!(
-        "VFO-B",
-        radio.get_vfo_b(),
-        |freq: radio::Frequency| {
-            state.vfo_b_hz = freq.hz();
-        }
-    );
+    poll!("VFO-B", radio.get_vfo_b(), |freq: radio::Frequency| {
+        state.vfo_b_hz = freq.hz();
+    });
     poll!("SM", radio.get_smeter(), |s: u16| {
         state.smeter = s;
     });

@@ -79,6 +79,16 @@ pub struct CommandDefinition<C: CommandId> {
     pub action_forms: &'static [CommandForm],
     /// Legal response forms.
     pub response_forms: &'static [CommandForm],
+    /// Whether a controller may query (read) this command.
+    ///
+    /// This is the documented controller-facing capability, which may differ
+    /// from the wire-grammar forms: some reads take a selector parameter (e.g.
+    /// an S-meter or memory read) that the query/set/action form model would
+    /// otherwise classify as a `Set`.
+    pub readable: bool,
+    /// Whether a controller may set (write) this command, including
+    /// parameterless action writes.
+    pub writable: bool,
 }
 
 impl<C: CommandId> CommandDefinition<C> {
@@ -91,6 +101,21 @@ impl<C: CommandId> CommandDefinition<C> {
             CommandOperation::Response => self.response_forms,
         };
         forms.iter().any(|form| form.matches(operation, param_len))
+    }
+
+    /// Whether a controller may query (read) this command.
+    ///
+    /// Returns the documented [`readable`](Self::readable) capability.
+    pub fn is_readable(&self) -> bool {
+        self.readable
+    }
+
+    /// Whether a controller may set (write) this command.
+    ///
+    /// Returns the documented [`writable`](Self::writable) capability, which
+    /// includes parameterless action writes such as `TX`.
+    pub fn is_writable(&self) -> bool {
+        self.writable
     }
 }
 
@@ -447,6 +472,8 @@ mod tests {
             set_forms: SET_11,
             action_forms: NONE,
             response_forms: NONE,
+            readable: true,
+            writable: true,
         },
         CommandDefinition {
             id: TestCommand::Ping,
@@ -457,6 +484,8 @@ mod tests {
             set_forms: NONE,
             action_forms: ACTION,
             response_forms: NONE,
+            readable: false,
+            writable: true,
         },
     ];
 

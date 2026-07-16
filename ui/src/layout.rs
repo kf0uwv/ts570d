@@ -285,7 +285,7 @@ pub fn draw_ui(f: &mut Frame, area: Rect, state: &RadioDisplay) {
         ),
         Span::raw("  "),
         Span::styled(
-            format!("{:<6}", &state.mode),
+            format!("{:<6}", state.mode),
             Style::default().fg(Color::Cyan),
         ),
         Span::raw("  S "),

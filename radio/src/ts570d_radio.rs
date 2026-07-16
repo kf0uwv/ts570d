@@ -71,6 +71,18 @@ pub enum Ts570dCommandId {
     Mr,
     Mw,
     Fv,
+    // Commands the controller catalog knows but the emulator does not yet
+    // emulate (it answers "?;"). Present so the single command table is the
+    // documented superset. See docs/framework-refactor.md.
+    Fc,
+    Fn,
+    Nl,
+    St,
+    Sp,
+    Os,
+    Bk,
+    Qr,
+    Mf,
 }
 
 const QUERY: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Query, 0)];
@@ -87,7 +99,8 @@ const QUERY_SET_3: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Query
 const NONE: &[CommandForm] = &[];
 
 macro_rules! definition {
-    ($id:ident, $code:literal, $name:literal, $query:expr, $set:expr, $action:expr) => {
+    // Explicit controller read/write capability.
+    ($id:ident, $code:literal, $name:literal, $query:expr, $set:expr, $action:expr, $readable:expr, $writable:expr) => {
         CommandDefinition {
             id: Ts570dCommandId::$id,
             code: $code,
@@ -97,7 +110,22 @@ macro_rules! definition {
             set_forms: $set,
             action_forms: $action,
             response_forms: NONE,
+            readable: $readable,
+            writable: $writable,
         }
+    };
+    // Derive read/write from the presence of query / set / action forms.
+    ($id:ident, $code:literal, $name:literal, $query:expr, $set:expr, $action:expr) => {
+        definition!(
+            $id,
+            $code,
+            $name,
+            $query,
+            $set,
+            $action,
+            !$query.is_empty(),
+            !$set.is_empty() || !$action.is_empty()
+        )
     };
 }
 
@@ -114,7 +142,7 @@ static DEFINITIONS: &[CommandDefinition<Ts570dCommandId>] = &[
     definition!(If, "IF", "Information", QUERY, NONE, NONE),
     definition!(Id, "ID", "Identifier", QUERY, NONE, NONE),
     definition!(Ai, "AI", "Auto Information", QUERY, SET_1, NONE),
-    definition!(Sm, "SM", "S Meter", QUERY, SET_1, NONE),
+    definition!(Sm, "SM", "S Meter", QUERY, SET_1, NONE, true, false),
     definition!(Nb, "NB", "Noise Blanker", QUERY, SET_1, NONE),
     definition!(Nr, "NR", "Noise Reduction", QUERY, SET_1, NONE),
     definition!(Pa, "PA", "Preamp", QUERY, SET_1, NONE),
@@ -139,7 +167,7 @@ static DEFINITIONS: &[CommandDefinition<Ts570dCommandId>] = &[
     definition!(Mc, "MC", "Memory Channel", QUERY, SET_ANY, NONE),
     definition!(An, "AN", "Antenna", QUERY, SET_1, NONE),
     definition!(Ks, "KS", "Keyer Speed", QUERY, SET_3, NONE),
-    definition!(Ky, "KY", "CW Keying", QUERY, SET_ANY, NONE),
+    definition!(Ky, "KY", "CW Keying", QUERY, SET_ANY, NONE, false, true),
     definition!(Pt, "PT", "CW Pitch", QUERY, SET_2, NONE),
     definition!(Ca, "CA", "CW Auto Zerobeat", QUERY, SET_1, NONE),
     definition!(Ac, "AC", "Antenna Tuner", QUERY, SET_2, NONE),
@@ -151,6 +179,8 @@ static DEFINITIONS: &[CommandDefinition<Ts570dCommandId>] = &[
     definition!(Tn, "TN", "Tone Number", QUERY, SET_2, NONE),
     definition!(To, "TO", "Tone", QUERY, SET_1, NONE),
     definition!(Bc, "BC", "Beat Cancel", QUERY, SET_1, NONE),
+    // SM/KY/MR: the wire-grammar forms take a selector parameter, so their
+    // documented controller read/write is stated explicitly (docs authoritative).
     definition!(Rm, "RM", "Meter", QUERY, SET_1, NONE),
     definition!(Fs, "FS", "Fine Step", QUERY, SET_1, NONE),
     definition!(Sd, "SD", "Semi Break-in Delay", QUERY, SET_4, NONE),
@@ -162,9 +192,20 @@ static DEFINITIONS: &[CommandDefinition<Ts570dCommandId>] = &[
     definition!(Ex, "EX", "Extension Menu", QUERY_SET_3, SET_7, NONE),
     definition!(Lm, "LM", "Load Message", NONE, SET_1, NONE),
     definition!(Pb, "PB", "Playback", QUERY, SET_1, NONE),
-    definition!(Mr, "MR", "Memory Read", NONE, SET_ANY, NONE),
+    definition!(Mr, "MR", "Memory Read", NONE, SET_ANY, NONE, true, true),
     definition!(Mw, "MW", "Memory Write", NONE, SET_ANY, NONE),
     definition!(Fv, "FV", "Firmware Version", QUERY, NONE, NONE),
+    // Controller-catalog commands not yet emulated (emulator answers "?;").
+    // Widths follow the documented CAT layout; read/write per the manual.
+    definition!(Fc, "FC", "Sub-receiver VFO Frequency", QUERY, SET_11, NONE),
+    definition!(Fn, "FN", "VFO A/B Selection", QUERY, SET_1, NONE),
+    definition!(Nl, "NL", "Noise Reduction Level", QUERY, SET_3, NONE),
+    definition!(St, "ST", "Scan Type", QUERY, SET_1, NONE),
+    definition!(Sp, "SP", "Split Operation", QUERY, SET_1, NONE),
+    definition!(Os, "OS", "Offset", QUERY, SET_1, NONE),
+    definition!(Bk, "BK", "Break-in On/Off", QUERY, SET_1, NONE),
+    definition!(Qr, "QR", "Quick Memory Store", NONE, SET_1, NONE),
+    definition!(Mf, "MF", "Memory Function", QUERY, SET_1, NONE),
 ];
 
 /// TS-570D command table used by the generic framework.

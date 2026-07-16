@@ -33,9 +33,9 @@
 use std::time::Duration;
 
 use emulator::emulator::Emulator;
-use radio::{Frequency, Mode};
 use monoio::RuntimeBuilder;
 use radio::Ts570d;
+use radio::{Frequency, Mode};
 use serial::{SerialConfig, SerialPort};
 
 // ---------------------------------------------------------------------------

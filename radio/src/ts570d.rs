@@ -1101,10 +1101,7 @@ impl<T: framework::transport::Transport> crate::Radio for Ts570d<T> {
         Ts570d::get_vfo_a(self).await
     }
 
-    async fn set_vfo_a(
-        &mut self,
-        freq: crate::Frequency,
-    ) -> crate::RadioResult<()> {
+    async fn set_vfo_a(&mut self, freq: crate::Frequency) -> crate::RadioResult<()> {
         Ts570d::set_vfo_a(self, freq).await
     }
 
@@ -1112,10 +1109,7 @@ impl<T: framework::transport::Transport> crate::Radio for Ts570d<T> {
         Ts570d::get_vfo_b(self).await
     }
 
-    async fn set_vfo_b(
-        &mut self,
-        freq: crate::Frequency,
-    ) -> crate::RadioResult<()> {
+    async fn set_vfo_b(&mut self, freq: crate::Frequency) -> crate::RadioResult<()> {
         Ts570d::set_vfo_b(self, freq).await
     }
 
@@ -1123,10 +1117,7 @@ impl<T: framework::transport::Transport> crate::Radio for Ts570d<T> {
         Ts570d::get_mode(self).await
     }
 
-    async fn set_mode(
-        &mut self,
-        mode: crate::Mode,
-    ) -> crate::RadioResult<()> {
+    async fn set_mode(&mut self, mode: crate::Mode) -> crate::RadioResult<()> {
         Ts570d::set_mode(self, mode).await
     }
 
@@ -1146,9 +1137,7 @@ impl<T: framework::transport::Transport> crate::Radio for Ts570d<T> {
         Ts570d::get_id(self).await
     }
 
-    async fn get_information(
-        &mut self,
-    ) -> crate::RadioResult<crate::InformationResponse> {
+    async fn get_information(&mut self) -> crate::RadioResult<crate::InformationResponse> {
         Ts570d::get_information(self).await
     }
 
@@ -1459,11 +1448,7 @@ impl<T: framework::transport::Transport> crate::Radio for Ts570d<T> {
         Ts570d::get_if_shift(self).await
     }
 
-    async fn set_if_shift(
-        &mut self,
-        direction: char,
-        freq: u16,
-    ) -> crate::RadioResult<()> {
+    async fn set_if_shift(&mut self, direction: char, freq: u16) -> crate::RadioResult<()> {
         Ts570d::set_if_shift(self, direction, freq).await
     }
 

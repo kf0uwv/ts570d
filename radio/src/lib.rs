@@ -22,23 +22,22 @@
 //! # Architecture
 //!
 //! - `client`: Generic `RadioClient<T: Transport>` for sending commands and reading responses
-//! - `commands`: Command table with metadata for all TS-570D CAT commands
-//! - `error`: Error types for protocol operations
-//! - `protocol`: Core protocol types (`Mode`, `Frequency`)
+//! - `ts570d_radio`: The single [`TS570D_COMMAND_TABLE`] and the `Ts570dRadio` state machine
+//! - `radio_trait`: Controller/UI-facing `Radio` trait + domain types (`Mode`, `Frequency`, ...)
+//! - `protocol`: Typed TS-570D response parsing
 //!
 //! # Usage
 //!
 //! ```no_run
-//! use radio::commands::CommandMetadata;
+//! use radio::TS570D_COMMAND_TABLE;
 //!
-//! // Look up command metadata
-//! let fa_cmd = CommandMetadata::find("FA").unwrap();
-//! assert!(fa_cmd.supports_read);
-//! assert!(fa_cmd.supports_write);
+//! // Look up a command definition in the single command table.
+//! let fa = TS570D_COMMAND_TABLE.find("FA").unwrap();
+//! assert!(fa.is_readable());
+//! assert!(fa.is_writable());
 //! ```
 
 pub mod client;
-pub mod commands;
 pub mod protocol;
 pub mod radio_trait;
 pub mod ts570d;

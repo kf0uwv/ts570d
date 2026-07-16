@@ -16,7 +16,7 @@
 //!
 //! [`RadioClient`] wraps any [`Transport`] implementation and provides
 //! high-level `query` and `set` methods that validate command codes against
-//! the [`COMMAND_TABLE`] before placing bytes on the wire.
+//! the [`TS570D_COMMAND_TABLE`](crate::TS570D_COMMAND_TABLE) before placing bytes on the wire.
 //!
 //! # Wire format
 //!
@@ -35,13 +35,14 @@
 //! ```
 
 use framework::transport::Transport;
+use framework::CommandDefinition;
 
-use crate::commands::CommandMetadata;
+use crate::ts570d_radio::{Ts570dCommandId, TS570D_COMMAND_TABLE};
 use crate::{RadioError, RadioResult};
 
 /// Sends CAT commands over a [`Transport`] and reads back responses.
 ///
-/// All methods validate the command code against [`COMMAND_TABLE`]
+/// All methods validate the command code against [`TS570D_COMMAND_TABLE`](crate::TS570D_COMMAND_TABLE)
 /// before touching the transport.
 pub struct RadioClient<T: Transport> {
     pub(crate) transport: T,
@@ -65,7 +66,7 @@ impl<T: Transport> RadioClient<T> {
     /// - [`RadioError::Transport`] — I/O error on the underlying transport
     pub async fn query(&mut self, code: &str) -> RadioResult<String> {
         let meta = Self::validate_code(code)?;
-        if !meta.supports_read {
+        if !meta.is_readable() {
             return Err(RadioError::CommandNotReadable(code.to_string()));
         }
 
@@ -89,7 +90,7 @@ impl<T: Transport> RadioClient<T> {
     /// - [`RadioError::Transport`] — I/O error on the underlying transport
     pub async fn query_with_param(&mut self, code: &str, params: &str) -> RadioResult<String> {
         let meta = Self::validate_code(code)?;
-        if !meta.supports_read {
+        if !meta.is_readable() {
             return Err(RadioError::CommandNotReadable(code.to_string()));
         }
 
@@ -112,7 +113,7 @@ impl<T: Transport> RadioClient<T> {
     /// - [`RadioError::Transport`] — I/O error on the underlying transport
     pub async fn set(&mut self, code: &str, params: &str) -> RadioResult<()> {
         let meta = Self::validate_code(code)?;
-        if !meta.supports_write {
+        if !meta.is_writable() {
             return Err(RadioError::CommandNotWritable(code.to_string()));
         }
 
@@ -127,8 +128,10 @@ impl<T: Transport> RadioClient<T> {
     // -----------------------------------------------------------------------
 
     /// Look up `code` in the command table; return an error if not found.
-    fn validate_code(code: &str) -> RadioResult<&'static CommandMetadata> {
-        CommandMetadata::find(code).ok_or_else(|| RadioError::UnknownCommand(code.to_string()))
+    fn validate_code(code: &str) -> RadioResult<&'static CommandDefinition<Ts570dCommandId>> {
+        TS570D_COMMAND_TABLE
+            .find(code)
+            .ok_or_else(|| RadioError::UnknownCommand(code.to_string()))
     }
 
     /// Read bytes from the transport until a `';'` terminator is encountered.
