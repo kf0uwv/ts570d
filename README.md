@@ -75,6 +75,23 @@ The TS-570D factory default is 9600 baud, 8N1. If your radio has been configured
 
 A built-in emulator lets you run the control program without a physical radio. See [docs/emulator.md](docs/emulator.md) for details.
 
+## Architecture
+
+The workspace uses a generic, radio-independent CAT engine with all TS-570D
+specifics isolated in one crate:
+
+| Crate | Responsibility |
+|-------|----------------|
+| `framework` | Generic CAT engine (command table, parser, dispatch, response builder) + `Transport` trait. No radio-specific types. |
+| `serial` | io_uring RS-232 transport (implements `Transport`). |
+| `radio` | TS-570D command table, `CatRadio` state machine, controller client, `Radio` trait + domain types. |
+| `ui` | Ratatui terminal interface (depends on `framework` + `radio`). |
+| `emulator` | Virtual radio; runs `CatFramework<Ts570dRadio>`. |
+
+A single `TS570D_COMMAND_TABLE` backs both the controller and the emulator.
+See [docs/framework-refactor.md](docs/framework-refactor.md) for the full design,
+dependency graph, and how a second radio would implement the generic traits.
+
 ## Protocol
 
 CAT command reference: Kenwood TS-570D instruction manual, pages 70–81.

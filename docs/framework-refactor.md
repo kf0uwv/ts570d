@@ -8,18 +8,32 @@ No second-radio implementation is added in this work.
 
 ## Implementation Status
 
-This refactor establishes the generic CAT command-table and dispatch boundary and routes the emulator through `CatFramework<Ts570dRadio>`. TS-570D emulator state and command handlers now reside in the `radio` crate.
+The `framework` crate is now radio-independent, and both the emulator and the
+controller run through the single generic command table.
 
-Remaining extraction work is deliberately documented rather than hidden:
+Completed:
 
 ```text
-framework/src/radio.rs still contains legacy UI-facing TS-570D domain types.
-radio/src/commands.rs still contains the legacy controller-side metadata table.
-radio/src/protocol/* still contains TS-570D response parsing for the controller.
-ui diagnostics still exercise the existing Radio trait methods rather than iterating the generic catalog.
+framework contains only the generic CAT engine, Transport, errors, and app state.
+TS-570D domain types (Radio trait, Frequency, Mode, InformationResponse,
+    MemoryChannelEntry) moved to radio/src/radio_trait.rs; ui now depends on radio.
+Emulator dispatches through CatFramework<Ts570dRadio>.
+Controller (radio::RadioClient) validates against the single TS570D_COMMAND_TABLE.
+The legacy radio/src/commands.rs (CommandMetadata) table is removed — one table remains.
+radio/tests/command_table.rs locks in table integrity (unique ids/codes, dispatch coverage).
 ```
 
-These remaining items require a separate UI/controller API migration to avoid changing externally visible behavior in the same step.
+Deliberately deferred (recorded, not hidden):
+
+```text
+radio/src/protocol/* still holds the typed TS-570D response parser — this is
+    legitimately radio-specific and stays in the radio crate.
+ui diagnostics (ui/src/terminal.rs) still drive the typed Radio trait methods
+    rather than iterating the generic catalog; behavior is unchanged.
+The single table is the documented superset: 9 commands (FC FN NL ST SP OS BK QR MF)
+    are present for the controller but not yet emulated — the emulator answers "?;"
+    for them, exactly as before they were added. Implementing them is a follow-up.
+```
 
 ## Previous Architecture
 
@@ -55,19 +69,30 @@ emulator ────▶ radio
 app ─────────▶ framework, radio, serial, ui
 ```
 
-## Current Inventory
+## Inventory (after refactor)
 
-The current command table is `radio/src/commands.rs` as `COMMAND_TABLE: &[CommandMetadata]`. Each entry contains `code`, `supports_read`, `supports_write`, and `description`.
+The single command table is `radio/src/ts570d_radio.rs` as
+`TS570D_COMMAND_TABLE: CommandTable<Ts570dCommandId>`, built from
+`CommandDefinition<Ts570dCommandId>` entries. Each entry carries the wire code,
+name/description, per-operation `CommandForm`s (query/set/action/response), and
+explicit controller `readable`/`writable` capability.
 
-Read, set, and action commands are currently distinguished by two booleans only. Action commands such as `TX`, `RX`, `RC`, `RU`, and `RD` are modeled as write-only commands rather than a separate operation.
+Query, set, and action commands are distinguished by `CommandOperation`. Action
+commands (`TX`, `RX`, `RC`, `RU`, `RD`, `UP`, `DN`) use `action_forms`.
 
-Controller-side request formatting is in `radio/src/client.rs`. It validates command codes against `CommandMetadata::find`, writes `CODE;` for queries, writes `CODEparams;` for sets, and reads until `;` for query responses.
+Controller-side request formatting is in `radio/src/client.rs`. It validates
+command codes against `TS570D_COMMAND_TABLE` (via `is_readable()`/`is_writable()`),
+writes `CODE;` for queries, `CODEparams;` for sets, and reads until `;`.
 
-Controller-side response parsing is in `radio/src/protocol/parser.rs`; response framing is in `radio/src/protocol/framing.rs`.
+Controller-side response parsing is the typed `radio/src/protocol/parser.rs`;
+response framing is `radio/src/protocol/framing.rs`. These remain radio-specific.
 
-Emulator request framing is in `emulator/src/io.rs`. Emulator command execution is in `emulator/src/commands.rs` as a raw `match` on command strings. Emulator state is in `emulator/src/radio_state.rs`.
+The emulator state machine and TS-570D handlers live in
+`radio/src/ts570d_radio.rs` and `radio/src/ts570d_radio_handlers.rs`; the emulator
+binary hosts a PTY and drives `CatFramework<Ts570dRadio>`.
 
-UI diagnostics are in `ui/src/terminal.rs` and call the UI-facing `framework::radio::Radio` trait directly. The README describes this as 99 CAT command round trips.
+UI diagnostics are in `ui/src/terminal.rs` and call the UI-facing `radio::Radio`
+trait directly (behavior unchanged by this refactor).
 
 ## New Architecture
 
@@ -147,27 +172,26 @@ TS-570D responsibilities are command identifiers, command definitions, radio sta
 
 ## Future Extraction Plan
 
-The following can later move into a shared library repository:
+The following can later move into a shared library repository as-is:
 
 ```text
-framework/src/command.rs
-framework/src/dispatch.rs
-framework/src/cat_radio.rs
-framework/src/errors.rs generic CAT errors
-generic command definitions and parameter schemas
-generic parser and response builder
-CatCommandCatalog / CatRadio traits
-CatFramework dispatch lifecycle
+framework/src/cat.rs — generic command table, definitions, forms, parser,
+    dispatch lifecycle (CatFramework), response builder, CatCommandCatalog /
+    CatRadio traits, and generic CAT errors
+framework/src/transport.rs — Transport trait
+framework/src/errors.rs — FrameworkError / TransportError
 ```
 
-The following must remain in this repository:
+The following must remain in this (or a TS-570D-specific) repository:
 
 ```text
-radio/src/commands.rs TS-570D entries
-radio/src/ts570d_radio.rs TS-570D emulator state machine
-radio/src/ts570d.rs controller client
-radio/src/protocol/* typed TS-570D response parsing
-emulator/* PTY, logging, and TUI host
+radio/src/ts570d_radio.rs — Ts570dCommandId, TS570D_COMMAND_TABLE, Ts570dRadio state
+radio/src/ts570d_radio_handlers.rs — TS-570D command semantics
+radio/src/ts570d.rs — controller client
+radio/src/radio_trait.rs — Radio trait + TS-570D domain types (Frequency, Mode, ...)
+radio/src/protocol/* — typed TS-570D response parsing
+radio/tests/command_table.rs — TS-570D table integrity tests
+emulator/* — PTY, logging, and TUI host
 ui/*
 serial/*
 src/main.rs
