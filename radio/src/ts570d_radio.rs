@@ -1,6 +1,6 @@
 //! TS-570D emulator state machine behind the generic CAT framework.
 
-use framework::{
+use cat_framework::{
     CatCommandCatalog, CatRadio, CommandDefinition, CommandForm, CommandOperation, CommandOutcome,
     CommandRequest, CommandTable, ProtocolErrorKind, ResponseBuilder, ResponseDisposition,
 };
@@ -446,7 +446,7 @@ impl CatRadio for Ts570dRadio {
 mod tests {
     use std::collections::HashSet;
 
-    use framework::CatFramework;
+    use cat_framework::CatFramework;
 
     use super::*;
 

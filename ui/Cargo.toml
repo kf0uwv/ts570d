@@ -9,7 +9,6 @@ rust-version.workspace = true
 
 [dependencies]
 # Local dependencies
-framework = { path = "../framework" }
 # TS-570D domain types + Radio trait (Frequency, Mode, InformationResponse, ...)
 radio = { path = "../radio" }
 

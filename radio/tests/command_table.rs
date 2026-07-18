@@ -21,7 +21,7 @@
 
 use std::collections::HashSet;
 
-use framework::{CatFramework, ProtocolErrorKind, ResponseDisposition};
+use cat_framework::{CatFramework, ProtocolErrorKind, ResponseDisposition};
 use radio::{Ts570dRadio, TS570D_COMMAND_TABLE};
 
 #[test]

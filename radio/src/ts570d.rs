@@ -36,20 +36,107 @@
 //! | RF gain         | RG   | `RG;` / `RG<3 digits>;`        |
 //! | TX power        | PC   | `PC;` / `PC<3 digits>;`        |
 
-use framework::errors::TransportError;
-use framework::session::CatSession;
+use std::cell::RefCell;
+use std::rc::Rc;
 
+use cat_client::CatClient;
+use cat_transport_core::{CatSession, ResponseDisposition, TransportError};
+
+use crate::ts570d_radio::{Ts570dCommandId, TS570D_COMMAND_TABLE};
 use crate::{Frequency, MemoryChannelEntry, Mode, RadioError, RadioResult};
 
-use crate::client::RadioClient;
 use crate::protocol::{InformationResponse, Response, ResponseParser};
+
+/// Shares one [`CatSession`] between the internal [`CatClient`] (whose
+/// `session` field is private to the `cat_client` crate) and [`Ts570d`]'s own
+/// direct access — needed for [`Ts570d::flush_rx`] and for this module's
+/// wire-byte-level test assertions, neither of which `CatClient` exposes a
+/// passthrough for. Local to `radio`, not a redesign of `cat_client` — see
+/// `planning/architect/task_plan.md`'s "RadioClient → CatClient" section.
+///
+/// Holds `Option<S>` rather than `S` so that `execute`/`send` can take
+/// ownership of the session out of the `RefCell` *before* awaiting (and put
+/// it back synchronously afterwards) instead of holding a `RefCell` borrow
+/// across an `.await` point, which clippy's `await_holding_refcell_ref`
+/// correctly flags as a re-entrancy/panic hazard. `Ts570d` never calls two
+/// session-touching methods concurrently against the same handle (all of its
+/// own methods take `&mut self`), so the session is always present when
+/// `take()` runs.
+pub(crate) struct SharedSession<S>(Rc<RefCell<Option<S>>>);
+
+impl<S> SharedSession<S> {
+    fn new(session: S) -> Self {
+        Self(Rc::new(RefCell::new(Some(session))))
+    }
+
+    /// Take ownership of the session for the duration of one synchronous or
+    /// asynchronous operation, then hand it back with [`Self::put_back`].
+    fn take(&self) -> S {
+        self.0
+            .borrow_mut()
+            .take()
+            .expect("SharedSession: session unavailable (unexpected re-entrant use)")
+    }
+
+    fn put_back(&self, session: S) {
+        *self.0.borrow_mut() = Some(session);
+    }
+
+    /// Read-only, non-consuming access to the underlying session, for this
+    /// module's wire-byte-level test assertions (e.g.
+    /// `radio.session.borrow().transport.written()`). Never called while
+    /// `take()` is outstanding — same non-reentrancy guarantee as above.
+    #[cfg(test)]
+    fn borrow(&self) -> impl std::ops::Deref<Target = S> + '_ {
+        std::cell::Ref::map(self.0.borrow(), |opt| {
+            opt.as_ref()
+                .expect("SharedSession: session unavailable (unexpected re-entrant use)")
+        })
+    }
+}
+
+impl<S> Clone for SharedSession<S> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl<S: CatSession> CatSession for SharedSession<S> {
+    type Error = S::Error;
+
+    async fn execute(
+        &mut self,
+        request: &[u8],
+        response: &mut Vec<u8>,
+    ) -> Result<ResponseDisposition, Self::Error> {
+        let mut session = self.take();
+        let result = session.execute(request, response).await;
+        self.put_back(session);
+        result
+    }
+
+    async fn send(&mut self, request: &[u8]) -> Result<(), Self::Error> {
+        let mut session = self.take();
+        let result = session.send(request).await;
+        self.put_back(session);
+        result
+    }
+
+    fn flush_rx(&mut self) {
+        let mut session = self.take();
+        session.flush_rx();
+        self.put_back(session);
+    }
+}
 
 /// Strongly-typed client for the Kenwood TS-570D CAT interface.
 ///
-/// Wraps [`RadioClient<S>`] and converts raw protocol strings into typed Rust
-/// values.  All async methods are monoio-compatible (`!Send`).
+/// Wraps [`CatClient<Ts570dCommandId, S>`] and converts raw protocol strings
+/// into typed Rust values.  All async methods are monoio-compatible (`!Send`).
 pub struct Ts570d<S: CatSession> {
-    pub(crate) client: RadioClient<S>,
+    pub(crate) client: CatClient<Ts570dCommandId, SharedSession<S>>,
+    session: SharedSession<S>,
 }
 
 impl<S> Ts570d<S>
@@ -58,8 +145,10 @@ where
 {
     /// Create a new `Ts570d` wrapping the given session.
     pub fn new(session: S) -> Self {
+        let session = SharedSession::new(session);
         Self {
-            client: RadioClient::new(session),
+            client: CatClient::new(session.clone(), &TS570D_COMMAND_TABLE),
+            session,
         }
     }
 
@@ -81,7 +170,10 @@ where
 
     /// Set the VFO A frequency.
     pub async fn set_vfo_a(&mut self, freq: Frequency) -> RadioResult<()> {
-        self.client.set("FA", &freq.to_protocol_string()).await
+        self.client
+            .set("FA", &freq.to_protocol_string())
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -102,7 +194,10 @@ where
 
     /// Set the VFO B frequency.
     pub async fn set_vfo_b(&mut self, freq: Frequency) -> RadioResult<()> {
-        self.client.set("FB", &freq.to_protocol_string()).await
+        self.client
+            .set("FB", &freq.to_protocol_string())
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -123,7 +218,10 @@ where
 
     /// Set the operating mode.
     pub async fn set_mode(&mut self, mode: Mode) -> RadioResult<()> {
-        self.client.set("MD", &format!("{}", mode.as_u8())).await
+        self.client
+            .set("MD", &format!("{}", mode.as_u8()))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -152,12 +250,12 @@ where
 
     /// Assert PTT — switch the radio to transmit.
     pub async fn transmit(&mut self) -> RadioResult<()> {
-        self.client.set("TX", "").await
+        self.client.set("TX", "").await.map_err(Into::into)
     }
 
     /// Release PTT — switch the radio to receive.
     pub async fn receive(&mut self) -> RadioResult<()> {
-        self.client.set("RX", "").await
+        self.client.set("RX", "").await.map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -219,7 +317,10 @@ where
     /// Manual p.75: Set format is `AG<P1:3>;` (3 digits, format 31, 000–255).
     /// No selector digit in the set command.
     pub async fn set_af_gain(&mut self, level: u8) -> RadioResult<()> {
-        self.client.set("AG", &format!("{:03}", level)).await
+        self.client
+            .set("AG", &format!("{:03}", level))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -240,7 +341,10 @@ where
 
     /// Set the RF gain level (0–255).
     pub async fn set_rf_gain(&mut self, level: u8) -> RadioResult<()> {
-        self.client.set("RG", &format!("{:03}", level)).await
+        self.client
+            .set("RG", &format!("{:03}", level))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -261,7 +365,10 @@ where
 
     /// Set the transmit power (watts, 5–100).
     pub async fn set_power(&mut self, watts: u8) -> RadioResult<()> {
-        self.client.set("PC", &format!("{:03}", watts)).await
+        self.client
+            .set("PC", &format!("{:03}", watts))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -282,7 +389,10 @@ where
 
     /// Set noise blanker on/off.
     pub async fn set_noise_blanker(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("NB", if on { "1" } else { "0" }).await
+        self.client
+            .set("NB", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -303,7 +413,10 @@ where
 
     /// Set noise reduction level.
     pub async fn set_noise_reduction(&mut self, level: u8) -> RadioResult<()> {
-        self.client.set("NR", &format!("{}", level)).await
+        self.client
+            .set("NR", &format!("{}", level))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -324,7 +437,10 @@ where
 
     /// Set pre-amplifier on/off.
     pub async fn set_preamp(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("PA", if on { "1" } else { "0" }).await
+        self.client
+            .set("PA", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -345,7 +461,10 @@ where
 
     /// Set attenuator on/off.
     pub async fn set_attenuator(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("RA", if on { "01" } else { "00" }).await
+        self.client
+            .set("RA", if on { "01" } else { "00" })
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -366,7 +485,10 @@ where
 
     /// Set squelch level (0–255).
     pub async fn set_squelch(&mut self, level: u8) -> RadioResult<()> {
-        self.client.set("SQ", &format!("{:03}", level)).await
+        self.client
+            .set("SQ", &format!("{:03}", level))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -387,7 +509,10 @@ where
 
     /// Set microphone gain (0–100).
     pub async fn set_mic_gain(&mut self, gain: u8) -> RadioResult<()> {
-        self.client.set("MG", &format!("{:03}", gain)).await
+        self.client
+            .set("MG", &format!("{:03}", gain))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -408,7 +533,10 @@ where
 
     /// Set AGC time constant (2=fast, 4=slow).
     pub async fn set_agc(&mut self, constant: u8) -> RadioResult<()> {
-        self.client.set("GT", &format!("{:03}", constant)).await
+        self.client
+            .set("GT", &format!("{:03}", constant))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -429,22 +557,25 @@ where
 
     /// Set RIT on/off.
     pub async fn set_rit(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("RT", if on { "1" } else { "0" }).await
+        self.client
+            .set("RT", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     /// Clear RIT/XIT offset to zero.
     pub async fn clear_rit(&mut self) -> RadioResult<()> {
-        self.client.set("RC", "").await
+        self.client.set("RC", "").await.map_err(Into::into)
     }
 
     /// Increment RIT/XIT offset.
     pub async fn rit_up(&mut self) -> RadioResult<()> {
-        self.client.set("RU", "").await
+        self.client.set("RU", "").await.map_err(Into::into)
     }
 
     /// Decrement RIT/XIT offset.
     pub async fn rit_down(&mut self) -> RadioResult<()> {
-        self.client.set("RD", "").await
+        self.client.set("RD", "").await.map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -465,7 +596,10 @@ where
 
     /// Set XIT on/off.
     pub async fn set_xit(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("XT", if on { "1" } else { "0" }).await
+        self.client
+            .set("XT", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -486,7 +620,10 @@ where
 
     /// Set scan on/off.
     pub async fn set_scan(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("SC", if on { "1" } else { "0" }).await
+        self.client
+            .set("SC", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -507,7 +644,10 @@ where
 
     /// Set VOX on/off.
     pub async fn set_vox(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("VX", if on { "1" } else { "0" }).await
+        self.client
+            .set("VX", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     /// Get VOX gain (1–9).
@@ -524,7 +664,10 @@ where
 
     /// Set VOX gain (1–9).
     pub async fn set_vox_gain(&mut self, gain: u8) -> RadioResult<()> {
-        self.client.set("VG", &format!("{:03}", gain)).await
+        self.client
+            .set("VG", &format!("{:03}", gain))
+            .await
+            .map_err(Into::into)
     }
 
     /// Get VOX delay in milliseconds (0–3000).
@@ -541,7 +684,10 @@ where
 
     /// Set VOX delay in milliseconds (0–3000).
     pub async fn set_vox_delay(&mut self, ms: u16) -> RadioResult<()> {
-        self.client.set("VD", &format!("{:04}", ms)).await
+        self.client
+            .set("VD", &format!("{:04}", ms))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -562,7 +708,10 @@ where
 
     /// Set receiver VFO/memory selection.
     pub async fn set_rx_vfo(&mut self, vfo: u8) -> RadioResult<()> {
-        self.client.set("FR", &format!("{}", vfo)).await
+        self.client
+            .set("FR", &format!("{}", vfo))
+            .await
+            .map_err(Into::into)
     }
 
     /// Get transmitter VFO/memory selection (0=VFO A, 1=VFO B, 2=Memory).
@@ -579,7 +728,10 @@ where
 
     /// Set transmitter VFO/memory selection.
     pub async fn set_tx_vfo(&mut self, vfo: u8) -> RadioResult<()> {
-        self.client.set("FT", &format!("{}", vfo)).await
+        self.client
+            .set("FT", &format!("{}", vfo))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -600,7 +752,10 @@ where
 
     /// Set frequency lock on/off.
     pub async fn set_frequency_lock(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("LK", if on { "1" } else { "0" }).await
+        self.client
+            .set("LK", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -621,7 +776,10 @@ where
 
     /// Set transceiver power on/off.
     pub async fn set_power_on(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("PS", if on { "1" } else { "0" }).await
+        self.client
+            .set("PS", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -658,7 +816,10 @@ where
 
     /// Set speech processor on/off.
     pub async fn set_speech_processor(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("PR", if on { "1" } else { "0" }).await
+        self.client
+            .set("PR", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -679,7 +840,10 @@ where
 
     /// Set memory channel number (0–99).
     pub async fn set_memory_channel(&mut self, ch: u8) -> RadioResult<()> {
-        self.client.set("MC", &format!("{:02}", ch)).await
+        self.client
+            .set("MC", &format!("{:02}", ch))
+            .await
+            .map_err(Into::into)
     }
 
     /// Read memory channel contents (MR command).
@@ -721,7 +885,7 @@ where
             entry.tone_type,
             entry.tone_number,
         );
-        self.client.set("MW", &params).await
+        self.client.set("MW", &params).await.map_err(Into::into)
     }
 
     /// Clear a memory channel by writing a vacant entry (MW command).
@@ -729,7 +893,7 @@ where
     /// Sends `MW0 NN00000000000000000000;`.
     pub async fn clear_memory_channel(&mut self, ch: u8) -> RadioResult<()> {
         let params = format!("0 {:02}00000000000000000000", ch);
-        self.client.set("MW", &params).await
+        self.client.set("MW", &params).await.map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -750,7 +914,10 @@ where
 
     /// Set antenna selection (1=ANT1, 2=ANT2).
     pub async fn set_antenna(&mut self, ant: u8) -> RadioResult<()> {
-        self.client.set("AN", &format!("{}", ant)).await
+        self.client
+            .set("AN", &format!("{}", ant))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -759,7 +926,7 @@ where
 
     /// Send a CW message via the keyer buffer.
     pub async fn send_cw(&mut self, message: &str) -> RadioResult<()> {
-        self.client.set("KY", message).await
+        self.client.set("KY", message).await.map_err(Into::into)
     }
 
     /// Get keyer speed in WPM (10–60).
@@ -776,7 +943,10 @@ where
 
     /// Set keyer speed in WPM (10–60).
     pub async fn set_keyer_speed(&mut self, wpm: u8) -> RadioResult<()> {
-        self.client.set("KS", &format!("{:03}", wpm)).await
+        self.client
+            .set("KS", &format!("{:03}", wpm))
+            .await
+            .map_err(Into::into)
     }
 
     /// Get CW pitch index (00–12 maps to 400–1000 Hz).
@@ -793,7 +963,10 @@ where
 
     /// Set CW pitch index (00–12).
     pub async fn set_cw_pitch(&mut self, pitch: u8) -> RadioResult<()> {
-        self.client.set("PT", &format!("{:02}", pitch)).await
+        self.client
+            .set("PT", &format!("{:02}", pitch))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -804,12 +977,15 @@ where
     ///
     /// AC SET format: `AC[P2][P3]` — 2 digits (P2=0:THRU/1:IN, P3=0:off/1:tune).
     pub async fn set_antenna_tuner_thru(&mut self, thru: bool) -> RadioResult<()> {
-        self.client.set("AC", if thru { "00" } else { "10" }).await
+        self.client
+            .set("AC", if thru { "00" } else { "10" })
+            .await
+            .map_err(Into::into)
     }
 
     /// Start antenna tuning (AC SET with P2=IN, P3=tune-start).
     pub async fn start_antenna_tuning(&mut self) -> RadioResult<()> {
-        self.client.set("AC", "11").await
+        self.client.set("AC", "11").await.map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -830,7 +1006,10 @@ where
 
     /// Set high cutoff filter index (00–20).
     pub async fn set_high_cutoff(&mut self, val: u8) -> RadioResult<()> {
-        self.client.set("SH", &format!("{:02}", val)).await
+        self.client
+            .set("SH", &format!("{:02}", val))
+            .await
+            .map_err(Into::into)
     }
 
     /// Get low cutoff filter index (SL, 00–20).
@@ -847,7 +1026,10 @@ where
 
     /// Set low cutoff filter index (00–20).
     pub async fn set_low_cutoff(&mut self, val: u8) -> RadioResult<()> {
-        self.client.set("SL", &format!("{:02}", val)).await
+        self.client
+            .set("SL", &format!("{:02}", val))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -868,7 +1050,10 @@ where
 
     /// Set CTCSS tone number (01–39).
     pub async fn set_ctcss_tone_number(&mut self, n: u8) -> RadioResult<()> {
-        self.client.set("CN", &format!("{:02}", n)).await
+        self.client
+            .set("CN", &format!("{:02}", n))
+            .await
+            .map_err(Into::into)
     }
 
     /// Get CTCSS on/off state.
@@ -885,7 +1070,10 @@ where
 
     /// Set CTCSS on/off.
     pub async fn set_ctcss(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("CT", if on { "1" } else { "0" }).await
+        self.client
+            .set("CT", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     /// Get tone number (01–39).
@@ -902,7 +1090,10 @@ where
 
     /// Set tone number (01–39).
     pub async fn set_tone_number(&mut self, n: u8) -> RadioResult<()> {
-        self.client.set("TN", &format!("{:02}", n)).await
+        self.client
+            .set("TN", &format!("{:02}", n))
+            .await
+            .map_err(Into::into)
     }
 
     /// Get tone on/off state.
@@ -919,7 +1110,10 @@ where
 
     /// Set tone on/off.
     pub async fn set_tone(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("TO", if on { "1" } else { "0" }).await
+        self.client
+            .set("TO", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -940,7 +1134,10 @@ where
 
     /// Set beat cancel mode (0=off, 1=on, 2=enhanced).
     pub async fn set_beat_cancel(&mut self, mode: u8) -> RadioResult<()> {
-        self.client.set("BC", &format!("{}", mode)).await
+        self.client
+            .set("BC", &format!("{}", mode))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -964,6 +1161,7 @@ where
         self.client
             .set("IS", &format!("{}{:04}", direction, freq))
             .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -972,7 +1170,10 @@ where
 
     /// Recall voice message (1 or 2).
     pub async fn voice_recall(&mut self, voice: u8) -> RadioResult<()> {
-        self.client.set("VR", &format!("{}", voice)).await
+        self.client
+            .set("VR", &format!("{}", voice))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -981,7 +1182,10 @@ where
 
     /// Reset the transceiver (1=partial, 2=full).
     pub async fn reset(&mut self, full: bool) -> RadioResult<()> {
-        self.client.set("SR", if full { "2" } else { "1" }).await
+        self.client
+            .set("SR", if full { "2" } else { "1" })
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -1021,7 +1225,10 @@ where
 
     /// Set semi break-in delay in ms (0–1000, 50ms steps).
     pub async fn set_semi_break_in_delay(&mut self, ms: u16) -> RadioResult<()> {
-        self.client.set("SD", &format!("{:04}", ms)).await
+        self.client
+            .set("SD", &format!("{:04}", ms))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -1042,7 +1249,10 @@ where
 
     /// Set CW auto zero-beat on/off.
     pub async fn set_cw_auto_zerobeat(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("CA", if on { "1" } else { "0" }).await
+        self.client
+            .set("CA", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -1063,7 +1273,10 @@ where
 
     /// Set fine step on/off.
     pub async fn set_fine_step(&mut self, on: bool) -> RadioResult<()> {
-        self.client.set("FS", if on { "1" } else { "0" }).await
+        self.client
+            .set("FS", if on { "1" } else { "0" })
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -1072,7 +1285,10 @@ where
 
     /// Set auto information mode (0–3).
     pub async fn set_auto_info(&mut self, mode: u8) -> RadioResult<()> {
-        self.client.set("AI", &format!("{}", mode)).await
+        self.client
+            .set("AI", &format!("{}", mode))
+            .await
+            .map_err(Into::into)
     }
 
     // -----------------------------------------------------------------------
@@ -1081,17 +1297,19 @@ where
 
     /// Send MIC Up command.
     pub async fn mic_up(&mut self) -> RadioResult<()> {
-        self.client.set("UP", "").await
+        self.client.set("UP", "").await.map_err(Into::into)
     }
 
     /// Send MIC Down command.
     pub async fn mic_down(&mut self) -> RadioResult<()> {
-        self.client.set("DN", "").await
+        self.client.set("DN", "").await.map_err(Into::into)
     }
 
     /// Flush the session's receive buffer, discarding unsolicited or stale data.
     pub fn flush_rx(&mut self) {
-        self.client.session.flush_rx();
+        let mut session = self.session.take();
+        session.flush_rx();
+        self.session.put_back(session);
     }
 }
 
@@ -1520,9 +1738,9 @@ where
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use framework::errors::TransportError;
-    use framework::session::SerialCatSession;
-    use framework::transport::Transport;
+    use cat_transport_core::Transport;
+    use cat_transport_core::TransportError;
+    use cat_transport_serial::SerialCatSession;
     use std::collections::VecDeque;
 
     // -----------------------------------------------------------------------
@@ -1601,7 +1819,7 @@ mod tests {
     async fn test_get_vfo_a_query_sent() {
         let mut radio = make_radio("FA00014250000;");
         let _ = radio.get_vfo_a().await.unwrap();
-        assert_eq!(radio.client.session.transport.written(), b"FA;");
+        assert_eq!(radio.session.borrow().transport.written(), b"FA;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1629,7 +1847,7 @@ mod tests {
         let freq = Frequency::new(14_250_000).unwrap();
         radio.set_vfo_a(freq).await.unwrap();
         assert_eq!(
-            radio.client.session.transport.written_str(),
+            radio.session.borrow().transport.written_str(),
             "FA00014250000;"
         );
     }
@@ -1641,7 +1859,7 @@ mod tests {
         let freq = Frequency::new(7_000_000).unwrap();
         radio.set_vfo_a(freq).await.unwrap();
         assert_eq!(
-            radio.client.session.transport.written_str(),
+            radio.session.borrow().transport.written_str(),
             "FA00007000000;"
         );
     }
@@ -1654,7 +1872,7 @@ mod tests {
     async fn test_get_vfo_b_query_sent() {
         let mut radio = make_radio("FB00007100000;");
         let _ = radio.get_vfo_b().await.unwrap();
-        assert_eq!(radio.client.session.transport.written(), b"FB;");
+        assert_eq!(radio.session.borrow().transport.written(), b"FB;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1675,7 +1893,7 @@ mod tests {
         let freq = Frequency::new(7_100_000).unwrap();
         radio.set_vfo_b(freq).await.unwrap();
         assert_eq!(
-            radio.client.session.transport.written_str(),
+            radio.session.borrow().transport.written_str(),
             "FB00007100000;"
         );
     }
@@ -1688,7 +1906,7 @@ mod tests {
     async fn test_get_mode_query_sent() {
         let mut radio = make_radio("MD2;");
         let _ = radio.get_mode().await.unwrap();
-        assert_eq!(radio.client.session.transport.written(), b"MD;");
+        assert_eq!(radio.session.borrow().transport.written(), b"MD;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1721,7 +1939,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_mode(Mode::Usb).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "MD2;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "MD2;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1729,7 +1947,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_mode(Mode::Lsb).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "MD1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "MD1;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1737,7 +1955,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_mode(Mode::CwReverse).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "MD7;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "MD7;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1745,7 +1963,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_mode(Mode::FskReverse).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "MD9;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "MD9;");
     }
 
     // -----------------------------------------------------------------------
@@ -1757,7 +1975,7 @@ mod tests {
         // Manual p.80: Answer is SM<4digits>; — no selector prefix.
         let mut radio = make_radio("SM0015;");
         let _ = radio.get_smeter().await.unwrap();
-        assert_eq!(radio.client.session.transport.written(), b"SM;");
+        assert_eq!(radio.session.borrow().transport.written(), b"SM;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1792,7 +2010,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.transmit().await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "TX;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "TX;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1800,7 +2018,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.receive().await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "RX;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "RX;");
     }
 
     // -----------------------------------------------------------------------
@@ -1811,7 +2029,7 @@ mod tests {
     async fn test_get_id_query_sent() {
         let mut radio = make_radio("ID019;");
         let _ = radio.get_id().await.unwrap();
-        assert_eq!(radio.client.session.transport.written(), b"ID;");
+        assert_eq!(radio.session.borrow().transport.written(), b"ID;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1839,7 +2057,7 @@ mod tests {
         let if_str = "IF0001423000001000+00000000102000000;";
         let mut radio = make_radio(if_str);
         let _ = radio.get_information().await;
-        assert_eq!(radio.client.session.transport.written(), b"IF;");
+        assert_eq!(radio.session.borrow().transport.written(), b"IF;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1876,7 +2094,7 @@ mod tests {
         // Manual p.75: Answer is AG<3digits>; — no selector prefix.
         let mut radio = make_radio("AG128;");
         let _ = radio.get_af_gain().await.unwrap();
-        assert_eq!(radio.client.session.transport.written(), b"AG;");
+        assert_eq!(radio.session.borrow().transport.written(), b"AG;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1893,7 +2111,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_af_gain(200).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "AG200;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "AG200;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1901,7 +2119,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_af_gain(5).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "AG005;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "AG005;");
     }
 
     // -----------------------------------------------------------------------
@@ -1912,7 +2130,7 @@ mod tests {
     async fn test_get_rf_gain_query_sent() {
         let mut radio = make_radio("RG200;");
         let _ = radio.get_rf_gain().await.unwrap();
-        assert_eq!(radio.client.session.transport.written(), b"RG;");
+        assert_eq!(radio.session.borrow().transport.written(), b"RG;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1927,7 +2145,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_rf_gain(255).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "RG255;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "RG255;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1935,7 +2153,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_rf_gain(10).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "RG010;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "RG010;");
     }
 
     // -----------------------------------------------------------------------
@@ -1946,7 +2164,7 @@ mod tests {
     async fn test_get_power_query_sent() {
         let mut radio = make_radio("PC100;");
         let _ = radio.get_power().await.unwrap();
-        assert_eq!(radio.client.session.transport.written(), b"PC;");
+        assert_eq!(radio.session.borrow().transport.written(), b"PC;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1961,7 +2179,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_power(100).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "PC100;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "PC100;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -1969,7 +2187,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_power(5).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "PC005;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "PC005;");
     }
 
     // -----------------------------------------------------------------------
@@ -2017,7 +2235,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_noise_blanker(true).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "NB1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "NB1;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2025,7 +2243,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_noise_blanker(false).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "NB0;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "NB0;");
     }
 
     // -----------------------------------------------------------------------
@@ -2044,7 +2262,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_noise_reduction(1).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "NR1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "NR1;");
     }
 
     // -----------------------------------------------------------------------
@@ -2063,7 +2281,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_preamp(true).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "PA1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "PA1;");
     }
 
     // -----------------------------------------------------------------------
@@ -2089,7 +2307,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_attenuator(true).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "RA01;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "RA01;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2097,7 +2315,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_attenuator(false).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "RA00;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "RA00;");
     }
 
     // -----------------------------------------------------------------------
@@ -2116,7 +2334,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_squelch(50).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "SQ050;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "SQ050;");
     }
 
     // -----------------------------------------------------------------------
@@ -2135,7 +2353,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_mic_gain(75).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "MG075;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "MG075;");
     }
 
     // -----------------------------------------------------------------------
@@ -2154,7 +2372,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_agc(4).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "GT004;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "GT004;");
     }
 
     // -----------------------------------------------------------------------
@@ -2173,7 +2391,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_rit(true).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "RT1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "RT1;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2181,7 +2399,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.clear_rit().await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "RC;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "RC;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2189,7 +2407,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.rit_up().await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "RU;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "RU;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2197,7 +2415,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.rit_down().await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "RD;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "RD;");
     }
 
     // -----------------------------------------------------------------------
@@ -2216,7 +2434,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_xit(true).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "XT1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "XT1;");
     }
 
     // -----------------------------------------------------------------------
@@ -2235,7 +2453,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_scan(true).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "SC1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "SC1;");
     }
 
     // -----------------------------------------------------------------------
@@ -2254,7 +2472,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_vox(true).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "VX1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "VX1;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2269,7 +2487,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_vox_gain(7).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "VG007;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "VG007;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2284,7 +2502,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_vox_delay(2000).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "VD2000;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "VD2000;");
     }
 
     // -----------------------------------------------------------------------
@@ -2303,7 +2521,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_rx_vfo(1).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "FR1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "FR1;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2318,7 +2536,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_tx_vfo(1).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "FT1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "FT1;");
     }
 
     // -----------------------------------------------------------------------
@@ -2337,7 +2555,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_frequency_lock(true).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "LK1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "LK1;");
     }
 
     // -----------------------------------------------------------------------
@@ -2356,7 +2574,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_power_on(false).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "PS0;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "PS0;");
     }
 
     // -----------------------------------------------------------------------
@@ -2393,7 +2611,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_speech_processor(true).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "PR1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "PR1;");
     }
 
     // -----------------------------------------------------------------------
@@ -2412,7 +2630,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_memory_channel(10).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "MC10;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "MC10;");
     }
 
     // -----------------------------------------------------------------------
@@ -2431,7 +2649,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_antenna(2).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "AN2;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "AN2;");
     }
 
     // -----------------------------------------------------------------------
@@ -2443,7 +2661,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.send_cw("CQ").await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "KYCQ;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "KYCQ;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2458,7 +2676,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_keyer_speed(30).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "KS030;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "KS030;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2473,7 +2691,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_cw_pitch(8).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "PT08;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "PT08;");
     }
 
     // -----------------------------------------------------------------------
@@ -2485,7 +2703,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.voice_recall(1).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "VR1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "VR1;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2493,7 +2711,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.reset(false).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "SR1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "SR1;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2501,7 +2719,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.reset(true).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "SR2;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "SR2;");
     }
 
     // -----------------------------------------------------------------------
@@ -2520,7 +2738,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_semi_break_in_delay(500).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "SD0500;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "SD0500;");
     }
 
     // -----------------------------------------------------------------------
@@ -2539,7 +2757,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_cw_auto_zerobeat(true).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "CA1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "CA1;");
     }
 
     // -----------------------------------------------------------------------
@@ -2558,7 +2776,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_fine_step(true).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "FS1;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "FS1;");
     }
 
     // -----------------------------------------------------------------------
@@ -2577,7 +2795,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_beat_cancel(2).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "BC2;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "BC2;");
     }
 
     // -----------------------------------------------------------------------
@@ -2597,7 +2815,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_if_shift('-', 300).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "IS-0300;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "IS-0300;");
     }
 
     // -----------------------------------------------------------------------
@@ -2609,7 +2827,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.mic_up().await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "UP;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "UP;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2617,7 +2835,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.mic_down().await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "DN;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "DN;");
     }
 
     // -----------------------------------------------------------------------
@@ -2629,7 +2847,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_auto_info(2).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "AI2;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "AI2;");
     }
 
     // -----------------------------------------------------------------------
@@ -2640,7 +2858,7 @@ mod tests {
     async fn test_get_high_cutoff_query_sent() {
         let mut radio = make_radio("SH05;");
         let _ = radio.get_high_cutoff().await.unwrap();
-        assert_eq!(radio.client.session.transport.written(), b"SH;");
+        assert_eq!(radio.session.borrow().transport.written(), b"SH;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2662,7 +2880,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_high_cutoff(10).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "SH10;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "SH10;");
     }
 
     // -----------------------------------------------------------------------
@@ -2673,7 +2891,7 @@ mod tests {
     async fn test_get_low_cutoff_query_sent() {
         let mut radio = make_radio("SL03;");
         let _ = radio.get_low_cutoff().await.unwrap();
-        assert_eq!(radio.client.session.transport.written(), b"SL;");
+        assert_eq!(radio.session.borrow().transport.written(), b"SL;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2688,7 +2906,7 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.set_low_cutoff(7).await.unwrap();
-        assert_eq!(radio.client.session.transport.written_str(), "SL07;");
+        assert_eq!(radio.session.borrow().transport.written_str(), "SL07;");
     }
 
     // -----------------------------------------------------------------------
@@ -2700,7 +2918,7 @@ mod tests {
         let mut radio = make_radio("RM10023;");
         let _ = radio.get_meter(1).await.unwrap();
         // Must send "RM1;" — the meter type selector belongs in the wire bytes before ';'
-        assert_eq!(radio.client.session.transport.written(), b"RM1;");
+        assert_eq!(radio.session.borrow().transport.written(), b"RM1;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2714,14 +2932,14 @@ mod tests {
     async fn test_get_meter_comp_query_sent() {
         let mut radio = make_radio("RM20010;");
         let _ = radio.get_meter(2).await.unwrap();
-        assert_eq!(radio.client.session.transport.written(), b"RM2;");
+        assert_eq!(radio.session.borrow().transport.written(), b"RM2;");
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_get_meter_alc_query_sent() {
         let mut radio = make_radio("RM30005;");
         let _ = radio.get_meter(3).await.unwrap();
-        assert_eq!(radio.client.session.transport.written(), b"RM3;");
+        assert_eq!(radio.session.borrow().transport.written(), b"RM3;");
     }
 
     #[monoio::test(driver = "legacy")]

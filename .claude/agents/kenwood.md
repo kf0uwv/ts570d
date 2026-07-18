@@ -33,10 +33,10 @@ Decisions recorded in `./planning/` files are **binding**. You MUST implement ex
 - Naming: snake_case for functions/variables, PascalCase for types
 
 ## Dependency Rules (MANDATORY)
-- `radio` depends on `framework` ONLY — NEVER import from `serial`
-- Transport is always injected via generics (`T: Transport`) — never a concrete serial type
-- Unit tests use a `FakeTransport` defined in the test module, never `serial::SerialPort`
-- The `Radio` trait lives in `framework` — keep it abstract (any transceiver, not TS-570D-specific)
+- `radio` depends on `cat-framework`, `cat-client`, `cat-transport-core` (external, from radio-cat-rs) — NEVER import a concrete transport crate directly
+- A session is always injected via generics (`S: CatSession`) — never a concrete transport type
+- Unit tests use a `FakeTransport`/scripted `CatSession` defined in the test module, never a real transport crate
+- The `Radio` trait lives in `radio` — keep it abstract (any transceiver, not TS-570D-specific)
 - TS-570D-specific features (keyer, antenna tuner, voice, menu) are inherent methods on `Ts570d`, not trait methods
 
 ## Planning Requirements (MANDATORY)

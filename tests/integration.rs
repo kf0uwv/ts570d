@@ -32,12 +32,11 @@
 
 use std::time::Duration;
 
+use cat_transport_serial::{SerialCatSession, SerialConfig, SerialPort};
 use emulator::emulator::Emulator;
-use framework::SerialCatSession;
 use monoio::RuntimeBuilder;
 use radio::Ts570d;
 use radio::{Frequency, Mode};
-use serial::{SerialConfig, SerialPort};
 
 // ---------------------------------------------------------------------------
 // Test helpers

@@ -1,7 +1,5 @@
 [workspace]
 members = [
-    "framework",
-    "serial",
     "radio",
     "ui",
     "emulator",
@@ -53,6 +51,14 @@ nix = "0.27.1"
 tempfile = "3.10.1"
 mockall = "0.12.1"
 
+# Generic CAT engine + transports, extracted from this repo into
+# https://github.com/kf0uwv/radio-cat-rs (see docs/adr/0004, 0005).
+# Floating on `branch = "main"` while both repos co-evolve pre-1.0.
+cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+
 [package]
 name = "ts570d"
 version.workspace = true
@@ -66,24 +72,32 @@ rust-version.workspace = true
 name = "ts570d"
 path = "src/main.rs"
 
+[[bin]]
+name = "pin-test"
+path = "src/bin/pin_test.rs"
+
 [dependencies]
 monoio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+libc = { workspace = true }
+
+# CAT transport crate (extracted; see docs/adr/0004, 0005) — provides
+# SerialCatSession/SerialConfig/SerialPort, the only pieces main.rs names
+# directly. cat-transport-core is a transitive dependency (via
+# cat-transport-serial), never named directly here.
+cat-transport-serial = { workspace = true }
 
 # Local workspace crates
-framework = { path = "framework" }
-serial = { path = "serial" }
 radio = { path = "radio" }
 ui = { path = "ui" }
 
 [dev-dependencies]
-emulator  = { path = "emulator" }
-serial    = { path = "serial" }
-radio     = { path = "radio" }
-framework = { path = "framework" }
-monoio    = { workspace = true }
+emulator = { path = "emulator" }
+radio    = { path = "radio" }
+monoio   = { workspace = true }
+cat-transport-serial = { workspace = true }
 
 [features]
 default = []

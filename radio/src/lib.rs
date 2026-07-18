@@ -21,7 +21,8 @@
 //!
 //! # Architecture
 //!
-//! - `client`: Generic `RadioClient<S: CatSession>` for sending commands and reading responses
+//! - `ts570d`: Typed [`Ts570d`] client, wrapping `cat_client::CatClient` for sending
+//!   commands and reading responses
 //! - `ts570d_radio`: The single [`TS570D_COMMAND_TABLE`] and the `Ts570dRadio` state machine
 //! - `radio_trait`: Controller/UI-facing `Radio` trait + domain types (`Mode`, `Frequency`, ...)
 //! - `protocol`: Typed TS-570D response parsing
@@ -37,7 +38,6 @@
 //! assert!(fa.is_writable());
 //! ```
 
-pub mod client;
 pub mod protocol;
 pub mod radio_trait;
 pub mod ts570d;
@@ -54,7 +54,6 @@ mod radio_state {
 
 mod ts570d_radio_handlers;
 
-pub use client::RadioClient;
 pub use protocol::{Response, ResponseFramer, ResponseParser};
 pub use radio_trait::{
     Frequency, InformationResponse, MemoryChannelEntry, Mode, NopRadio, Radio, RadioError,

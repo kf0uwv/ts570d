@@ -14,7 +14,9 @@ path = "src/main.rs"
 [dependencies]
 # Radio command table (approved architecture exception — emulator is test infrastructure)
 radio = { path = "../radio" }
-framework = { path = "../framework" }
+# Only CatFramework is used (generic dispatch engine) — approved architecture
+# exception, same as the `radio` dependency above.
+cat-framework = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }

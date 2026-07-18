@@ -15,7 +15,7 @@
 //! Typed response variants for the TS-570D CAT protocol.
 //!
 //! The [`Response`] enum wraps every distinct response the radio can emit.
-//! [`InformationResponse`] is defined in `framework::radio` and re-exported
+//! [`InformationResponse`] is defined in `radio::radio_trait` and re-exported
 //! here for convenience.
 
 pub use crate::InformationResponse;

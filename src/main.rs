@@ -23,9 +23,8 @@
 
 use tracing::info;
 
-use framework::SerialCatSession;
+use cat_transport_serial::{SerialCatSession, SerialConfig, SerialPort};
 use radio::Ts570d;
-use serial::{SerialConfig, SerialPort};
 
 /// Parsed command-line arguments.
 struct Args {

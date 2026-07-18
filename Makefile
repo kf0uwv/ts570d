@@ -11,7 +11,6 @@ build:
 release:
 	cargo build --release
 	cargo build --release -p emulator
-	cargo build --release -p serial
 
 # ── Test ─────────────────────────────────────────────────────────────────────
 test: test-unit test-integration
@@ -45,7 +44,7 @@ emulator:
 	cargo run --bin emulator
 
 pintest:
-	cargo run -p serial --bin pin-test
+	cargo run --bin pin-test
 
 # ── Package ──────────────────────────────────────────────────────────────────
 deb: release

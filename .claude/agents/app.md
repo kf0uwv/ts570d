@@ -32,8 +32,8 @@ Decisions recorded in `./planning/` files are **binding**. You MUST implement ex
 
 ## Dependency Rules (MANDATORY)
 - `src/main.rs` is the ONLY place concrete types are wired together
-- app depends on: framework, serial, radio, ui, emulator
-- Pass concrete types (e.g. Ts570d<SerialPort>) into ui/other components as trait objects
+- app depends on: cat-framework, cat-client, cat-transport-core, cat-transport-serial (external, from radio-cat-rs), radio, ui, emulator
+- Pass concrete types (e.g. Ts570d<SerialCatSession<SerialPort>>) into ui/other components as trait objects
 - NEVER put business logic in main.rs — delegate to ui::run, radio methods, etc.
 
 ## Planning Requirements (MANDATORY)

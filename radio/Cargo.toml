@@ -8,8 +8,10 @@ description = "Kenwood TS-570D protocol handling"
 rust-version.workspace = true
 
 [dependencies]
-# Local dependencies
-framework = { path = "../framework" }
+# Generic CAT engine + client mechanics (extracted; see docs/adr/0004, 0005)
+cat-framework = { workspace = true }
+cat-client = { workspace = true }
+cat-transport-core = { workspace = true }
 
 # Runtime
 monoio = { workspace = true }
@@ -23,6 +25,10 @@ thiserror = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 mockall = { workspace = true }
+# Test-only: SerialCatSession, wrapped around a local FakeTransport, for
+# wire-framing-level unit tests in ts570d.rs. Never used by production code
+# (radio never depends on a concrete transport).
+cat-transport-serial = { workspace = true }
 
 [features]
 default = []

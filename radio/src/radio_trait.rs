@@ -26,7 +26,8 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use framework::TransportError;
+use cat_client::ClientError;
+use cat_transport_core::TransportError;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -58,6 +59,30 @@ pub enum RadioError {
 
 /// Convenience [`Result`] alias for radio operations.
 pub type RadioResult<T> = Result<T, RadioError>;
+
+/// Reconciles `cat_client`'s generic client-side errors with this crate's
+/// TS-570D-flavored [`RadioError`], at the boundary where `Ts570d` delegates
+/// to `cat_client::CatClient` (see `radio/src/ts570d.rs`).
+///
+/// `ClientError::ProtocolError(kind)` maps to
+/// [`RadioError::InvalidProtocolString`] with the exact same message text
+/// `RadioClient::execute_query` used to produce before this crate depended on
+/// `cat_client` — this is a relocation of that mapping, not a behavior
+/// change.
+impl From<ClientError<TransportError>> for RadioError {
+    fn from(err: ClientError<TransportError>) -> Self {
+        match err {
+            ClientError::UnknownCommand(code) => RadioError::UnknownCommand(code),
+            ClientError::CommandNotReadable(code) => RadioError::CommandNotReadable(code),
+            ClientError::CommandNotWritable(code) => RadioError::CommandNotWritable(code),
+            ClientError::ProtocolError(kind) => RadioError::InvalidProtocolString(format!(
+                "session reported a protocol error: {:?}",
+                kind
+            )),
+            ClientError::Transport(e) => RadioError::Transport(e),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Frequency

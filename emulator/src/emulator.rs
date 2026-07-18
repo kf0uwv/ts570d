@@ -23,7 +23,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use serialport::SerialPort;
 
-use framework::CatFramework;
+use cat_framework::CatFramework;
 use radio::Ts570dRadio;
 
 use crate::io::EmulatorIo;
