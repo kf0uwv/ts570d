@@ -77,21 +77,25 @@ A built-in emulator lets you run the control program without a physical radio. S
 
 ## Architecture
 
-The workspace uses a generic, radio-independent CAT engine with all TS-570D
-specifics isolated in one crate:
+The generic, radio-independent CAT engine and transport layer live in the
+sibling library [`radio-cat-rs`](https://github.com/kf0uwv/radio-cat-rs)
+(`cat-framework`, `cat-client`, `cat-transport-core`, `cat-transport-serial`
+— consumed as git dependencies), with all TS-570D specifics isolated in this
+repo's own crates:
 
 | Crate | Responsibility |
 |-------|----------------|
-| `framework` | Generic CAT engine (command table, parser, dispatch, response builder) + `Transport` trait. No radio-specific types. |
-| `serial` | io_uring RS-232 transport (implements `Transport`). |
-| `radio` | TS-570D command table, `CatRadio` state machine, controller client, `Radio` trait + domain types. |
-| `ui` | Ratatui terminal interface (depends on `framework` + `radio`). |
+| `cat-framework` (external) | Generic CAT engine (command table, parser, dispatch, response builder). No radio-specific types. |
+| `cat-transport-serial` (external) | io_uring RS-232 transport on Linux, native Win32 COM-port transport on Windows (implements `Transport`/`CatSession`). |
+| `radio` | TS-570D command table, `CatRadio` state machine, controller client (`Ts570d<S: CatSession>`), `Radio` trait + domain types. |
+| `ui` | Ratatui terminal interface (depends on `radio` only). |
 | `emulator` | Virtual radio; runs `CatFramework<Ts570dRadio>`. |
 
 A single `TS570D_COMMAND_TABLE` backs both the controller and the emulator.
-The design — dependency graph, command-processing sequence, extraction boundary, and
-how a second radio would implement the generic traits — is recorded as
-[ADRs](docs/adr/).
+The design — dependency graph, command-processing sequence, extraction
+boundary, network-transport readiness, and how a second radio (`ft991a`,
+Yaesu FT-991A) implements the generic traits — is recorded as
+[ADRs](docs/adr/), both here and in `radio-cat-rs`'s own `docs/adr/`.
 
 ## Protocol
 
