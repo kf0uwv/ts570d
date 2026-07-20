@@ -30,7 +30,7 @@
 ## Core Technologies
 - monoio: io_uring async runtime
 - ratatui + crossterm: Terminal UI
-- Custom io_uring serial implementation
+- io_uring serial implementation (external, `radio-cat-rs`'s `cat-transport-serial` — this repo has no local serial transport code)
 - Built-in emulator with virtual TTY
 - Tokio should NEVER be used in this project
 - 
