@@ -1,0 +1,42 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Network server mode: one process owns the physical serial port, exposed to WSJT-X and other remote clients over TCP/UDP."
+rust-version.workspace = true
+
+[dependencies]
+# TS-570D command table + client + domain types -- this crate is
+# contractually TS-570D-shaped (like `ui`), not radio-generic: the rigctld
+# translator calls `radio::Ts570d`'s typed methods directly.
+radio = { path = "../radio" }
+
+# Generic CAT engine + client mechanics.
+cat-framework = { workspace = true }
+cat-client = { workspace = true }
+cat-transport-core = { workspace = true }
+
+# The request broker + raw TCP/UDP listeners this crate wires up.
+cat-server = { workspace = true }
+
+# Async runtime (io_uring-based, Linux-only -- this repo has no Windows
+# target, see CLAUDE.md's "Linux-Specific" section, so no cfg gating).
+monoio = { workspace = true }
+
+# Async traits (compatible with !Send futures for monoio).
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# `futures::future::select_all` -- waiting on the first of several listener
+# tasks to end (`lib.rs::run`).
+futures = { workspace = true }
+
+[features]
+default = []

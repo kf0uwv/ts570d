@@ -3,6 +3,7 @@ members = [
     "radio",
     "ui",
     "emulator",
+    "server",
 ]
 resolver = "2"
 
@@ -58,6 +59,9 @@ cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main
 cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 
 [package]
 name = "ts570d"
@@ -92,6 +96,7 @@ cat-transport-serial = { workspace = true }
 # Local workspace crates
 radio = { path = "radio" }
 ui = { path = "ui" }
+server = { path = "server" }
 
 [dev-dependencies]
 emulator = { path = "emulator" }
