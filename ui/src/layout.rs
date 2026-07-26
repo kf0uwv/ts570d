@@ -583,6 +583,10 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
         draw_diag_panel(f, area, diag_state);
         return;
     }
+    if let ControlState::DiagWarning = state {
+        draw_diag_warning_panel(f, area);
+        return;
+    }
 
     let outer_block = Block::default().title(" Controls ").borders(Borders::ALL);
     let inner = outer_block.inner(area);
@@ -748,6 +752,69 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
 }
 
 // ---------------------------------------------------------------------------
+// draw_diag_warning_panel — pre-diagnostic TX safety gate
+// ---------------------------------------------------------------------------
+
+/// Draw the hard-to-miss warning shown before a diagnostic run starts.
+///
+/// The diagnostic run genuinely keys the transmitter (PTT, and CW if a
+/// callsign is supplied). Transmitting into an open or mismatched load can
+/// damage the transceiver's final amplifier stage, so this screen requires
+/// an explicit acknowledgment before anything is sent to the radio.
+pub fn draw_diag_warning_panel(f: &mut Frame, area: Rect) {
+    let outer_block = Block::default()
+        .title(" \u{26a0} DIAGNOSTICS \u{2014} TRANSMIT WARNING \u{26a0} ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+    let inner = outer_block.inner(area);
+    f.render_widget(outer_block, area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "This diagnostic run will KEY THE TRANSMITTER.",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("It briefly transmits PTT, and sends a real CW test"),
+        Line::from("message if you supply a callsign on the next screen."),
+        Line::from(""),
+        Line::from(Span::styled(
+            "The radio MUST be connected to a proper antenna or dummy load.",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("Transmitting into an open or mismatched load can damage"),
+        Line::from("the transceiver's final amplifier stage."),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[Enter/Y]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" I have a load connected, proceed   "),
+            Span::styled(
+                "[Esc]",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" cancel"),
+        ]),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // draw_diag_panel — diagnostic results panel
 // ---------------------------------------------------------------------------
 
@@ -839,16 +906,26 @@ pub fn draw_diag_panel(f: &mut Frame, area: Rect, diag: &DiagState) {
         DiagState::Done { results, scroll } => {
             let summary_lines = build_summary_lines(results);
 
-            // Count unique labels that have all rounds passing
+            // Classify each unique label as skipped, passed, or failed.
             let unique_labels: std::collections::BTreeSet<&str> =
                 results.iter().map(|r| r.label).collect();
             let total_labels = unique_labels.len();
+            let skipped_labels = unique_labels
+                .iter()
+                .filter(|&&lbl| results.iter().filter(|r| r.label == lbl).all(|r| r.skipped))
+                .count();
             let passed_labels = unique_labels
                 .iter()
-                .filter(|&&lbl| results.iter().filter(|r| r.label == lbl).all(|r| r.passed))
+                .filter(|&&lbl| {
+                    results
+                        .iter()
+                        .filter(|r| r.label == lbl)
+                        .all(|r| r.passed && !r.skipped)
+                })
                 .count();
+            let failed_labels = total_labels - passed_labels - skipped_labels;
 
-            let summary_style = if passed_labels == total_labels {
+            let summary_style = if failed_labels == 0 {
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD)
@@ -859,10 +936,8 @@ pub fn draw_diag_panel(f: &mut Frame, area: Rect, diag: &DiagState) {
             let mut lines = vec![
                 Line::from(Span::styled(
                     format!(
-                        "Complete: {}/{} passed, {} failed",
-                        passed_labels,
-                        total_labels,
-                        total_labels - passed_labels,
+                        "Complete: {}/{} passed, {} skipped, {} failed",
+                        passed_labels, total_labels, skipped_labels, failed_labels,
                     ),
                     summary_style,
                 )),
@@ -906,9 +981,23 @@ fn build_summary_lines(results: &[DiagResult]) -> Vec<Line<'static>> {
 
     for label in seen {
         let rounds: Vec<&DiagResult> = results.iter().filter(|r| r.label == label).collect();
-        let all_passed = rounds.iter().all(|r| r.passed);
+        let all_skipped = rounds.iter().all(|r| r.skipped);
+        let all_passed = rounds.iter().all(|r| r.passed && !r.skipped);
 
-        if all_passed {
+        if all_skipped {
+            let text = format!("{:<32}...SKIPPED", label);
+            lines.push(Line::from(Span::styled(
+                text,
+                Style::default().fg(Color::Yellow),
+            )));
+            // Show the reason once (identical across rounds).
+            if let Some(r) = rounds.first() {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", r.detail),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+        } else if all_passed {
             let text = format!("{:<32}...OK", label);
             lines.push(Line::from(Span::styled(
                 text,

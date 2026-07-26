@@ -65,6 +65,11 @@ pub enum InputAction {
     SetCtcssToneNumber,
     SetToneNumber,
     VoiceRecall,
+    /// Callsign entry gating the diagnostic run's CW keying test. Handled
+    /// specially in `handle_key` (not via `validate_text_input`/`ExecuteAction`)
+    /// since confirming it starts the diagnostic run rather than issuing a
+    /// single radio command.
+    DiagCallsign,
 }
 
 /// What radio action to perform when a list selection is confirmed.
@@ -121,6 +126,12 @@ pub enum ControlState {
     },
     /// Showing feedback after a command.
     Feedback { message: String, is_error: bool },
+    /// Pre-diagnostic warning gate: shown when `[D]` is pressed, before any
+    /// radio command is issued. States plainly that the run will key the
+    /// transmitter and requires a connected antenna or dummy load. Requires
+    /// an explicit acknowledgment (Enter/`y`) to proceed to the callsign
+    /// prompt, or Esc to cancel back to the menu with nothing started.
+    DiagWarning,
     /// Running or displaying diagnostics.
     Diagnostic(DiagState),
 }
@@ -137,8 +148,10 @@ pub enum KeyResult {
     Quit,
     /// Execute a radio action with a validated value.
     Execute(ExecuteAction),
-    /// Begin a diagnostic run.
-    StartDiag,
+    /// Begin a diagnostic run. Carries the operator-supplied callsign for the
+    /// CW keying test step (`None` if left blank, in which case that step is
+    /// recorded as skipped rather than sent without station ID).
+    StartDiag(Option<String>),
 }
 
 /// A validated radio command ready to execute.
@@ -935,6 +948,12 @@ fn validate_text_input(action: &InputAction, buffer: &str) -> Result<ExecuteActi
             }
             Ok(ExecuteAction::VoiceRecall(v))
         }
+        InputAction::DiagCallsign => {
+            // Handled specially in `handle_key`'s TextInput Enter arm — it
+            // starts the diagnostic run rather than producing an
+            // `ExecuteAction`. This arm exists only for exhaustiveness.
+            unreachable!("DiagCallsign is special-cased before validate_text_input is called")
+        }
     }
 }
 
@@ -1171,12 +1190,8 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, radio: &RadioDisplay)
                 KeyResult::Continue
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
-                *state = ControlState::Diagnostic(DiagState::Running {
-                    current_label: "starting…",
-                    current_round: 1,
-                    results: Vec::new(),
-                });
-                KeyResult::StartDiag
+                *state = ControlState::DiagWarning;
+                KeyResult::Continue
             }
             KeyCode::Char('q') | KeyCode::Char('Q') => KeyResult::Quit,
             _ => KeyResult::Continue,
@@ -1230,6 +1245,23 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, radio: &RadioDisplay)
             KeyResult::Continue
         }
 
+        ControlState::DiagWarning => match key.code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                *state = ControlState::TextInput {
+                    prompt: "Callsign for CW test (blank to skip):".to_string(),
+                    buffer: String::new(),
+                    error: None,
+                    action: InputAction::DiagCallsign,
+                };
+                KeyResult::Continue
+            }
+            KeyCode::Esc => {
+                *state = ControlState::Menu;
+                KeyResult::Continue
+            }
+            _ => KeyResult::Continue,
+        },
+
         ControlState::TextInput {
             buffer,
             error,
@@ -1249,6 +1281,32 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, radio: &RadioDisplay)
             KeyCode::Enter => {
                 let buf = buffer.clone();
                 let act = action.clone();
+
+                // DiagCallsign doesn't produce an ExecuteAction — confirming
+                // it starts the diagnostic run itself.
+                if matches!(act, InputAction::DiagCallsign) {
+                    let trimmed = buf.trim().to_string();
+                    // "TEST " (5 chars) + callsign must fit the KY command's
+                    // 24-character limit.
+                    if trimmed.len() > 19 {
+                        if let ControlState::TextInput { error, .. } = state {
+                            *error = Some("Callsign too long (max 19 chars)".to_string());
+                        }
+                        return KeyResult::Continue;
+                    }
+                    let callsign = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    };
+                    *state = ControlState::Diagnostic(DiagState::Running {
+                        current_label: "starting…",
+                        current_round: 1,
+                        results: Vec::new(),
+                    });
+                    return KeyResult::StartDiag(callsign);
+                }
+
                 match validate_text_input(&act, &buf) {
                     Ok(exec) => {
                         *state = ControlState::Feedback {
@@ -1528,5 +1586,126 @@ mod tests {
             result,
             KeyResult::Execute(ExecuteAction::Transmit)
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // Diagnostics safety gate: warning → callsign prompt → StartDiag
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_menu_d_shows_warning_not_start() {
+        let mut state = ControlState::Menu;
+        let radio = RadioDisplay::default();
+        let result = handle_key(key(KeyCode::Char('d')), &mut state, &radio);
+        assert!(matches!(result, KeyResult::Continue));
+        assert!(matches!(state, ControlState::DiagWarning));
+    }
+
+    #[test]
+    fn test_diag_warning_esc_cancels_to_menu() {
+        let mut state = ControlState::DiagWarning;
+        let radio = RadioDisplay::default();
+        let result = handle_key(key(KeyCode::Esc), &mut state, &radio);
+        assert!(matches!(result, KeyResult::Continue));
+        assert!(matches!(state, ControlState::Menu));
+    }
+
+    #[test]
+    fn test_diag_warning_enter_transitions_to_callsign_prompt() {
+        let mut state = ControlState::DiagWarning;
+        let radio = RadioDisplay::default();
+        let result = handle_key(key(KeyCode::Enter), &mut state, &radio);
+        assert!(matches!(result, KeyResult::Continue));
+        assert!(matches!(
+            state,
+            ControlState::TextInput {
+                action: InputAction::DiagCallsign,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_diag_warning_y_also_transitions_to_callsign_prompt() {
+        let mut state = ControlState::DiagWarning;
+        let radio = RadioDisplay::default();
+        let result = handle_key(key(KeyCode::Char('y')), &mut state, &radio);
+        assert!(matches!(result, KeyResult::Continue));
+        assert!(matches!(
+            state,
+            ControlState::TextInput {
+                action: InputAction::DiagCallsign,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_callsign_prompt_esc_cancels_to_menu_without_starting() {
+        let mut state = ControlState::TextInput {
+            prompt: "Callsign for CW test (blank to skip):".to_string(),
+            buffer: "W1AW".to_string(),
+            error: None,
+            action: InputAction::DiagCallsign,
+        };
+        let radio = RadioDisplay::default();
+        let result = handle_key(key(KeyCode::Esc), &mut state, &radio);
+        assert!(matches!(result, KeyResult::Continue));
+        assert!(matches!(state, ControlState::Menu));
+    }
+
+    #[test]
+    fn test_callsign_prompt_blank_starts_diag_with_none() {
+        let mut state = ControlState::TextInput {
+            prompt: "Callsign for CW test (blank to skip):".to_string(),
+            buffer: String::new(),
+            error: None,
+            action: InputAction::DiagCallsign,
+        };
+        let radio = RadioDisplay::default();
+        let result = handle_key(key(KeyCode::Enter), &mut state, &radio);
+        assert!(matches!(result, KeyResult::StartDiag(None)));
+        assert!(matches!(
+            state,
+            ControlState::Diagnostic(DiagState::Running { .. })
+        ));
+    }
+
+    #[test]
+    fn test_callsign_prompt_nonempty_starts_diag_with_callsign() {
+        let mut state = ControlState::TextInput {
+            prompt: "Callsign for CW test (blank to skip):".to_string(),
+            buffer: "W1AW".to_string(),
+            error: None,
+            action: InputAction::DiagCallsign,
+        };
+        let radio = RadioDisplay::default();
+        let result = handle_key(key(KeyCode::Enter), &mut state, &radio);
+        match result {
+            KeyResult::StartDiag(Some(cs)) => assert_eq!(cs, "W1AW"),
+            _ => panic!("expected StartDiag(Some(\"W1AW\"))"),
+        }
+        assert!(matches!(
+            state,
+            ControlState::Diagnostic(DiagState::Running { .. })
+        ));
+    }
+
+    #[test]
+    fn test_callsign_prompt_too_long_sets_error_and_continues() {
+        let mut state = ControlState::TextInput {
+            prompt: "Callsign for CW test (blank to skip):".to_string(),
+            buffer: "A".repeat(20),
+            error: None,
+            action: InputAction::DiagCallsign,
+        };
+        let radio = RadioDisplay::default();
+        let result = handle_key(key(KeyCode::Enter), &mut state, &radio);
+        assert!(matches!(result, KeyResult::Continue));
+        if let ControlState::TextInput { error, .. } = &state {
+            assert!(error.is_some());
+        } else {
+            panic!("Expected TextInput state (should not have started diagnostics)");
+        }
     }
 }

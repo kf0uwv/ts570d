@@ -71,7 +71,11 @@ fn ch_recv_all<T>(ch: &Chan<T>) -> Vec<T> {
 /// Commands sent from the UI task to the radio task.
 enum RadioCmd {
     Execute(ExecuteAction),
-    StartDiagnostics,
+    /// Begin a diagnostic run. `callsign` (if supplied by the operator) gates
+    /// the CW keying test step — see `run_diagnostics_task`.
+    StartDiagnostics {
+        callsign: Option<String>,
+    },
     Quit,
 }
 
@@ -87,6 +91,9 @@ enum RadioUpdate {
         round: usize,
         passed: bool,
         detail: String,
+        /// True if this step was intentionally not attempted (see
+        /// `DiagResult::skipped`).
+        skipped: bool,
     },
     DiagDone,
 }
@@ -349,6 +356,7 @@ macro_rules! diag_set_get {
                 round: $round,
                 passed,
                 detail: detail.clone(),
+                skipped: false,
             },
         );
         $results.push(DiagResult {
@@ -356,6 +364,7 @@ macro_rules! diag_set_get {
             round: $round,
             passed,
             detail,
+            skipped: false,
         });
     }};
 }
@@ -373,6 +382,7 @@ macro_rules! diag_action {
                 round: $round,
                 passed,
                 detail: detail.clone(),
+                skipped: false,
             },
         );
         $results.push(DiagResult {
@@ -380,6 +390,7 @@ macro_rules! diag_action {
             round: $round,
             passed,
             detail,
+            skipped: false,
         });
     }};
 }
@@ -397,6 +408,7 @@ macro_rules! diag_get {
                 round: $round,
                 passed,
                 detail: detail.clone(),
+                skipped: false,
             },
         );
         $results.push(DiagResult {
@@ -404,6 +416,7 @@ macro_rules! diag_get {
             round: $round,
             passed,
             detail,
+            skipped: false,
         });
     }};
 }
@@ -657,7 +670,16 @@ pub(crate) const DIAG_STEP_COUNT: usize = 107;
 /// and a final `DiagDone` when complete.
 ///
 /// Each step covers exactly one method. Pressing [Esc] between steps aborts.
-async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpdate>) {
+///
+/// `callsign`, if supplied, is used to identify the CW keying test
+/// (`send_cw("TEST {callsign}")`, step 82). If `None`, that step is recorded
+/// as skipped rather than transmitting an unidentified CW test — see the
+/// `step_idx == 82` arm below.
+async fn run_diagnostics_task<R: Radio>(
+    radio: &mut R,
+    update_tx: &Chan<RadioUpdate>,
+    callsign: Option<String>,
+) {
     let mut results: Vec<DiagResult> = Vec::new();
 
     // Snapshot all readable radio state before the test loop begins.
@@ -758,7 +780,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
         "get_cw_auto_zerobeat",    // 79
         "set_semi_break_in_delay", // 80
         "get_semi_break_in_delay", // 81
-        "send_cw(TEST)",           // 82
+        "send_cw(TEST <call>)",    // 82
         // --- Audio filter (4) ---
         "set_high_cutoff", // 83
         "get_high_cutoff", // 84
@@ -830,6 +852,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -837,6 +860,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -856,6 +880,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -863,6 +888,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -894,6 +920,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -901,6 +928,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -920,6 +948,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -927,6 +956,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -951,6 +981,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -958,6 +989,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -987,6 +1019,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -994,6 +1027,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -1374,6 +1408,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -1381,6 +1416,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -1509,6 +1545,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -1516,6 +1553,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -1796,9 +1834,38 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                     );
                 }
 
-                // send_cw("TEST"): call, verify Ok
+                // send_cw("TEST <callsign>"): requires an operator-supplied
+                // callsign for station identification. With no callsign this
+                // step is recorded as skipped — not sent, and not counted as
+                // either a pass or a failure — rather than transmitting
+                // unidentified CW. See docs/adr/0007-diagnostics-tx-safety-gate.md.
                 82 => {
-                    diag_action!(results, update_tx, label, round, radio.send_cw("TEST"));
+                    match callsign.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+                        Some(cs) => {
+                            let msg = format!("TEST {}", cs);
+                            diag_action!(results, update_tx, label, round, radio.send_cw(&msg));
+                        }
+                        None => {
+                            let detail = "skipped: no callsign supplied — CW keying test requires station ID".to_string();
+                            ch_send(
+                                update_tx,
+                                RadioUpdate::DiagProgress {
+                                    label,
+                                    round,
+                                    passed: true,
+                                    detail: detail.clone(),
+                                    skipped: true,
+                                },
+                            );
+                            results.push(DiagResult {
+                                label,
+                                round,
+                                passed: true,
+                                detail,
+                                skipped: true,
+                            });
+                        }
+                    }
                 }
 
                 // --- Audio filter ---
@@ -1941,6 +2008,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -1948,6 +2016,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -1964,6 +2033,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -1971,6 +2041,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -1990,6 +2061,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -1997,6 +2069,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -2067,6 +2140,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -2074,6 +2148,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -2098,6 +2173,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -2105,6 +2181,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
 
@@ -2119,6 +2196,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                             round,
                             passed,
                             detail: detail.clone(),
+                            skipped: false,
                         },
                     );
                     results.push(DiagResult {
@@ -2126,6 +2204,7 @@ async fn run_diagnostics_task<R: Radio>(radio: &mut R, update_tx: &Chan<RadioUpd
                         round,
                         passed,
                         detail,
+                        skipped: false,
                     });
                 }
             }
@@ -2192,8 +2271,8 @@ async fn radio_task<R: Radio + 'static>(
                     };
                     ch_send(&update_tx, RadioUpdate::ActionFeedback { ok, msg });
                 }
-                RadioCmd::StartDiagnostics => {
-                    run_diagnostics_task(&mut radio, &update_tx).await;
+                RadioCmd::StartDiagnostics { callsign } => {
+                    run_diagnostics_task(&mut radio, &update_tx, callsign).await;
                 }
             }
         }
@@ -2236,12 +2315,14 @@ async fn ui_task(
                     round,
                     passed,
                     detail,
+                    skipped,
                 } => {
                     diag_results.push(DiagResult {
                         label,
                         round,
                         passed,
                         detail,
+                        skipped,
                     });
                     if let ControlState::Diagnostic(DiagState::Running {
                         ref mut current_label,
@@ -2273,14 +2354,14 @@ async fn ui_task(
                         return Ok(());
                     }
                     KeyResult::Continue => {}
-                    KeyResult::StartDiag => {
+                    KeyResult::StartDiag(callsign) => {
                         diag_results.clear();
                         control = ControlState::Diagnostic(DiagState::Running {
                             current_label: "starting\u{2026}",
                             current_round: 1,
                             results: Vec::new(),
                         });
-                        ch_send(&cmd_tx, RadioCmd::StartDiagnostics);
+                        ch_send(&cmd_tx, RadioCmd::StartDiagnostics { callsign });
                     }
                     KeyResult::Execute(action) => {
                         // SetIfShiftDir is UI-only — no radio call needed.

@@ -32,6 +32,10 @@ pub(crate) struct DiagResult {
     pub(crate) passed: bool,
     /// `"ok"` or a brief error/mismatch description.
     pub(crate) detail: String,
+    /// True if this step was intentionally not attempted (e.g. the CW keying
+    /// test with no callsign supplied). Distinct from both pass and fail —
+    /// rendering must never fold a skip into either bucket.
+    pub(crate) skipped: bool,
 }
 
 /// Diagnostic run lifecycle.
