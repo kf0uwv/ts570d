@@ -162,7 +162,7 @@ TS-570D-specific features (keyer, voice synthesizer, antenna tuner, menu access)
 
 ## Architecture
 - radio/: TS-570D command table, CatRadio impl, controller client (Ts570d<S: CatSession>), Radio trait + domain types
-- ui/: Ratatui terminal interface (depends on radio only). `win_sched.rs`: Windows-only two-future cooperative scheduler replacing `monoio::spawn`.
+- ui/: Ratatui terminal interface (depends on radio only). `win_sched.rs`: Windows-only two-future cooperative scheduler replacing `monoio::spawn`. The `[D]` diagnostics screen genuinely keys the transmitter — it is gated behind a `ControlState::DiagWarning` acknowledgment screen and a callsign prompt (`InputAction::DiagCallsign`) that identifies the CW keying test (blank callsign → that one step is recorded as skipped, not sent bare). See `docs/adr/0007-diagnostics-tx-safety-gate.md`.
 - server/: Headless network server mode (`ts570d server ...`) — thin wiring over `radio-cat-rs`'s `cat-rigctl`/`cat-server` crates. Cross-platform: `--raw-tcp-port`/`--raw-udp-port`/`--rigctl-port` all work on Windows too (see "Windows support").
 - emulator/: Virtual TTY + radio emulator, runs CatFramework<Ts570dRadio>. Linux/Unix-only (pseudo-terminals).
 - `pin-test` diagnostic binary: no longer local to this repo — it's a shared `[[bin]]` in `radio-cat-rs`'s `cat-transport-serial` crate (`cargo run -p cat-transport-serial --bin pin-test`, or `make pintest`).

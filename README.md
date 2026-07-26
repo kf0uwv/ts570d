@@ -83,7 +83,7 @@ The TS-570D factory default is 9600 baud, 8N1. If your radio has been configured
 | `C` | CW keyer settings |
 | `O` | Tones (CTCSS/tone squelch) |
 | `S` | System settings |
-| `D` | Diagnostics (runs 99 CAT command round-trips) |
+| `D` | Diagnostics (runs 107 CAT command round-trips × 3 rounds). Shows a TX-safety warning first — requires an antenna/dummy load and explicit acknowledgment — then prompts for a callsign to identify the CW keying test (blank skips that one step; nothing is sent bare). |
 | `Q` | Quit |
 
 ## Emulator
