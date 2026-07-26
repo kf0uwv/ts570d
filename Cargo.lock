@@ -102,6 +102,7 @@ dependencies = [
 [[package]]
 name = "cat-client"
 version = "0.1.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -112,6 +113,7 @@ dependencies = [
 [[package]]
 name = "cat-framework"
 version = "0.1.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
 dependencies = [
  "thiserror 1.0.69",
 ]
@@ -119,6 +121,7 @@ dependencies = [
 [[package]]
 name = "cat-rigctl"
 version = "0.1.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -132,6 +135,7 @@ dependencies = [
 [[package]]
 name = "cat-server"
 version = "0.1.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
 dependencies = [
  "async-trait",
  "cat-client",
@@ -146,6 +150,7 @@ dependencies = [
 [[package]]
 name = "cat-transport-core"
 version = "0.1.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -156,6 +161,7 @@ dependencies = [
 [[package]]
 name = "cat-transport-serial"
 version = "0.1.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -169,6 +175,7 @@ dependencies = [
 [[package]]
 name = "cat-transport-tcp"
 version = "0.1.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -179,6 +186,7 @@ dependencies = [
 [[package]]
 name = "cat-transport-udp"
 version = "0.1.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
 dependencies = [
  "async-trait",
  "cat-transport-core",
