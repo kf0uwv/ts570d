@@ -55,11 +55,10 @@ Windows, in addition to Linux:
 - Remote client mode (`--server <host:port>`) uses `cat-transport-tcp`'s
   Windows backend (radio-cat-rs ADR 0006).
 - Headless server mode (`ts570d server ...`) supports `--raw-tcp-port`/
-  `--raw-udp-port` on Windows via `cat-server`'s Windows primitives
-  (`cat_server::build`/`tcp_windows`/`udp_windows`). `--rigctl-port` (the
-  WSJT-X Hamlib bridge) does **not** work on Windows yet — `cat-rigctl` has
-  no Windows backend upstream in `radio-cat-rs` — and is rejected with a
-  clear error rather than silently ignored.
+  `--raw-udp-port`/`--rigctl-port` on Windows too, via `cat_rigctl::run`'s
+  own Windows backend (radio-cat-rs ADR 0006's 2026-07-26 amendment) — the
+  WSJT-X/Hamlib bridge now works identically on both platforms; see
+  `docs/adr/0006-windows-concurrency-model.md`'s amendment for the history.
 - `ui`'s two-task concurrent design (`monoio::spawn`'d radio-poll task +
   UI-render task on Linux) is replaced on Windows by a hand-rolled two-future
   cooperative scheduler (`ui/src/win_sched.rs`) that preserves the same "UI
@@ -164,7 +163,7 @@ TS-570D-specific features (keyer, voice synthesizer, antenna tuner, menu access)
 ## Architecture
 - radio/: TS-570D command table, CatRadio impl, controller client (Ts570d<S: CatSession>), Radio trait + domain types
 - ui/: Ratatui terminal interface (depends on radio only). `win_sched.rs`: Windows-only two-future cooperative scheduler replacing `monoio::spawn`.
-- server/: Headless network server mode (`ts570d server ...`) — thin wiring over `radio-cat-rs`'s `cat-rigctl`/`cat-server` crates. Linux-only `--rigctl-port`; `--raw-tcp-port`/`--raw-udp-port` work on Windows too (see "Windows support").
+- server/: Headless network server mode (`ts570d server ...`) — thin wiring over `radio-cat-rs`'s `cat-rigctl`/`cat-server` crates. Cross-platform: `--raw-tcp-port`/`--raw-udp-port`/`--rigctl-port` all work on Windows too (see "Windows support").
 - emulator/: Virtual TTY + radio emulator, runs CatFramework<Ts570dRadio>. Linux/Unix-only (pseudo-terminals).
 - `pin-test` diagnostic binary: no longer local to this repo — it's a shared `[[bin]]` in `radio-cat-rs`'s `cat-transport-serial` crate (`cargo run -p cat-transport-serial --bin pin-test`, or `make pintest`).
 - src/main.rs: the wiring layer — `run_app()` shared by both platforms; `#[monoio::main]` on Linux, `win_runtime::block_on` on Windows (`src/win_runtime.rs`). Also defines `--server <host:port>` remote client mode's `TcpClientSession` adapter.

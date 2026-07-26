@@ -25,38 +25,15 @@
 //! names, frequency range, which typed methods back which rigctld command)
 //! plugs in.
 
-// Linux-only: implements `cat_rigctl::RigctlRadio`, and `cat-rigctl` itself
-// has no Windows backend upstream (see `run`'s Windows doc comment below).
-#[cfg(target_os = "linux")]
 mod rigctl_radio;
 
-#[cfg(target_os = "linux")]
 pub use rigctl_radio::RigctlTs570d;
 
-/// Which network listeners to bring up. Re-exported from `cat_rigctl` on
-/// Linux, where every field is meaningful; on Windows this crate defines an
-/// identical local copy instead (see `windows_run`'s module doc below) so
-/// callers (`src/main.rs`) do not need to branch on platform to construct
-/// it.
-#[cfg(target_os = "linux")]
+/// Which network listeners to bring up — re-exported unconditionally from
+/// `cat_rigctl`, which is itself cross-platform since
+/// docs/adr/0006-windows-network-transport.md's 2026-07-26 amendment
+/// (`radio-cat-rs`).
 pub use cat_rigctl::ServerConfig;
-
-/// See the Linux `ServerConfig`'s doc above -- same fields, same meaning.
-/// `rigctl_port` is accepted here (so `src/main.rs`'s CLI parsing needs no
-/// platform branching either) but is rejected at `run()`-time with a clear
-/// error, not silently ignored -- see `windows_run`.
-#[cfg(target_os = "windows")]
-#[derive(Debug, Clone, Default)]
-pub struct ServerConfig {
-    /// `cat-server`'s raw length-prefixed TCP protocol.
-    pub raw_tcp_port: Option<u16>,
-    /// `cat-server`'s raw enveloped UDP protocol.
-    pub raw_udp_port: Option<u16>,
-    /// The Hamlib rigctld-compatible TCP listener, for WSJT-X. Accepted
-    /// syntactically for CLI-parsing symmetry with Linux, but rejected at
-    /// `run()`-time on Windows -- see `windows_run`.
-    pub rigctl_port: Option<u16>,
-}
 
 /// Bring up the broker (owning `session`, the one physical radio
 /// connection) plus every listener `config` requests, and run until one of
@@ -68,18 +45,13 @@ pub struct ServerConfig {
 ///
 /// # Platform note
 ///
-/// On Linux this delegates entirely to `cat_rigctl::run`, unchanged. On
-/// Windows, `cat_rigctl` itself does not compile at all (it uses
-/// `monoio::net`/`monoio::spawn` unconditionally in source, with no Windows
-/// backend upstream in `radio-cat-rs` yet -- unlike `cat-transport-serial`,
-/// `cat-transport-tcp`, `cat-transport-udp`, and `cat-server`, which all
-/// have one). See `windows_run` below for what Windows supports instead:
-/// the raw `cat-server` TCP/UDP listeners (fully Windows-capable today, via
-/// `cat_server::tcp_windows`/`udp_windows`), but not the rigctld/WSJT-X
-/// bridge, which has no Windows backend to call into yet. This is a real,
-/// currently-unresolved upstream gap in `radio-cat-rs`, not a local
-/// workaround this crate can close on its own -- see
-/// `docs/adr/0006-windows-concurrency-model.md`'s note on this.
+/// Delegates entirely to `cat_rigctl::run`, which is itself `#[cfg]`-
+/// selected per platform (`async fn` on Linux, a plain blocking `fn` on
+/// Windows, since `#[monoio::main]` cannot exist there) — see
+/// `docs/adr/0006-windows-concurrency-model.md`'s amendment for the history
+/// of this crate's earlier, now-superseded hand-rolled Windows fallback
+/// that dropped `--rigctl-port` support entirely. Full `--rigctl-port`/
+/// WSJT-X support now works identically on both platforms.
 #[cfg(target_os = "linux")]
 pub async fn run<S>(session: S, config: ServerConfig) -> std::io::Result<()>
 where
@@ -95,92 +67,22 @@ where
     .await
 }
 
-/// Windows implementation of [`run`] (same name, so `src/main.rs` needs no
-/// platform branching to call it). Brings up `cat-server`'s raw TCP/UDP
-/// listeners directly, via `cat_server::build`/`tcp_windows::serve`/
-/// `udp_windows::serve` (all genuinely cross-platform -- see
-/// `radio-cat-rs`'s `docs/adr/0006-windows-network-transport.md`), instead
-/// of going through `cat_rigctl::run` at all. `--rigctl-port` (the WSJT-X
-/// bridge) is rejected with a clear, actionable error rather than silently
-/// ignored, since `cat-rigctl` has no Windows backend upstream yet.
-///
-/// Unlike the Linux implementation (which lets `cat_rigctl::run`'s
-/// `monoio::spawn`ed listener tasks all run cooperatively on one thread),
-/// this spawns one dedicated `std::thread` per listener (mirroring
-/// `cat_server::tcp_windows`/`udp_windows`'s own "one thread per
-/// connection/datagram" internal model one level up) and waits for the
-/// first one to end via a `std::sync::mpsc` channel -- the direct `std`
-/// analog of `cat_rigctl::run`'s `futures::future::select_all`.
+/// Windows implementation of [`run`] — see the Linux version's doc comment.
+/// A plain blocking `fn` since `cat_rigctl::run` itself is one on Windows
+/// (genuine OS threads instead of `monoio`'s cooperative tasks); there is
+/// nothing to `.await` here.
 #[cfg(target_os = "windows")]
 pub fn run<S>(session: S, config: ServerConfig) -> std::io::Result<()>
 where
     S: cat_transport_core::CatSession + Send + 'static,
     S::Error: std::error::Error + 'static,
 {
-    use std::sync::{Arc, Mutex};
-
-    if config.rigctl_port.is_some() {
-        return Err(std::io::Error::other(
-            "--rigctl-port (the WSJT-X-compatible rigctld bridge) is not yet \
-             supported on Windows: cat-rigctl has no Windows backend upstream \
-             yet in radio-cat-rs. Use --raw-tcp-port and/or --raw-udp-port \
-             instead (any radio-cat-rs-aware client, e.g. this application's \
-             own `--server` mode, works over those today).",
-        ));
-    }
-    if config.raw_tcp_port.is_none() && config.raw_udp_port.is_none() {
-        return Err(std::io::Error::other(
-            "server mode requires at least one of --raw-tcp-port/--raw-udp-port \
-             (--rigctl-port is not yet available on Windows)",
-        ));
-    }
-
-    let (worker, handle) = cat_server::build(session, &radio::TS570D_COMMAND_TABLE);
-    std::thread::spawn(move || worker.run());
-
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<std::io::Result<()>>();
-    let mut listener_count = 0;
-
-    if let Some(port) = config.raw_tcp_port {
-        let listener = std::net::TcpListener::bind(("0.0.0.0", port))?;
-        tracing::info!("Raw CAT TCP listener bound on 0.0.0.0:{port}");
-        let handle = handle.clone();
-        let registry = Arc::new(Mutex::new(cat_server::ClientRegistry::new()));
-        let done_tx = done_tx.clone();
-        listener_count += 1;
-        std::thread::spawn(move || {
-            let result = cat_server::tcp_windows::serve(listener, handle, registry);
-            if let Err(e) = &result {
-                tracing::error!("Raw CAT TCP listener on 0.0.0.0:{port} failed: {e}");
-            }
-            let _ = done_tx.send(result);
-        });
-    }
-
-    if let Some(port) = config.raw_udp_port {
-        let socket = std::net::UdpSocket::bind(("0.0.0.0", port))?;
-        tracing::info!("Raw CAT UDP listener bound on 0.0.0.0:{port}");
-        let handle = handle.clone();
-        let registry = Arc::new(Mutex::new(cat_server::ClientRegistry::new()));
-        let done_tx = done_tx.clone();
-        listener_count += 1;
-        std::thread::spawn(move || {
-            let result = cat_server::udp_windows::serve(socket, handle, registry);
-            if let Err(e) = &result {
-                tracing::error!("Raw CAT UDP listener on 0.0.0.0:{port} failed: {e}");
-            }
-            let _ = done_tx.send(result);
-        });
-    }
-    drop(done_tx);
-    debug_assert!(listener_count > 0);
-
-    // Wait for the first listener thread to end (accept()/bind-time failure,
-    // or never on the happy path), and propagate its result -- the `std`
-    // analog of the Linux path's `futures::future::select_all`.
-    done_rx
-        .recv()
-        .unwrap_or(Err(std::io::Error::other("all listener threads exited")))
+    cat_rigctl::run(
+        session,
+        &radio::TS570D_COMMAND_TABLE,
+        config,
+        |broker_session| RigctlTs570d(radio::Ts570d::new(broker_session)),
+    )
 }
 
 // Gated to Linux: uses #[monoio::test] (see

@@ -383,11 +383,12 @@ async fn run_server_mode() {
         rigctl_port: args.rigctl_port,
     };
 
-    // `server::run` is `async fn` on Linux (delegates to `cat_rigctl::run`)
-    // but a plain synchronous `fn` on Windows (no `cat-rigctl` backend there
-    // yet -- see `server::run`'s own doc comment and
-    // `docs/adr/0006-windows-concurrency-model.md`). Both variants share the
-    // same name so only this call site needs to differ.
+    // `server::run` is `async fn` on Linux and a plain blocking `fn` on
+    // Windows (matching `cat_rigctl::run`'s own per-platform split, since
+    // `#[monoio::main]` cannot exist there -- see `server::run`'s own doc
+    // comment). Both variants share the same name and now support the same
+    // full feature set (including `--rigctl-port`), so only this call
+    // site's `.await` needs to differ.
     #[cfg(target_os = "linux")]
     let result = server::run(session, config).await;
     #[cfg(target_os = "windows")]

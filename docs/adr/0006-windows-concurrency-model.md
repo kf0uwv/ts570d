@@ -368,3 +368,25 @@ Windows backend (following the same worker-thread-per-connection shape
 `cat-server`'s `tcp_windows`/`udp_windows` already established) before
 `ts570d server --rigctl-port` can work on Windows. Recorded here for
 whoever picks up that follow-on work in `radio-cat-rs`.
+
+### Amendment (2026-07-26): the gap above is closed
+
+`radio-cat-rs` gained exactly the Windows backend this section called
+for — `cat-rigctl`'s radio-independent wire protocol (dispatch/
+`\dump_state`/line buffering) moved into a new, I/O-free `cat-rigctl::
+protocol` module shared by a Linux `monoio`-based accept loop and a new
+`std`/genuine-OS-thread one, with `cat_rigctl::run` itself `#[cfg]`-
+selected per platform — see that repo's docs/adr/0006-windows-network-
+transport.md's own 2026-07-26 amendment for the full design record.
+
+This repo's `server/Cargo.toml` no longer target-gates `cat-rigctl` (nor
+`rigctl_radio.rs`/`RigctlTs570d`) to Linux; `server::run`'s hand-rolled
+Windows fallback described above (bringing up only `--raw-tcp-port`/
+`--raw-udp-port` directly via `cat_server::tcp_windows`/`udp_windows`,
+rejecting `--rigctl-port`) is deleted entirely and replaced with a plain
+`#[cfg]`-selected delegation to `cat_rigctl::run` on both platforms — the
+same one-line-different shape `main.rs`'s `run_server_mode` already used
+for the `.await`/no-`.await` split. `ts570d server --rigctl-port` now
+works identically on both platforms. Verified: `cargo check --target
+x86_64-pc-windows-gnu --workspace --exclude emulator` clean; full
+workspace suite passing on Linux with no regressions.

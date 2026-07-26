@@ -111,12 +111,11 @@ Usage: ts570d server --port <serial-port-path> [--baud <rate>] [--stop-bits <n>]
 
 At least one of the three listener flags is required.
 
-**Windows note:** `--raw-tcp-port`/`--raw-udp-port` work today on Windows.
-`--rigctl-port` does not yet — `radio-cat-rs`'s `cat-rigctl` crate (which
-implements the Hamlib bridge) has no Windows backend upstream yet. It is
-rejected with a clear error rather than silently ignored. See
+**Windows note:** all three listener flags, including `--rigctl-port`
+(WSJT-X/Hamlib), work on Windows — `radio-cat-rs`'s `cat-rigctl` crate
+gained a real Windows backend. See
 [docs/adr/0006-windows-concurrency-model.md](docs/adr/0006-windows-concurrency-model.md)'s
-Task 5 cross-reference.
+amendment.
 
 ### Remote client mode
 
@@ -138,8 +137,8 @@ Works on both Linux and Windows.
 
 Windows is a supported target (`x86_64-pc-windows-gnu`/`-msvc`) for
 `ts570d.exe`: local serial (native Win32 COM-port I/O), `--server` remote
-client mode, and headless server mode (raw TCP/UDP; `--rigctl-port` pending
-an upstream `cat-rigctl` Windows backend — see above). The `emulator` and
+client mode, and headless server mode (raw TCP/UDP and `--rigctl-port`
+alike). The `emulator` and
 `pin-test` diagnostic tool have no Windows-specific concerns of their own
 (`pin-test` is fully cross-platform; `emulator` is Linux/Unix-only by
 design, per above).

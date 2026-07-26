@@ -20,8 +20,18 @@ cat-transport-core = { workspace = true }
 
 # The request broker + raw TCP/UDP listeners this crate wires up. Fully
 # cross-platform (see docs/adr/0006-windows-network-transport.md in
-# radio-cat-rs) -- unlike `cat-rigctl` below, not target-gated.
+# radio-cat-rs).
 cat-server = { workspace = true }
+
+# The generic Hamlib rigctld bridge (dispatch/dump_state/framing) +
+# `run()`/`ServerConfig` orchestration -- this crate supplies only the
+# radio-specific `RigctlRadio` impl (`rigctl_radio.rs`). Cross-platform
+# since docs/adr/0006-windows-network-transport.md's 2026-07-26 amendment
+# (radio-cat-rs) gave `cat-rigctl` a real Windows backend -- previously
+# target-gated to Linux only, see `docs/adr/0006-windows-concurrency-
+# model.md`'s now-superseded note on the raw-TCP/UDP-only Windows fallback
+# this replaces.
+cat-rigctl = { workspace = true }
 
 # Async traits (compatible with !Send futures for monoio).
 async-trait = { workspace = true }
@@ -40,16 +50,5 @@ default = []
 # Async runtime (io_uring-based, Linux-only). Windows is now a supported
 # target (see docs/adr/0006-windows-concurrency-model.md) — this crate's own
 # code has no direct monoio dependency outside #[monoio::test]-based unit
-# tests; `cat-server` brings its own target-gated monoio.
+# tests; `cat-server`/`cat-rigctl` bring their own target-gated monoio.
 monoio = { workspace = true }
-
-# The generic Hamlib rigctld bridge (dispatch/dump_state/framing) +
-# `run()`/`ServerConfig` orchestration -- this crate supplies only the
-# radio-specific `RigctlRadio` impl (`rigctl_radio.rs`). Linux-only: unlike
-# `cat-server`/`cat-transport-tcp`/`cat-transport-udp`, `cat-rigctl` has no
-# Windows backend in `radio-cat-rs` yet (it uses `monoio::net`/`monoio::spawn`
-# unconditionally in source, with no `#[cfg(target_os = "windows")]`
-# counterpart). See `server::run`'s Windows doc comment and
-# docs/adr/0006-windows-concurrency-model.md for what Windows supports
-# instead (raw TCP/UDP only, no rigctld/WSJT-X bridge).
-cat-rigctl = { workspace = true }
