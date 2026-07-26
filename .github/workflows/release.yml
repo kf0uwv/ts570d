@@ -4,14 +4,52 @@ on:
   release:
     types: [published]
 
-env:
-  CARGO_TERM_COLOR: always
+# Migrated onto radio-cat-rs's shared reusable release workflow (see
+# radio-cat-rs's docs/adr/0008-shared-release-workflow.md §4). That workflow
+# builds `main_binary` + `extra_binaries` on both Linux (ubuntu-latest) and
+# Windows (windows-latest, a real MSVC host), runs this repo's own
+# `packaging/build-deb.sh --skip-build` / `packaging/build-windows-package.ps1`,
+# and uploads both a Debian package and a Windows zip to the GitHub release.
+#
+# The `pin-test` diagnostic tool is now a shared `cat-transport-serial`
+# binary in radio-cat-rs (see that repo's docs/adr/0006-windows-network-
+# transport.md) rather than a local `[[bin]]` here -- `cat-transport-
+# serial:pin-test` in `extra_binaries` tells the shared workflow to build it
+# via `cargo build --release -p cat-transport-serial --bin pin-test`
+# (verified locally against this repo's own `[patch]`-resolved dependency:
+# `cargo build -p <package>` selects a package by ID across the whole
+# resolved dependency graph, not only workspace members, so this works even
+# though `cat-transport-serial` is a git dependency, not a member of this
+# workspace).
+#
+# This previously built `-p serial` directly, which has been broken since
+# the `serial` crate was extracted into radio-cat-rs's `cat-transport-serial`
+# (see docs/adr/0004-extraction-boundary.md) -- there is no local `serial`
+# crate to build anymore. That bug is fixed by this migration: nothing here
+# names `serial` at all now.
+#
+# NOTE: this will not actually resolve/run (`workflow not found` at call
+# time) until a human pushes radio-cat-rs's `main` branch to
+# https://github.com/kf0uwv/radio-cat-rs -- see that repo's ADR 0008's own
+# explicit callout. This is expected, not a bug in this file.
 
 jobs:
-  build-deb:
-    name: Build Debian package
-    runs-on: ubuntu-latest
+  release:
+    permissions:
+      contents: write
+    uses: kf0uwv/radio-cat-rs/.github/workflows/release-app.yml@main
+    with:
+      app_name: "ts570d-radio-control"
+      main_binary: "ts570d"
+      extra_binaries: "emulator cat-transport-serial:pin-test"
+      apt_packages: "libudev-dev"
 
+  # Kept as its own job, `needs: release`, per ADR 0008 §4's note that the
+  # version-bump policy is deliberately app-specific and left out of the
+  # shared workflow -- behavior unchanged from before this migration.
+  bump-version:
+    needs: release
+    runs-on: ubuntu-latest
     permissions:
       contents: write
 
@@ -26,36 +64,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.93"
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-
-            ${{ runner.os }}-cargo-
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
-
-      - name: Build release binaries
-        run: |
-          cargo build --release
-          cargo build --release -p emulator
-          cargo build --release -p serial
-
-      - name: Build Debian package
-        run: ./packaging/build-deb.sh --skip-build
-
-      - name: Upload .deb to release
-        env:
-          GH_TOKEN: ${{ secrets.AUTH_TOKEN }}
-        run: gh release upload ${{ github.ref_name }} *.deb --clobber
 
       - name: Bump minor version on main
         run: |

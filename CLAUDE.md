@@ -28,17 +28,57 @@
 - No subagent proceeds past planning without architect approval
 
 ## Core Technologies
-- monoio: io_uring async runtime
+- monoio: io_uring async runtime, **Linux only** (target-gated everywhere —
+  see "Windows support" below). Windows uses a hand-rolled thread-parking
+  executor instead (`src/win_runtime.rs`, `ui/src/win_sched.rs`).
 - ratatui + crossterm: Terminal UI
-- io_uring serial implementation (external, `radio-cat-rs`'s `cat-transport-serial` — this repo has no local serial transport code)
-- Built-in emulator with virtual TTY
+- io_uring serial implementation (external, `radio-cat-rs`'s `cat-transport-serial` — this repo has no local serial transport code). Native Win32 COM-port I/O on Windows, same crate, same public API.
+- Built-in emulator with virtual TTY (Linux/Unix-only — see "Windows support")
 - Tokio should NEVER be used in this project
-- 
+
 ## Essential Commands
 - Build: `cargo build` / `cargo build --release`
 - Test: `cargo test` / `cargo test test_name`
 - Lint: `cargo clippy` / `cargo fmt`
 - Emulator: `cargo run --bin emulator`
+- Windows type-check: `make windows-check` (`cargo check --target x86_64-pc-windows-gnu --workspace --exclude emulator`; requires `rustup target add x86_64-pc-windows-gnu` once)
+- Windows package (on/for a Windows host with binaries already built): `make windows-package`
+
+## Windows support
+
+`ts570d` (the main TUI binary) and the `server` crate both build and run on
+Windows, in addition to Linux:
+
+- Local serial (`--port`) uses `cat-transport-serial`'s native Win32 COM-port
+  backend (radio-cat-rs ADR 0004) — same public API as Linux, no branching
+  in application code.
+- Remote client mode (`--server <host:port>`) uses `cat-transport-tcp`'s
+  Windows backend (radio-cat-rs ADR 0006).
+- Headless server mode (`ts570d server ...`) supports `--raw-tcp-port`/
+  `--raw-udp-port` on Windows via `cat-server`'s Windows primitives
+  (`cat_server::build`/`tcp_windows`/`udp_windows`). `--rigctl-port` (the
+  WSJT-X Hamlib bridge) does **not** work on Windows yet — `cat-rigctl` has
+  no Windows backend upstream in `radio-cat-rs` — and is rejected with a
+  clear error rather than silently ignored.
+- `ui`'s two-task concurrent design (`monoio::spawn`'d radio-poll task +
+  UI-render task on Linux) is replaced on Windows by a hand-rolled two-future
+  cooperative scheduler (`ui/src/win_sched.rs`) that preserves the same "UI
+  stays responsive during a slow radio poll or diagnostic run" property
+  without requiring `Send` (which `Ts570d<S>` can never satisfy — see below).
+- The `emulator` crate is **not** Windows-portable and is not part of this
+  support: it hosts a pseudo-terminal pair (`serialport::TTYPort`,
+  `std::os::unix`), a Unix-only concept with no Windows equivalent attempted
+  here. `pin-test` (now a shared `cat-transport-serial` binary in
+  radio-cat-rs) is fully cross-platform.
+
+See `docs/adr/0006-windows-concurrency-model.md` for the full design
+rationale (including why a real `std::thread::spawn` worker was rejected —
+`radio::Ts570d<S>`'s `SharedSession` is unconditionally `!Send`) and its
+documented residual risk. There is no Windows machine in this project's
+development environment; Windows correctness is verified with `cargo check
+--target x86_64-pc-windows-gnu` (type-check only) plus the CI `windows-check`
+job — real hardware/runtime validation happens on the release workflow's
+`windows-latest` build and, ultimately, users running the released binary.
 
 ## Crate Dependency Model (MANDATORY — ALL AGENTS MUST FOLLOW)
 
@@ -79,7 +119,10 @@ emulator  (depends on: cat-framework, radio)
   └── runs CatFramework<Ts570dRadio>; owns PTY hosting, logging, TUI display
 
 src/main.rs  (depends on: all crates — the wiring layer only)
-  └── creates Ts570d<SerialCatSession<SerialPort>> and passes it to ui::run()
+  └── --port:   creates Ts570d<SerialCatSession<SerialPort>> and passes it to ui::run()
+  └── --server: creates Ts570d<TcpClientSession> (app-local CatSession<Error=TransportError>
+                adapter around cat_transport_tcp::TcpCatSession) and passes it to ui::run()
+  └── server subcommand: wires SerialCatSession<SerialPort> into server::run()
 ```
 
 ### Rules (violation is a blocking issue)
@@ -120,26 +163,29 @@ TS-570D-specific features (keyer, voice synthesizer, antenna tuner, menu access)
 
 ## Architecture
 - radio/: TS-570D command table, CatRadio impl, controller client (Ts570d<S: CatSession>), Radio trait + domain types
-- ui/: Ratatui terminal interface (depends on radio only)
-- emulator/: Virtual TTY + radio emulator, runs CatFramework<Ts570dRadio>
-- src/bin/pin_test.rs: manual hardware serial-pin test binary (`cargo run --bin pin-test`)
-- Generic CAT engine, transport traits, and serial transport are external
+- ui/: Ratatui terminal interface (depends on radio only). `win_sched.rs`: Windows-only two-future cooperative scheduler replacing `monoio::spawn`.
+- server/: Headless network server mode (`ts570d server ...`) — thin wiring over `radio-cat-rs`'s `cat-rigctl`/`cat-server` crates. Linux-only `--rigctl-port`; `--raw-tcp-port`/`--raw-udp-port` work on Windows too (see "Windows support").
+- emulator/: Virtual TTY + radio emulator, runs CatFramework<Ts570dRadio>. Linux/Unix-only (pseudo-terminals).
+- `pin-test` diagnostic binary: no longer local to this repo — it's a shared `[[bin]]` in `radio-cat-rs`'s `cat-transport-serial` crate (`cargo run -p cat-transport-serial --bin pin-test`, or `make pintest`).
+- src/main.rs: the wiring layer — `run_app()` shared by both platforms; `#[monoio::main]` on Linux, `win_runtime::block_on` on Windows (`src/win_runtime.rs`). Also defines `--server <host:port>` remote client mode's `TcpClientSession` adapter.
+- Generic CAT engine, transport traits, and serial/TCP/UDP transports are external
   dependencies from `radio-cat-rs` (git) — no local `framework`/`serial` crate
 
 ## Code Style
 - Imports: std → external → local
 - Error handling: thiserror + Result<T, E>
 - Naming: snake_case/PascalCase conventions
-- Async: monoio runtime throughout
+- Async: monoio runtime on Linux; a hand-rolled thread-parking executor on Windows (see "Windows support") — never tokio, never a general-purpose async-executor crate on either platform
 
 ## Testing Strategy
 - Unit tests for individual components
-- Integration tests with virtual TTY
+- Integration tests with virtual TTY (Linux-only, `tests/integration.rs` is `#![cfg(target_os = "linux")]`)
 - Performance benchmarks for io_uring
-- Linux-only testing with emulator
+- Linux-only testing with emulator; Windows verified via `cargo check --target x86_64-pc-windows-gnu` (type-check only — see "Windows support")
 
 ## Linux-Specific
+(Applies to the Linux build path specifically — see "Windows support" above for what differs on Windows.)
 - io_uring kernel requirements (5.1+)
 - Serial port permissions and udev rules
-- Virtual TTY via pseudo-terminals
+- Virtual TTY via pseudo-terminals (emulator + integration tests — Unix-only, no Windows equivalent)
 - Zero-copy optimizations for serial I/O

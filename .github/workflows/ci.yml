@@ -53,3 +53,42 @@ jobs:
         # Requires /dev/pts (ptmx) and io_uring (kernel 5.1+).
         # ubuntu-latest runs kernel 6.x so both are available.
         run: cargo test --test integration
+
+  windows-check:
+    name: Windows cross-check
+    runs-on: ubuntu-latest
+
+    # Type-check only (no link/run) -- this repo has no Windows runner or
+    # hardware to validate against; real Windows runtime behavior is
+    # exercised by the release workflow's actual `windows-latest` build job
+    # and, ultimately, manual testing against real hardware (see
+    # docs/adr/0006-windows-concurrency-model.md's residual-risk note).
+    # `emulator` is intentionally excluded: its virtual-TTY PTY hosting
+    # (`serialport::TTYPort::pair()`) is Unix-only by design (see this
+    # repo's own CLAUDE.md "Linux-Specific" section) and is not part of any
+    # of the five Windows-support tasks this check exists to verify.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+          targets: x86_64-pc-windows-gnu
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-windows-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-check-
+            ${{ runner.os }}-cargo-
+
+      - name: cargo check --target x86_64-pc-windows-gnu (workspace, excluding emulator)
+        run: cargo check --target x86_64-pc-windows-gnu --workspace --exclude emulator

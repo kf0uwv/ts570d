@@ -1,5 +1,6 @@
 .PHONY: all build release test test-unit test-integration \
-        clippy fmt fmt-check check clean deb emulator run help
+        clippy fmt fmt-check check clean deb emulator run help \
+        windows-check windows-package
 
 # ── Default ──────────────────────────────────────────────────────────────────
 all: build
@@ -11,6 +12,10 @@ build:
 release:
 	cargo build --release
 	cargo build --release -p emulator
+	# pin-test is a shared cat-transport-serial `[[bin]]` in radio-cat-rs now
+	# (see docs/adr/0006-windows-concurrency-model.md), not a local binary --
+	# `-p` selects it by package ID across the resolved dependency graph.
+	cargo build --release -p cat-transport-serial --bin pin-test
 
 # ── Test ─────────────────────────────────────────────────────────────────────
 test: test-unit test-integration
@@ -44,16 +49,29 @@ emulator:
 	cargo run --bin emulator
 
 pintest:
-	cargo run --bin pin-test
+	cargo run -p cat-transport-serial --bin pin-test
+
+# ── Windows (type-check only -- no Windows host/hardware in this repo) ───────
+# Usage: rustup target add x86_64-pc-windows-gnu   (one-time)
+windows-check:
+	cargo check --target x86_64-pc-windows-gnu --workspace --exclude emulator
 
 # ── Package ──────────────────────────────────────────────────────────────────
 deb: release
 	./packaging/build-deb.sh --skip-build
 
+# Windows packaging must run on/for a Windows target; this only stages the
+# zip from already-cross-checked binaries built on a real Windows host (see
+# packaging/build-windows-package.ps1 and CLAUDE.md). Not runnable in this
+# repo's own Linux dev environment.
+windows-package:
+	pwsh ./packaging/build-windows-package.ps1
+
 # ── Clean ────────────────────────────────────────────────────────────────────
 clean:
 	cargo clean
 	rm -f ts570d-radio-control_*.deb
+	rm -f ts570d-radio-control_*.zip
 
 # ── Help ─────────────────────────────────────────────────────────────────────
 help:
@@ -70,4 +88,6 @@ help:
 	@echo "  emulator         Run the virtual radio emulator"
 	@echo "  pintest          Run RS-232C pin diagnostic"
 	@echo "  deb              Build Debian package (.deb)"
-	@echo "  clean            Remove build artifacts and .deb files"
+	@echo "  windows-check    cargo check --target x86_64-pc-windows-gnu (type-check only)"
+	@echo "  windows-package  Build Windows .zip package (requires pwsh + Windows binaries)"
+	@echo "  clean            Remove build artifacts and .deb/.zip files"
