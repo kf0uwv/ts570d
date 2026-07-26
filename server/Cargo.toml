@@ -9,17 +9,22 @@ rust-version.workspace = true
 
 [dependencies]
 # TS-570D command table + client + domain types -- this crate is
-# contractually TS-570D-shaped (like `ui`), not radio-generic: the rigctld
-# translator calls `radio::Ts570d`'s typed methods directly.
+# contractually TS-570D-shaped (like `ui`), not radio-generic:
+# `rigctl_radio` implements `cat_rigctl::RigctlRadio` for
+# `radio::Ts570d`'s typed methods directly.
 radio = { path = "../radio" }
 
-# Generic CAT engine + client mechanics.
-cat-framework = { workspace = true }
-cat-client = { workspace = true }
+# `CatSession`/`TransportError` -- named directly by the thin `run()`
+# wrapper in `lib.rs` and by `rigctl_radio`'s trait bound.
 cat-transport-core = { workspace = true }
 
 # The request broker + raw TCP/UDP listeners this crate wires up.
 cat-server = { workspace = true }
+
+# The generic Hamlib rigctld bridge (dispatch/dump_state/framing) +
+# `run()`/`ServerConfig` orchestration -- this crate supplies only the
+# radio-specific `RigctlRadio` impl (`rigctl_radio.rs`).
+cat-rigctl = { workspace = true }
 
 # Async runtime (io_uring-based, Linux-only -- this repo has no Windows
 # target, see CLAUDE.md's "Linux-Specific" section, so no cfg gating).
@@ -33,10 +38,6 @@ thiserror = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
-
-# `futures::future::select_all` -- waiting on the first of several listener
-# tasks to end (`lib.rs::run`).
-futures = { workspace = true }
 
 [features]
 default = []

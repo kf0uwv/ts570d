@@ -102,7 +102,6 @@ dependencies = [
 [[package]]
 name = "cat-client"
 version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?branch=main#889591bbc2432e210d05ded2e75d01407c53aa94"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -113,15 +112,26 @@ dependencies = [
 [[package]]
 name = "cat-framework"
 version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?branch=main#889591bbc2432e210d05ded2e75d01407c53aa94"
 dependencies = [
  "thiserror 1.0.69",
 ]
 
 [[package]]
+name = "cat-rigctl"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cat-framework",
+ "cat-server",
+ "cat-transport-core",
+ "futures",
+ "monoio",
+ "tracing",
+]
+
+[[package]]
 name = "cat-server"
 version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?branch=main#889591bbc2432e210d05ded2e75d01407c53aa94"
 dependencies = [
  "async-trait",
  "cat-client",
@@ -136,7 +146,6 @@ dependencies = [
 [[package]]
 name = "cat-transport-core"
 version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?branch=main#889591bbc2432e210d05ded2e75d01407c53aa94"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -147,7 +156,6 @@ dependencies = [
 [[package]]
 name = "cat-transport-serial"
 version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?branch=main#889591bbc2432e210d05ded2e75d01407c53aa94"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -161,7 +169,6 @@ dependencies = [
 [[package]]
 name = "cat-transport-tcp"
 version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?branch=main#889591bbc2432e210d05ded2e75d01407c53aa94"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -172,7 +179,6 @@ dependencies = [
 [[package]]
 name = "cat-transport-udp"
 version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?branch=main#889591bbc2432e210d05ded2e75d01407c53aa94"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -993,11 +999,9 @@ name = "server"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "cat-client",
- "cat-framework",
+ "cat-rigctl",
  "cat-server",
  "cat-transport-core",
- "futures",
  "monoio",
  "radio",
  "thiserror 1.0.69",

@@ -62,6 +62,7 @@ cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", branch 
 cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 
 [package]
 name = "ts570d"
