@@ -86,7 +86,10 @@ impl<S> SharedSession<S> {
     /// module's wire-byte-level test assertions (e.g.
     /// `radio.session.borrow().transport.written()`). Never called while
     /// `take()` is outstanding — same non-reentrancy guarantee as above.
-    #[cfg(test)]
+    /// Only called from this module's Linux-gated test module (see
+    /// docs/adr/0006-windows-concurrency-model.md — its callers use
+    /// #[monoio::test]).
+    #[cfg(all(test, target_os = "linux"))]
     fn borrow(&self) -> impl std::ops::Deref<Target = S> + '_ {
         std::cell::Ref::map(self.0.borrow(), |opt| {
             opt.as_ref()
@@ -1734,7 +1737,11 @@ where
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+// Gated to Linux: every test in this module uses #[monoio::test], and
+// monoio is now a target(cfg(target_os = "linux"))-gated dependency (see
+// docs/adr/0006-windows-concurrency-model.md). Matches the precedent set by
+// radio-cat-rs's cat-server::local_channel/broker_session test modules.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use async_trait::async_trait;

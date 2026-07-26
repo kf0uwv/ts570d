@@ -29,6 +29,13 @@
 //! read a response (per Kenwood CAT protocol, SET commands are silent — the
 //! radio produces no response).  The subsequent `get` call sends a GET query
 //! and reads the proper query response, confirming the value was applied.
+//!
+//! Linux-only: exercises the io_uring serial driver directly (`monoio`,
+//! target-gated to Linux — see `docs/adr/0006-windows-concurrency-model.md`)
+//! against a PTY-backed emulator (pseudo-terminals are a Unix concept). A
+//! Windows port of this suite would need a Windows-side fake/loopback
+//! transport, which is out of this ADR's scope.
+#![cfg(target_os = "linux")]
 
 use std::time::Duration;
 

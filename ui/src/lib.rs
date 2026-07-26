@@ -20,6 +20,13 @@ pub(crate) mod control;
 pub(crate) mod diag;
 pub(crate) mod layout;
 mod terminal;
+// Not `#[cfg(target_os = "windows")]`-gated (see its own module doc): it has
+// no actual Windows-specific code and gets real test coverage on every
+// platform. Its only production caller is `terminal::run`'s Windows
+// variant, so it is legitimately unused in a non-Windows production build —
+// `allow(dead_code)` there only, not on Windows (where it is used).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod win_sched;
 
 pub use terminal::run;
 

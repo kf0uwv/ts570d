@@ -12,9 +12,6 @@ rust-version.workspace = true
 # TS-570D domain types + Radio trait (Frequency, Mode, InformationResponse, ...)
 radio = { path = "../radio" }
 
-# Async runtime
-monoio = { workspace = true }
-
 # Error handling
 thiserror = { workspace = true }
 
@@ -26,3 +23,10 @@ crossterm = { workspace = true }
 
 [features]
 default = []
+
+# Platform-specific configuration
+[target.'cfg(target_os = "linux")'.dependencies]
+# Async runtime (io_uring-based, Linux-only). `terminal::run`'s Windows
+# variant drives the same two-task shape via `win_sched::block_on_two`
+# instead — see docs/adr/0006-windows-concurrency-model.md.
+monoio = { workspace = true }

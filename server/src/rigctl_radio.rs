@@ -138,7 +138,9 @@ where
     }
 }
 
-#[cfg(test)]
+// Gated to Linux: uses #[monoio::test] (see
+// docs/adr/0006-windows-concurrency-model.md).
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use cat_rigctl::RigctlRadio;

@@ -64,6 +64,23 @@ cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "
 cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 
+# TEMPORARY: radio-cat-rs's Windows-network-transport / shared-release-workflow
+# work (Windows serial+TCP+UDP backends, cat-diagnostics, shared pin-test bin,
+# shared release workflow) is committed on that repo's local `main` but has
+# NOT been pushed to https://github.com/kf0uwv/radio-cat-rs yet. Without this
+# patch, the `branch = "main"` deps above resolve against the old, unmodified
+# *remote* main and silently miss all of it. Remove this whole [patch] block
+# once radio-cat-rs's main is actually pushed to origin.
+[patch."https://github.com/kf0uwv/radio-cat-rs"]
+cat-framework = { path = "../radio-cat-rs/cat-framework" }
+cat-client = { path = "../radio-cat-rs/cat-client" }
+cat-transport-core = { path = "../radio-cat-rs/cat-transport-core" }
+cat-transport-serial = { path = "../radio-cat-rs/cat-transport-serial" }
+cat-transport-tcp = { path = "../radio-cat-rs/cat-transport-tcp" }
+cat-transport-udp = { path = "../radio-cat-rs/cat-transport-udp" }
+cat-server = { path = "../radio-cat-rs/cat-server" }
+cat-rigctl = { path = "../radio-cat-rs/cat-rigctl" }
+
 [package]
 name = "ts570d"
 version.workspace = true
@@ -77,22 +94,25 @@ rust-version.workspace = true
 name = "ts570d"
 path = "src/main.rs"
 
-[[bin]]
-name = "pin-test"
-path = "src/bin/pin_test.rs"
-
 [dependencies]
-monoio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-libc = { workspace = true }
 
-# CAT transport crate (extracted; see docs/adr/0004, 0005) — provides
-# SerialCatSession/SerialConfig/SerialPort, the only pieces main.rs names
-# directly. cat-transport-core is a transitive dependency (via
-# cat-transport-serial), never named directly here.
+# Async trait support (compatible with !Send futures for monoio on Linux;
+# also used by `TcpClientSession`'s CatSession impl on every platform).
+async-trait = { workspace = true }
+
+# CAT transport crates (extracted; see docs/adr/0004, 0005) — provide
+# SerialCatSession/SerialConfig/SerialPort (--port, local serial) and
+# TcpCatSession (--server, TCP client mode — see
+# docs/adr/0006-windows-concurrency-model.md). cat-transport-core is named
+# directly now too, for `TcpClientSession`'s CatSession<Error =
+# TransportError> adapter impl in main.rs (see Rule 5: main.rs is the only
+# place concrete transport types are wired together).
 cat-transport-serial = { workspace = true }
+cat-transport-tcp = { workspace = true }
+cat-transport-core = { workspace = true }
 
 # Local workspace crates
 radio = { path = "radio" }
@@ -100,13 +120,29 @@ ui = { path = "ui" }
 server = { path = "server" }
 
 [dev-dependencies]
-emulator = { path = "emulator" }
 radio    = { path = "radio" }
-monoio   = { workspace = true }
 cat-transport-serial = { workspace = true }
 
 [features]
 default = []
+
+# Platform-specific configuration
+[target.'cfg(target_os = "linux")'.dependencies]
+# Async runtime (io_uring-based, Linux-only). Windows drives the same
+# run_app() future via win_runtime::block_on instead — see
+# docs/adr/0006-windows-concurrency-model.md.
+monoio = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# tests/integration.rs exercises the io_uring serial driver directly and is
+# itself gated `#![cfg(target_os = "linux")]`.
+monoio = { workspace = true }
+# The emulator is fundamentally Unix-only (pseudo-terminals via
+# serialport::TTYPort, std::os::unix::io::AsRawFd) — not a monoio/io_uring
+# limitation, so it is not part of this repo's Windows port at all (see
+# docs/adr/0006-windows-concurrency-model.md's scope). Only
+# tests/integration.rs uses it, and that file is itself Linux-gated above.
+emulator = { path = "emulator" }
 
 [profile.release]
 lto = true
@@ -115,11 +151,6 @@ panic = "abort"
 
 [profile.dev]
 debug = true
-
-# Platform-specific configuration
-[target.'cfg(target_os = "linux")'.dependencies]
-# Linux-specific dependencies for io_uring and serial handling
-# libc is already included above
 
 # Metadata for documentation and packaging
 [package.metadata.docs.rs]

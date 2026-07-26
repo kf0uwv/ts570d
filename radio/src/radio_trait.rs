@@ -807,7 +807,9 @@ impl Radio for NopRadio {}
 // Tests (moved from radio/src/protocol/frequency.rs and mode.rs)
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+// Gated to Linux: this module's test(s) use #[monoio::test] (see
+// docs/adr/0006-windows-concurrency-model.md).
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

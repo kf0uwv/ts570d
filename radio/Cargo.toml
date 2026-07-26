@@ -13,9 +13,6 @@ cat-framework = { workspace = true }
 cat-client = { workspace = true }
 cat-transport-core = { workspace = true }
 
-# Runtime
-monoio = { workspace = true }
-
 # Async traits
 async-trait = "0.1"
 
@@ -32,3 +29,10 @@ cat-transport-serial = { workspace = true }
 
 [features]
 default = []
+
+# Platform-specific configuration
+[target.'cfg(target_os = "linux")'.dependencies]
+# Async runtime (io_uring-based, Linux-only). Only used by this crate's own
+# #[monoio::test]-based unit tests today (production code has no direct
+# monoio dependency) — see docs/adr/0006-windows-concurrency-model.md.
+monoio = { workspace = true }

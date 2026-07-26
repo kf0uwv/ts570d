@@ -36,8 +36,18 @@ use crate::{
     RadioDisplay, UiError, UiResult,
 };
 
+#[cfg(target_os = "windows")]
+use crate::win_sched;
+
 // ---------------------------------------------------------------------------
 // Single-threaded channel primitive (Rc<RefCell<VecDeque<T>>>)
+//
+// Sound on Windows too: `run`'s Windows variant (below) keeps both
+// `radio_task` and `ui_task` on the one OS thread that calls it,
+// cooperatively polled by `win_sched::block_on_two` instead of
+// `monoio::spawn` — never `Send` across threads, exactly like the Linux
+// `monoio::spawn` model this replaces. See
+// `docs/adr/0006-windows-concurrency-model.md`.
 // ---------------------------------------------------------------------------
 
 type Chan<T> = Rc<RefCell<VecDeque<T>>>;
@@ -125,8 +135,9 @@ pub(crate) fn draw_frame(
 /// Run the radio UI with a separate radio polling task.
 ///
 /// The radio polling/command task and the UI rendering/key-event task run
-/// concurrently via `monoio::spawn_local`, so key events (including Q) are
-/// always responsive regardless of radio latency.
+/// concurrently via `monoio::spawn`, so key events (including Q) are always
+/// responsive regardless of radio latency.
+#[cfg(target_os = "linux")]
 pub async fn run<R: Radio + 'static>(radio: R) -> UiResult<()> {
     let terminal = init_terminal()?;
 
@@ -150,6 +161,54 @@ pub async fn run<R: Radio + 'static>(radio: R) -> UiResult<()> {
 
     cleanup_terminal()?;
     result
+}
+
+/// Windows variant of [`run`]. `monoio::spawn` does not exist on Windows (no
+/// `monoio` at all — see `docs/adr/0006-windows-concurrency-model.md`), and
+/// a real `std::thread::spawn` worker is not viable either: `radio: R` (a
+/// `radio::Ts570d<S>`) is unconditionally `!Send`. Instead both tasks stay
+/// on this one OS thread, driven by [`win_sched::block_on_two`]'s hand-rolled
+/// round-robin poller — the same "UI task always polled first" fairness
+/// property `monoio::spawn` provides, without needing `Send` at all. This is
+/// a synchronous function (no outer async runtime exists on Windows to
+/// `.await` it); the platform-gated `main()` in `src/main.rs` calls it
+/// directly.
+#[cfg(target_os = "windows")]
+pub fn run<R: Radio + 'static>(radio: R) -> UiResult<()> {
+    let terminal = init_terminal()?;
+
+    let cmd_ch: Chan<RadioCmd> = make_chan();
+    let update_ch: Chan<RadioUpdate> = make_chan();
+
+    let radio_cmd_rx = Rc::clone(&cmd_ch);
+    let radio_update_tx = Rc::clone(&update_ch);
+
+    let radio_fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> =
+        Box::pin(radio_task(radio, radio_cmd_rx, radio_update_tx));
+    let ui_fut = Box::pin(ui_task(terminal, cmd_ch, update_ch));
+
+    // Mirrors Linux's `drop(radio_handle)`: block_on_two returns as soon as
+    // `ui_fut` resolves, dropping (canceling) `radio_fut` without waiting
+    // for it.
+    let result = win_sched::block_on_two(ui_fut, radio_fut);
+
+    cleanup_terminal()?;
+    result
+}
+
+/// `monoio::time::sleep` on Linux; a busy-poll-friendly, waker-free sleep on
+/// Windows whose correctness relies on `win_sched::block_on_two`'s own
+/// `park_timeout` bound re-polling it often enough (see
+/// `docs/adr/0006-windows-concurrency-model.md`). Identical call sites and
+/// behavior on Linux to before this indirection was introduced.
+#[cfg(target_os = "linux")]
+async fn yield_sleep(duration: Duration) {
+    monoio::time::sleep(duration).await;
+}
+
+#[cfg(target_os = "windows")]
+async fn yield_sleep(duration: Duration) {
+    win_sched::WinSleep::new(duration).await;
 }
 
 /// Poll all radio state getters and update `state` in place.
@@ -2140,7 +2199,7 @@ async fn radio_task<R: Radio + 'static>(
         }
 
         // 5. Yield ~200ms before next poll cycle.
-        monoio::time::sleep(std::time::Duration::from_millis(200)).await;
+        yield_sleep(std::time::Duration::from_millis(200)).await;
     }
 }
 
@@ -2251,7 +2310,7 @@ async fn ui_task(
         }
 
         // 4. Yield briefly so the radio task can run.
-        monoio::time::sleep(std::time::Duration::from_millis(5)).await;
+        yield_sleep(std::time::Duration::from_millis(5)).await;
     }
 }
 

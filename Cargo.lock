@@ -1252,9 +1252,11 @@ dependencies = [
 name = "ts570d"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
+ "cat-transport-core",
  "cat-transport-serial",
+ "cat-transport-tcp",
  "emulator",
- "libc",
  "monoio",
  "radio",
  "server",
