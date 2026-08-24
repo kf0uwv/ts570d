@@ -14,6 +14,7 @@ Description: Kenwood TS-570D terminal radio control
   - ts570d-control: main control application
   - ts570d-emulator: virtual radio emulator (PTY-based, no hardware needed)
   - rs232c-pintest: RS-232C wiring/pin diagnostic tool
+  - ts570d-line: DTR/RTS PTT-line bench tool (hold/pulse/status)
  .
  Requires Linux kernel 5.1+ for io_uring support.
 Homepage: https://github.com/kf0uwv/ts570d

@@ -31,9 +31,10 @@ install -d "${STAGING}/usr/share/doc/ts570d-radio-control"
 install -d "${STAGING}/usr/share/man/man1"
 
 # Binaries — rename to final installed names
-install -m 0755 "${RELEASE}/ts570d"    "${STAGING}/usr/bin/ts570d-control"
-install -m 0755 "${RELEASE}/emulator"  "${STAGING}/usr/bin/ts570d-emulator"
-install -m 0755 "${RELEASE}/pin-test"  "${STAGING}/usr/bin/rs232c-pintest"
+install -m 0755 "${RELEASE}/ts570d"      "${STAGING}/usr/bin/ts570d-control"
+install -m 0755 "${RELEASE}/emulator"    "${STAGING}/usr/bin/ts570d-emulator"
+install -m 0755 "${RELEASE}/pin-test"    "${STAGING}/usr/bin/rs232c-pintest"
+install -m 0755 "${RELEASE}/ts570d-line" "${STAGING}/usr/bin/ts570d-line"
 
 # Control file (substitute version)
 sed "s/^Version:.*/Version: ${VERSION}/" \
