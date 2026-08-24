@@ -366,6 +366,9 @@ async fn run_server_mode() {
         SerialConfig {
             baud_rate: args.baud,
             stop_bits: args.stop_bits,
+            // Never assert DTR at open — see the TUI-mode open above:
+            // DTR may be wired as a PTT key line. (planning/ptt-line)
+            initial_dtr: false,
             ..SerialConfig::default()
         },
     )
@@ -439,6 +442,11 @@ async fn run_app() {
                 SerialConfig {
                     baud_rate: baud,
                     stop_bits,
+                    // Never assert DTR at open: on stations keying PTT from
+                    // the DTR line (e.g. an ACC2 opto interface), the default
+                    // `initial_dtr: true` keys the transmitter the moment the
+                    // port opens. CAT itself needs no DTR. (planning/ptt-line)
+                    initial_dtr: false,
                     ..SerialConfig::default()
                 },
             )

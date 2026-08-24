@@ -81,6 +81,12 @@ rust-version.workspace = true
 name = "ts570d"
 path = "src/main.rs"
 
+# Bench helper for DTR/RTS PTT-line troubleshooting (planning/ptt-line).
+# Same wiring layer as main.rs: allowed to name concrete transport types.
+[[bin]]
+name = "ts570d-line"
+path = "src/bin/line.rs"
+
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
