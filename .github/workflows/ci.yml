@@ -55,18 +55,28 @@ jobs:
         run: cargo test --test integration
 
   windows-check:
-    name: Windows cross-check
-    runs-on: ubuntu-latest
+    name: Windows (MSVC)
+    runs-on: windows-latest
 
-    # Type-check only (no link/run) -- this repo has no Windows runner or
-    # hardware to validate against; real Windows runtime behavior is
-    # exercised by the release workflow's actual `windows-latest` build job
-    # and, ultimately, manual testing against real hardware (see
-    # docs/adr/0006-windows-concurrency-model.md's residual-risk note).
-    # `emulator` is intentionally excluded: its virtual-TTY PTY hosting
-    # (`serialport::TTYPort::pair()`) is Unix-only by design (see this
-    # repo's own CLAUDE.md "Linux-Specific" section) and is not part of any
-    # of the five Windows-support tasks this check exists to verify.
+    # Authoritative Windows verification, per `radio-cat-rs` ADR 0012.
+    #
+    # This supersedes the previous `cargo check --target
+    # x86_64-pc-windows-gnu` cross-check on an Ubuntu runner. That job
+    # type-checked a target nobody ships; this one builds AND runs the test
+    # suite on a real MSVC host, which is the same toolchain the release
+    # workflow packages. `x86_64-pc-windows-msvc` is the host target on
+    # `windows-latest`, so no `--target` flag is needed or wanted -- passing
+    # one would force a non-host build for no benefit.
+    #
+    # This is what finally closes the residual risk recorded in
+    # docs/adr/0006-windows-concurrency-model.md and in `radio-cat-rs` ADRs
+    # 0004 and 0006: the Windows code paths' *tests* have never actually
+    # executed on Windows. Failures here are pre-existing bugs, not
+    # regressions from this migration -- fix them, do not skip them.
+    #
+    # `emulator` remains excluded: its virtual-TTY PTY hosting
+    # (`serialport::TTYPort::pair()`) is Unix-only by design, not by
+    # toolchain (see this repo's CLAUDE.md "Linux-Specific" section).
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,7 +85,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.93"
-          targets: x86_64-pc-windows-gnu
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -85,10 +94,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-windows-check-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-windows-msvc-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-windows-check-
+            ${{ runner.os }}-cargo-windows-msvc-
             ${{ runner.os }}-cargo-
 
-      - name: cargo check --target x86_64-pc-windows-gnu (workspace, excluding emulator)
-        run: cargo check --target x86_64-pc-windows-gnu --workspace --exclude emulator
+      - name: cargo check (workspace, excluding emulator)
+        run: cargo check --workspace --exclude emulator
+
+      - name: cargo test (workspace, excluding emulator)
+        run: cargo test --workspace --exclude emulator

@@ -10,6 +10,9 @@ Decisions are recorded as [ADRs](https://cognitect.com/blog/2011/11/15/documenti
 | [0003](0003-single-command-table.md) | One command table for controller and emulator | Accepted |
 | [0004](0004-extraction-boundary.md) | Extraction boundary for a shared CAT library | Accepted |
 | [0005](0005-network-transport-readiness.md) | Network transport and server/control mode readiness | Accepted |
+| [0006](0006-windows-concurrency-model.md) | Windows entry point and concurrency model for `ui::run`'s two-task design | Accepted |
+| [0007](0007-diagnostics-tx-safety-gate.md) | Diagnostics TX safety gate: operator acknowledgment + callsign-gated CW test | Accepted |
+| [0008](0008-gpu-gui-crate-on-shared-building-blocks.md) | A GPU-rendered `gui` crate on egui/wgpu, as a network client, on shared building blocks | Accepted |
 
 ## Refactor status (branch `refactor/generic-cat-framework`)
 

@@ -135,7 +135,7 @@ Works on both Linux and Windows.
 
 ## Windows support
 
-Windows is a supported target (`x86_64-pc-windows-gnu`/`-msvc`) for
+Windows is a supported target (`x86_64-pc-windows-msvc`, the only one) for
 `ts570d.exe`: local serial (native Win32 COM-port I/O), `--server` remote
 client mode, and headless server mode (raw TCP/UDP and `--rigctl-port`
 alike). The `emulator` and
@@ -144,8 +144,10 @@ alike). The `emulator` and
 design, per above).
 
 This repo has no Windows machine to test against directly — Windows builds
-are verified with `cargo check --target x86_64-pc-windows-gnu` (type-check
-only) plus the CI `windows-check` job; real hardware/runtime validation
+are verified by the CI `windows-check` job, which runs `cargo check` **and
+`cargo test`** on a `windows-latest` MSVC host (`radio-cat-rs` ADR 0012),
+optionally preceded locally by `make windows-check` (cargo-xwin, best-effort,
+cannot run tests); real hardware/runtime validation
 happens on the release workflow's actual `windows-latest` build and,
 ultimately, by users running the released binary. See
 [docs/adr/0006-windows-concurrency-model.md](docs/adr/0006-windows-concurrency-model.md)
