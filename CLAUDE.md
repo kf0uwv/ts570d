@@ -41,7 +41,7 @@
 - Test: `cargo test` / `cargo test test_name`
 - Lint: `cargo clippy` / `cargo fmt`
 - Emulator: `cargo run --bin emulator`
-- Windows type-check: `make windows-check` (`cargo check --target x86_64-pc-windows-gnu --workspace --exclude emulator`; requires `rustup target add x86_64-pc-windows-gnu` once)
+- Windows check (local, best-effort): `make windows-check` (`cargo xwin check --target x86_64-pc-windows-msvc --workspace --exclude emulator`; one-time `cargo install cargo-xwin --locked` + `rustup target add x86_64-pc-windows-msvc`). Cannot run tests — CI's `windows-latest` job is authoritative and runs `cargo check` **and** `cargo test`.
 - Windows package (on/for a Windows host with binaries already built): `make windows-package`
 
 ## Windows support
@@ -74,10 +74,13 @@ See `docs/adr/0006-windows-concurrency-model.md` for the full design
 rationale (including why a real `std::thread::spawn` worker was rejected —
 `radio::Ts570d<S>`'s `SharedSession` is unconditionally `!Send`) and its
 documented residual risk. There is no Windows machine in this project's
-development environment; Windows correctness is verified with `cargo check
---target x86_64-pc-windows-gnu` (type-check only) plus the CI `windows-check`
-job — real hardware/runtime validation happens on the release workflow's
-`windows-latest` build and, ultimately, users running the released binary.
+development environment; Windows correctness is verified by the CI
+`windows-check` job, which runs `cargo check` **and `cargo test`** on a
+`windows-latest` MSVC host (`radio-cat-rs` ADR 0012 — this is what finally
+executes the Windows test modules, which had never run). `make
+windows-check` gives a local cargo-xwin signal but cannot run tests. Real
+hardware validation happens on the release workflow's `windows-latest`
+build and, ultimately, users running the released binary.
 
 ## Crate Dependency Model (MANDATORY — ALL AGENTS MUST FOLLOW)
 
@@ -143,6 +146,46 @@ src/main.rs  (depends on: all crates — the wiring layer only)
 7. If a change to the generic engine or transport layer is needed, it belongs in
    `radio-cat-rs`, not as a local fork/vendor here — see that repo's ADR 0001.
 
+### Accepted amendment (2026-08-27) — in force as direction
+
+`docs/adr/0008` (this repo) and `radio-cat-rs`'s ADRs 0010, 0011, 0012 and
+0013 are **Accepted**. They establish a capability model, a normalized
+`SpectrumSource`, a native protocol with rigctl as a compatibility layer,
+shared `cat-ui` base widgets for **both** renderers, a new `gui` crate,
+`x86_64-pc-windows-msvc` as the only Windows target, and capability parity
+between the TUI and the GUI.
+
+**Read this carefully: Rules 1-7 above still describe the code as it stands
+today, and still govern it.** None of the migration has been written. What
+acceptance changes is direction, not the current shape of the tree:
+
+- **No new code may entrench the superseded framing.** Do not add to
+  `server/src/rigctl_radio.rs`, do not add a hand-written widget that
+  `cat-ui` will own, and do not add a TS-570D wire type where the normalized
+  type is coming.
+- The "`server` and `ui` are contractually TS-570D-shaped, not radio-generic"
+  framing (see `server/Cargo.toml`'s header comment) is replaced **on
+  migration** by: they are radio-specific in **layout and features** while
+  delegating protocol, capability discovery, signal correction and base
+  widgets to `radio-cat-rs`.
+- `server/src/rigctl_radio.rs` is deleted on migration; `cat-rigctl` is
+  reimplemented once over `RadioCapabilities`.
+- A new dependency rule for `gui` applies the moment that crate exists
+  (ADR 0008 §3): it depends on `cat-ui`, `cat-ui-egui`, and the protocol
+  client, and never on `radio`, `cat-framework`, or any `cat-transport-*`
+  crate.
+- **`ui` is permanent and holds capability parity with `gui`**
+  (`radio-cat-rs` ADR 0013). A feature landing in one renderer without a
+  counterpart in the other needs a row in `docs/renderer-parity.md` naming
+  its ground. Development cost is not a ground.
+- **Windows means `x86_64-pc-windows-msvc`** (`radio-cat-rs` ADR 0012).
+  `x86_64-pc-windows-gnu` is retired; CI runs `cargo check` **and
+  `cargo test`** on a `windows-latest` runner.
+
+Sequencing is settled: **the `radio-cat-rs` library work lands first.** No
+agent starts `gui` before ADR 0010 is implemented for the TS-570D. The
+dispatch queue is `radio-cat-rs`'s `planning/architect/task_plan.md`.
+
 ### Generic framework vs. TS-570D responsibilities
 The generic `framework` knows how to **process** a command: framing, command lookup,
 syntactic parsing, structural parameter validation, generic dispatch lifecycle, and
@@ -180,7 +223,7 @@ TS-570D-specific features (keyer, voice synthesizer, antenna tuner, menu access)
 - Unit tests for individual components
 - Integration tests with virtual TTY (Linux-only, `tests/integration.rs` is `#![cfg(target_os = "linux")]`)
 - Performance benchmarks for io_uring
-- Linux-only testing with emulator; Windows verified via `cargo check --target x86_64-pc-windows-gnu` (type-check only — see "Windows support")
+- Linux-only testing with emulator; Windows verified via `cargo check` **and `cargo test`** on the `windows-latest` CI runner (MSVC — see "Windows support")
 
 ## Linux-Specific
 (Applies to the Linux build path specifically — see "Windows support" above for what differs on Windows.)

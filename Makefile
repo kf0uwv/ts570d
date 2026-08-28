@@ -51,10 +51,19 @@ emulator:
 pintest:
 	cargo run -p cat-transport-serial --bin pin-test
 
-# ── Windows (type-check only -- no Windows host/hardware in this repo) ───────
-# Usage: rustup target add x86_64-pc-windows-gnu   (one-time)
+# ── Windows (local best-effort -- CI is the source of truth) ─────────────────
+# Per `radio-cat-rs` ADR 0012, `x86_64-pc-windows-msvc` is the only Windows
+# target; `x86_64-pc-windows-gnu` is retired. This cross-compiles to MSVC
+# from Linux via cargo-xwin, which fetches the Microsoft CRT and Windows SDK
+# (~1.1 GB, cached under ~/.cache/cargo-xwin). It is a fast local signal
+# only: it cannot RUN the tests, and the authoritative check is the
+# `windows-latest` CI job, which runs `cargo check` AND `cargo test`.
+#
+# One-time setup:
+#   cargo install cargo-xwin --locked
+#   rustup target add x86_64-pc-windows-msvc
 windows-check:
-	cargo check --target x86_64-pc-windows-gnu --workspace --exclude emulator
+	cargo xwin check --target x86_64-pc-windows-msvc --workspace --exclude emulator
 
 # ── Package ──────────────────────────────────────────────────────────────────
 deb: release
@@ -88,6 +97,6 @@ help:
 	@echo "  emulator         Run the virtual radio emulator"
 	@echo "  pintest          Run RS-232C pin diagnostic"
 	@echo "  deb              Build Debian package (.deb)"
-	@echo "  windows-check    cargo check --target x86_64-pc-windows-gnu (type-check only)"
+	@echo "  windows-check    cargo xwin check for MSVC (local best-effort; CI is authoritative)"
 	@echo "  windows-package  Build Windows .zip package (requires pwsh + Windows binaries)"
 	@echo "  clean            Remove build artifacts and .deb/.zip files"

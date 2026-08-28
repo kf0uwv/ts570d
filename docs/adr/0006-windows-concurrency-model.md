@@ -6,6 +6,14 @@ Date: 2026-07-26
 
 Accepted
 
+
+> **Amended 2026-08-27 by `radio-cat-rs` [ADR 0012](https://github.com/kf0uwv/radio-cat-rs/blob/main/docs/adr/0012-native-msvc-windows-target.md).**
+> Every `x86_64-pc-windows-gnu` reference below is a historical record of
+> how this work *was* verified at the time, deliberately left unedited.
+> `-gnu` is retired: `x86_64-pc-windows-msvc` is now the only Windows
+> target, and verification is `cargo check` **and `cargo test`** on a
+> `windows-latest` runner.
+
 ## Context
 
 `radio-cat-rs`'s [ADR 0004](https://github.com/kf0uwv/radio-cat-rs/blob/main/docs/adr/0004-windows-serial-backend.md)
