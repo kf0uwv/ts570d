@@ -22,6 +22,14 @@ rigctl as a compatibility layer), ADR 0011 and ADR 0013.
 **Sequencing is settled: the library work lands first.** No crate described
 here starts before ADR 0010 is Accepted and implemented for the TS-570D.
 
+**Design direction chosen (2026-08-28): option 3, "Workspace"** — a
+persistent capability status strip, capability-derived tabs (SPECTRUM /
+MEMORY 0–99 / MENU 52 / SOURCE) and a command line, for **both** renderers.
+Mockups in `planning/designer/mockups/console/`. It was the direction whose
+GUI idea is native to a terminal — tabs, a status strip and a command line
+reach every capability with keys alone — which makes it the strongest
+option against ADR 0013's parity rule.
+
 ## Context
 
 This app ships a ratatui TUI and nothing else. A cross-platform desktop GUI
@@ -168,12 +176,30 @@ repo's Apache-2.0 before it could be considered at all.
 - **A local-serial GUI mode.** Would reintroduce every ADR 0006 constraint
   for no benefit the network path lacks. *Revisit trigger:* users find
   running a local server unacceptable friction.
-- **Audio panels.** The reference console's AF oscilloscope and AF FFT are
-  fed by `SignalCapability::AudioDerived`, which needs an audio-stream
-  design that does not exist yet (ADR 0010 §Out of scope). The TS-570D has
-  no USB codec at all — any audio would come from a soundcard on ACC2 — so
-  it will report `AudioDerived` absent for the foreseeable future. The
-  layout should reserve their space; the build should not attempt them.
+- **Audio *transport*.** Streaming audio — codec selection, buffering, TX
+  audio — is still undesigned (ADR 0010 §Out of scope), and nothing here
+  changes that.
+
+  **The audio panels themselves are no longer out of scope** (amended
+  2026-08-28). This entry previously read that the TS-570D "has no USB
+  codec at all — any audio would come from a soundcard on ACC2 — so it will
+  report `AudioDerived` absent for the foreseeable future." That prediction
+  was right about the mechanism and wrong about the timing: the user has
+  built an interface box carrying CAT serial (its DTR keying PTT through
+  ACC2), the SDR on the CN4 tap, and RF audio in/out through ACC2 into a
+  **USB sound device inside the box**. `AudioDerived` has a real source on
+  this station today.
+
+  So the AF scope and AF FFT are designed, and the reserved space is filled
+  — but they are built against a first-class **"audio path configured, no
+  stream yet"** state until the transport design lands. Two constraints
+  hold regardless: `AudioDerived` cannot drive a band panorama
+  (`is_band_panorama()` is false for it), and an AF FFT spanning a few kHz
+  must not read as another view of the waterfall above it.
+
+  Note also that whether *any* of this is present is an installation fact,
+  not a property of the TS-570D — see `radio-cat-rs` ADR 0015, which this
+  hardware is what prompted.
 - **The visual design.** A design process runs separately and feeds
   requirements + acceptance criteria into the normal spine.
 - **Packaging.** `packaging/` gains a GUI target later; not decided here.
