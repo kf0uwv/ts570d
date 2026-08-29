@@ -133,8 +133,36 @@ where
     }
 
     /// TS-570D's real documented receive range: 500 kHz-60 MHz.
+    ///
+    /// Read out of [`radio::capabilities::TS570D`] rather than restated,
+    /// so there is one declaration of this radio's coverage and not two.
+    /// `cat_rigctl` only consults this on the placeholder path, which
+    /// [`Self::capabilities`] takes us off -- keeping it correct anyway
+    /// costs nothing and a silently-wrong fallback would be nasty.
     fn freq_range_hz() -> (u64, u64) {
-        (Frequency::MIN_HZ, Frequency::MAX_HZ)
+        let range = radio::capabilities::TS570D.rx_range;
+        (range.min_hz, range.max_hz)
+    }
+
+    /// Publish what this radio is, so `\dump_state`'s capability tail is
+    /// **generated** rather than a placeholder.
+    ///
+    /// Until now this console told every Hamlib client the same invented
+    /// story: one tuning step of 10 Hz, one 2400 Hz filter, and RIT/XIT
+    /// limits of 1200 Hz. The radio actually has six tuning steps and
+    /// +/-9999 Hz of RIT and XIT. Nothing depended on the fiction being
+    /// true, but nothing was served by it either.
+    ///
+    /// This is a deliberate behaviour change to a compatibility layer,
+    /// which is the one kind of change here that can break somebody else's
+    /// software. The property that must hold is structural, not cosmetic:
+    /// a `\dump_state` reply short by even one line makes Hamlib's
+    /// `netrigctl_open()` block forever, with nothing in the symptom
+    /// pointing at the cause (radio-cat-rs ADR 0005). So the test below
+    /// pins the field count against the placeholder rather than pinning
+    /// the text.
+    fn capabilities() -> Option<&'static cat_framework::capabilities::RadioCapabilities> {
+        Some(&radio::capabilities::TS570D)
     }
 }
 
@@ -257,6 +285,37 @@ mod tests {
                 "mode {mode:?} -> {name} did not round-trip"
             );
         }
+    }
+
+    #[test]
+    fn the_bridge_publishes_this_radios_capabilities() {
+        // Not merely "some capabilities": the ones this repo declares. If
+        // a second capability set ever appears, this says which is the
+        // one a Hamlib client is told about.
+        //
+        // Compared by value rather than by address. `TS570D` is a `const`,
+        // so each `&TS570D` is a separately promoted temporary and pointer
+        // identity is not a property it has -- equality is, and equality
+        // is what actually matters here.
+        let caps = <RigctlTs570d<ScriptedCatSession> as cat_rigctl::RigctlRadio>::capabilities()
+            .expect("the bridge must publish capabilities, not a placeholder");
+        assert_eq!(*caps, radio::capabilities::TS570D);
+    }
+
+    #[test]
+    fn the_generated_dump_state_will_not_be_structurally_empty() {
+        // `dump_state` generation lives upstream and is tested there, but
+        // it is only as good as what this radio hands it. These are the
+        // two lists Hamlib reads to a sentinel: if either were empty the
+        // generated reply would fall back to a filler row and quietly
+        // stop describing the radio.
+        let caps = &radio::capabilities::TS570D;
+        assert!(
+            !caps.tuning_steps_hz.is_empty(),
+            "no tuning steps to generate from"
+        );
+        assert!(caps.vfos.rit_hz.is_some(), "no RIT limit to generate from");
+        assert!(caps.rx_range.min_hz < caps.rx_range.max_hz);
     }
 
     #[test]
