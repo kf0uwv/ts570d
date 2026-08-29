@@ -33,6 +33,11 @@ cat-server = { workspace = true }
 # this replaces.
 cat-rigctl = { workspace = true }
 
+# For `RigctlRadio::capabilities`, which hands `cat-rigctl` this radio's
+# own description so `\dump_state`'s tail is generated rather than
+# invented (radio-cat-rs ADR 0010 section 6).
+cat-framework = { workspace = true }
+
 # Async traits (compatible with !Send futures for monoio).
 async-trait = { workspace = true }
 
