@@ -101,8 +101,8 @@ dependencies = [
 
 [[package]]
 name = "cat-client"
-version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
+version = "0.3.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.3.0#e23c911e577ff558ce1ac86e58edeb93a86e4918"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -112,20 +112,23 @@ dependencies = [
 
 [[package]]
 name = "cat-framework"
-version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
+version = "0.3.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.3.0#e23c911e577ff558ce1ac86e58edeb93a86e4918"
 dependencies = [
+ "cat-signal",
+ "serde",
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "cat-rigctl"
-version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
+version = "0.3.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.3.0#e23c911e577ff558ce1ac86e58edeb93a86e4918"
 dependencies = [
  "async-trait",
  "cat-framework",
  "cat-server",
+ "cat-signal",
  "cat-transport-core",
  "futures",
  "monoio",
@@ -134,23 +137,35 @@ dependencies = [
 
 [[package]]
 name = "cat-server"
-version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
+version = "0.3.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.3.0#e23c911e577ff558ce1ac86e58edeb93a86e4918"
 dependencies = [
  "async-trait",
  "cat-client",
  "cat-framework",
+ "cat-signal",
  "cat-transport-core",
  "cat-transport-tcp",
  "cat-transport-udp",
  "monoio",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 
 [[package]]
+name = "cat-signal"
+version = "0.3.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.3.0#e23c911e577ff558ce1ac86e58edeb93a86e4918"
+dependencies = [
+ "async-trait",
+ "serde",
+]
+
+[[package]]
 name = "cat-transport-core"
-version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
+version = "0.3.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.3.0#e23c911e577ff558ce1ac86e58edeb93a86e4918"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -160,8 +175,8 @@ dependencies = [
 
 [[package]]
 name = "cat-transport-serial"
-version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
+version = "0.3.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.3.0#e23c911e577ff558ce1ac86e58edeb93a86e4918"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -174,8 +189,8 @@ dependencies = [
 
 [[package]]
 name = "cat-transport-tcp"
-version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
+version = "0.3.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.3.0#e23c911e577ff558ce1ac86e58edeb93a86e4918"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -185,13 +200,33 @@ dependencies = [
 
 [[package]]
 name = "cat-transport-udp"
-version = "0.1.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.1.0#0eee4262d534741aaa0f98bee1841fc98c18d5c8"
+version = "0.3.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.3.0#e23c911e577ff558ce1ac86e58edeb93a86e4918"
 dependencies = [
  "async-trait",
  "cat-transport-core",
  "monoio",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "cat-ui"
+version = "0.3.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.3.0#e23c911e577ff558ce1ac86e58edeb93a86e4918"
+dependencies = [
+ "cat-framework",
+ "cat-signal",
+]
+
+[[package]]
+name = "cat-ui-ratatui"
+version = "0.3.0"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.3.0#e23c911e577ff558ce1ac86e58edeb93a86e4918"
+dependencies = [
+ "cat-framework",
+ "cat-signal",
+ "cat-ui",
+ "ratatui",
 ]
 
 [[package]]
@@ -1278,6 +1313,9 @@ dependencies = [
 name = "ui"
 version = "0.3.0"
 dependencies = [
+ "cat-framework",
+ "cat-ui",
+ "cat-ui-ratatui",
  "crossterm",
  "monoio",
  "radio",

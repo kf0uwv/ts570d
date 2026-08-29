@@ -38,6 +38,7 @@
 //! assert!(fa.is_writable());
 //! ```
 
+pub mod capabilities;
 pub mod protocol;
 pub mod radio_trait;
 pub mod ts570d;
