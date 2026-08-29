@@ -25,54 +25,27 @@ use crate::diag::{DiagResult, DiagState};
 use crate::terminal::DIAG_STEP_COUNT;
 use crate::RadioDisplay;
 
-/// Format a frequency in Hz as "M.KKK.HHH MHz".
-fn format_hz(hz: u64) -> String {
-    let mhz = hz / 1_000_000;
-    let khz = (hz % 1_000_000) / 1_000;
-    let hz_rem = hz % 1_000;
-    format!("{}.{:03}.{:03} MHz", mhz, khz, hz_rem)
-}
+// Shared console logic and terminal widgets (radio-cat-rs ADR 0011 rev 4).
+// What stays here is this radio's LAYOUT and FEATURE SET; what comes from
+// these crates is anything with one correct answer per input.
+use cat_framework::capabilities::MeterKind;
+use cat_ui::{format_hz, MeterReading};
+use cat_ui_ratatui::{
+    bar_spans, error_panel, header, link_panel, menu_column, meter_spans, ErrorPanelStyles,
+    LinkState,
+};
 
-/// Convert a raw TS-570D S-meter value (0–30) to a display label.
-fn smeter_label(smeter: u16) -> &'static str {
-    match smeter {
-        0..=2 => "S0",
-        3..=4 => "S1",
-        5..=6 => "S2",
-        7..=8 => "S3",
-        9..=10 => "S4",
-        11..=12 => "S5",
-        13..=14 => "S6",
-        15..=16 => "S7",
-        17..=18 => "S8",
-        19..=20 => "S9",
-        21..=24 => "S9+10",
-        25..=28 => "S9+20",
-        _ => "S9+30",
-    }
-}
-
-/// Build an inline S-meter bargraph string (20 chars wide).
-fn smeter_bar(smeter: u16) -> String {
-    let filled = ((smeter as usize).min(30) * 20 / 30).min(20);
-    let empty = 20 - filled;
-    let mut s = String::with_capacity(22);
-    s.push('▐');
-    for _ in 0..filled {
-        s.push('█');
-    }
-    for _ in 0..empty {
-        s.push('░');
-    }
-    s.push('▌');
-    s
-}
-
-/// Compact inline bargraph, `width` chars wide, fill 0.0–1.0.
-fn mini_bar(ratio: f64, width: usize) -> String {
-    let filled = ((ratio.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
-    let empty = width - filled;
-    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+/// This radio's S-meter, with the raw value the last poll returned.
+///
+/// Goes through `from_meters` rather than being built by hand so the
+/// reading arrives carrying both its 0-30 range and this radio's S-unit
+/// table. Neither is a thing the widgets should have to be told.
+fn smeter_reading(state: &RadioDisplay) -> Option<MeterReading> {
+    MeterReading::from_meters(
+        &radio::capabilities::TS570D.meters,
+        MeterKind::S,
+        state.smeter,
+    )
 }
 
 /// Build AGC label from numeric code.
@@ -140,18 +113,15 @@ pub fn split_areas(area: Rect) -> (Rect, Rect, Rect, Rect) {
 
 /// Draw the TS-570D title header block.
 pub fn draw_header(f: &mut Frame, area: Rect) {
-    let block = Block::default().borders(Borders::ALL);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let title = Paragraph::new("TS-570D RADIO CONTROL")
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .alignment(Alignment::Center);
-    f.render_widget(title, inner);
+    header(
+        "TS-570D RADIO CONTROL",
+        Alignment::Center,
+        area,
+        f.buffer_mut(),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -160,28 +130,26 @@ pub fn draw_header(f: &mut Frame, area: Rect) {
 
 /// Draw the poll error panel.
 ///
-/// Shows "No errors" (dim green) when `state.poll_errors` is empty, or up to
-/// 3 error lines (red) from the most recent poll cycle.
+/// The slot is reserved whether or not anything went wrong, so an empty
+/// list draws "No errors" rather than nothing — an empty bordered box
+/// reads as a panel that has failed, not one with nothing to say.
+///
+/// One thing changed when this moved onto the shared widget: the three
+/// errors shown are now the **most recent** three rather than the first
+/// three. A radio failing in a loop used to pin this panel to its oldest
+/// failures and never show the current one. Recorded in
+/// `docs/renderer-parity.md`.
 pub fn draw_errors(f: &mut Frame, area: Rect, state: &RadioDisplay) {
-    let block = Block::default().title(" Errors ").borders(Borders::ALL);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    if state.poll_errors.is_empty() {
-        let no_err = Paragraph::new(Line::from(Span::styled(
-            "No errors",
-            Style::default().fg(Color::DarkGray),
-        )));
-        f.render_widget(no_err, inner);
-    } else {
-        let lines: Vec<Line> = state
-            .poll_errors
-            .iter()
-            .take(3)
-            .map(|e| Line::from(Span::styled(e.as_str(), Style::default().fg(Color::Red))))
-            .collect();
-        f.render_widget(Paragraph::new(lines), inner);
-    }
+    error_panel(
+        &state.poll_errors,
+        "Errors",
+        ErrorPanelStyles {
+            error: Style::default().fg(Color::Red),
+            quiet: Some(("No errors", Style::default().fg(Color::DarkGray))),
+        },
+        area,
+        f.buffer_mut(),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -190,54 +158,22 @@ pub fn draw_errors(f: &mut Frame, area: Rect, state: &RadioDisplay) {
 
 /// Draw a full-panel overlay when the radio is unreachable or still connecting.
 ///
-/// When `initializing` is true the radio has not yet responded — show "Connecting...".
-/// When `initializing` is false the radio was connected but has gone silent — show "CONNECTION LOST".
+/// This replaces the control panel outright, so the `[Q] Quit` footer is
+/// the only thing on screen telling the operator which key still works.
 pub fn draw_disconnected(f: &mut Frame, area: Rect, errors: &[String], initializing: bool) {
-    let lines: Vec<Line> = if initializing {
-        vec![
-            Line::from(Span::styled(
-                "Connecting to radio...",
-                Style::default().fg(Color::Yellow),
-            )),
-            Line::from(""),
-            Line::from("Waiting for response. This may take a few seconds."),
-            Line::from(""),
-            Line::from(Span::styled("[Q] Quit", Style::default().fg(Color::White))),
-        ]
+    let state = if initializing {
+        LinkState::Connecting
     } else {
-        let mut v: Vec<Line> = vec![
-            Line::from(Span::styled(
-                "CONNECTION LOST",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from("The radio is not responding."),
-            Line::from("Reconnect the cable or restart the radio."),
-            Line::from("The UI will recover automatically when contact is restored."),
-            Line::from(""),
-        ];
-        for e in errors.iter().take(8) {
-            v.push(Line::from(Span::styled(
-                e.as_str(),
-                Style::default().fg(Color::Yellow),
-            )));
-        }
-        v.push(Line::from(""));
-        v.push(Line::from(Span::styled(
-            "[Q] Quit",
-            Style::default().fg(Color::White),
-        )));
-        v
+        LinkState::Lost
     };
-
-    let p = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Radio Status "),
-        )
-        .wrap(Wrap { trim: false });
-    f.render_widget(p, area);
+    link_panel(
+        state,
+        errors,
+        "Radio Status",
+        Some(Span::styled("[Q] Quit", Style::default().fg(Color::White))),
+        area,
+        f.buffer_mut(),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -267,15 +203,15 @@ pub fn draw_ui(f: &mut Frame, area: Rect, state: &RadioDisplay) {
     // Row 1 — Primary
     // -----------------------------------------------------------------------
 
-    let bar = smeter_bar(state.smeter);
-    let label = smeter_label(state.smeter);
+    let smeter = smeter_reading(state);
+    let label = smeter.map(|r| r.s_unit()).unwrap_or("--");
     let (tx_text, tx_color) = if state.tx {
         ("TX", Color::Red)
     } else {
         ("RX", Color::Green)
     };
 
-    let line1 = Line::from(vec![
+    let mut line1_spans = vec![
         Span::styled("VFO A  ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             format_hz(state.vfo_a_hz),
@@ -289,7 +225,29 @@ pub fn draw_ui(f: &mut Frame, area: Rect, state: &RadioDisplay) {
             Style::default().fg(Color::Cyan),
         ),
         Span::raw("  S "),
-        Span::styled(bar, Style::default().fg(Color::Green)),
+        Span::styled("▐", Style::default().fg(Color::Green)),
+    ];
+    // The end caps are layout and stay here; the 20 cells between them are
+    // the shared bar. Both halves keep the green this panel has always
+    // used -- the block characters carry the contrast -- so the only thing
+    // an operator sees change is that the bar now resolves eight sub-levels
+    // per cell instead of whole cells.
+    line1_spans.extend(match smeter {
+        Some(r) => meter_spans(
+            r,
+            20,
+            Style::default().fg(Color::Green),
+            Style::default().fg(Color::Green),
+        ),
+        None => bar_spans(
+            0.0,
+            20,
+            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::DarkGray),
+        ),
+    });
+    line1_spans.extend([
+        Span::styled("▌", Style::default().fg(Color::Green)),
         Span::raw(" "),
         Span::styled(format!("{:<6}", label), Style::default().fg(Color::Green)),
         Span::styled(
@@ -297,6 +255,7 @@ pub fn draw_ui(f: &mut Frame, area: Rect, state: &RadioDisplay) {
             Style::default().fg(tx_color).add_modifier(Modifier::BOLD),
         ),
     ]);
+    let line1 = Line::from(line1_spans);
 
     let mut line2_spans = vec![
         Span::styled("VFO B  ", Style::default().fg(Color::DarkGray)),
@@ -353,34 +312,34 @@ pub fn draw_ui(f: &mut Frame, area: Rect, state: &RadioDisplay) {
     let filled_style = Style::default().fg(Color::Yellow);
     let empty_style = Style::default().fg(Color::DarkGray);
 
-    let af_bar = mini_bar(state.af_gain as f64 / 255.0, 10);
-    let rf_bar = mini_bar(state.rf_gain as f64 / 255.0, 10);
-    let mic_bar = mini_bar(state.mic_gain as f64 / 100.0, 10);
+    // These used to build a bar string and then filter it character by
+    // character back into the two halves the line needs. `bar_spans`
+    // returns those halves directly -- it is the same bar `meter_bar`
+    // draws, in the shape this panel composes in.
+    let af = bar_spans(state.af_gain as f32 / 255.0, 10, filled_style, empty_style);
+    let rf = bar_spans(state.rf_gain as f32 / 255.0, 10, filled_style, empty_style);
+    let mic = bar_spans(state.mic_gain as f32 / 100.0, 10, filled_style, empty_style);
 
-    let af_filled: String = af_bar.chars().filter(|&c| c == '█').collect();
-    let af_empty: String = af_bar.chars().filter(|&c| c == '░').collect();
-    let rf_filled: String = rf_bar.chars().filter(|&c| c == '█').collect();
-    let rf_empty: String = rf_bar.chars().filter(|&c| c == '░').collect();
-    let mic_filled: String = mic_bar.chars().filter(|&c| c == '█').collect();
-    let mic_empty: String = mic_bar.chars().filter(|&c| c == '░').collect();
-
-    let gains_line = Line::from(vec![
+    let mut gain_spans = vec![
         Span::styled("AF:", label_style),
         Span::styled("[", bracket_style),
-        Span::styled(af_filled, filled_style),
-        Span::styled(af_empty, empty_style),
+    ];
+    gain_spans.extend(af);
+    gain_spans.extend([
         Span::styled("]", bracket_style),
         Span::raw("  "),
         Span::styled("RF:", label_style),
         Span::styled("[", bracket_style),
-        Span::styled(rf_filled, filled_style),
-        Span::styled(rf_empty, empty_style),
+    ]);
+    gain_spans.extend(rf);
+    gain_spans.extend([
         Span::styled("]", bracket_style),
         Span::raw("  "),
         Span::styled("MIC:", label_style),
         Span::styled("[", bracket_style),
-        Span::styled(mic_filled, filled_style),
-        Span::styled(mic_empty, empty_style),
+    ]);
+    gain_spans.extend(mic);
+    gain_spans.extend([
         Span::styled("]", bracket_style),
         Span::raw("  "),
         Span::styled("SQL:", label_style),
@@ -392,6 +351,7 @@ pub fn draw_ui(f: &mut Frame, area: Rect, state: &RadioDisplay) {
         Span::styled("AGC:", label_style),
         Span::styled(agc_label(state.agc), value_style),
     ]);
+    let gains_line = Line::from(gain_spans);
 
     f.render_widget(Paragraph::new(gains_line), rows[1]);
 
@@ -545,36 +505,16 @@ pub fn draw_ui(f: &mut Frame, area: Rect, state: &RadioDisplay) {
 // draw_control_panel
 // ---------------------------------------------------------------------------
 
-/// Build a column of menu lines from (key, label) pairs.
-fn build_menu_column<'a>(items: &[(&'static str, &'static str)]) -> Vec<Line<'a>> {
-    let key_style = Style::default()
+/// The yellow-key styling both menu columns use.
+///
+/// The columns themselves come from `cat_ui_ratatui::menu_column`, which
+/// is generic over both cell types -- this crate had two copies of it that
+/// differed only in whether the labels were `&'static str` or built at
+/// runtime.
+fn menu_key_style() -> Style {
+    Style::default()
         .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    items
-        .iter()
-        .map(|(key, label)| {
-            Line::from(vec![
-                Span::styled(format!("[{}]", key), key_style),
-                Span::raw(format!(" {}", label)),
-            ])
-        })
-        .collect()
-}
-
-/// Build a column of menu lines from (key_str, label_str) pairs (owned strings).
-fn build_menu_column_owned(items: Vec<(String, String)>) -> Vec<Line<'static>> {
-    let key_style = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    items
-        .into_iter()
-        .map(|(key, label)| {
-            Line::from(vec![
-                Span::styled(format!("[{}]", key), key_style),
-                Span::raw(format!(" {}", label)),
-            ])
-        })
-        .collect()
+        .add_modifier(Modifier::BOLD)
 }
 
 /// Draw the interactive control panel.
@@ -623,8 +563,14 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
                 ("Q", "Quit"),
             ];
 
-            f.render_widget(Paragraph::new(build_menu_column(left)), cols[0]);
-            f.render_widget(Paragraph::new(build_menu_column(right)), cols[1]);
+            f.render_widget(
+                Paragraph::new(menu_column(left, menu_key_style(), Style::default())),
+                cols[0],
+            );
+            f.render_widget(
+                Paragraph::new(menu_column(right, menu_key_style(), Style::default())),
+                cols[1],
+            );
             f.render_widget(Paragraph::new(">"), prompt_area);
         }
 
@@ -664,9 +610,16 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(content_area);
 
-            f.render_widget(Paragraph::new(build_menu_column_owned(left_items)), cols[0]);
             f.render_widget(
-                Paragraph::new(build_menu_column_owned(right_items)),
+                Paragraph::new(menu_column(&left_items, menu_key_style(), Style::default())),
+                cols[0],
+            );
+            f.render_widget(
+                Paragraph::new(menu_column(
+                    &right_items,
+                    menu_key_style(),
+                    Style::default(),
+                )),
                 cols[1],
             );
             f.render_widget(Paragraph::new(">"), prompt_area);
@@ -1037,14 +990,64 @@ mod tests {
         assert_eq!(format_hz(7_250_000), "7.250.000 MHz");
     }
 
-    #[test]
-    fn test_smeter_label_s5() {
-        assert_eq!(smeter_label(11), "S5");
+    /// The table this console shipped with, before any of it moved into a
+    /// shared crate. Written out in full rather than referenced, so that a
+    /// change to `SUnitScale::TS570D` upstream shows up here as a failure
+    /// rather than as agreement.
+    fn as_shipped(smeter: u16) -> &'static str {
+        match smeter {
+            0..=2 => "S0",
+            3..=4 => "S1",
+            5..=6 => "S2",
+            7..=8 => "S3",
+            9..=10 => "S4",
+            11..=12 => "S5",
+            13..=14 => "S6",
+            15..=16 => "S7",
+            17..=18 => "S8",
+            19..=20 => "S9",
+            21..=24 => "S9+10",
+            25..=28 => "S9+20",
+            _ => "S9+30",
+        }
     }
 
     #[test]
-    fn test_smeter_label_s9plus() {
-        assert_eq!(smeter_label(21), "S9+10");
+    fn every_value_the_meter_can_report_still_reads_the_way_it_always_has() {
+        // The acceptance bar for moving onto shared widgets (radio-cat-rs
+        // ADR 0011 rev 4) is that the operator sees no change. For the
+        // S-unit readout that is checkable exhaustively, so it is: the
+        // meter reports 0-30 and this walks all 31.
+        //
+        // It also exercises the whole migrated path rather than a formula
+        // -- capabilities to `MeterReading` to label -- so it fails if the
+        // radio stops publishing its table, not only if the table changes.
+        for raw in 0..=30u16 {
+            let state = RadioDisplay {
+                smeter: raw,
+                ..Default::default()
+            };
+            let reading = smeter_reading(&state).expect("this radio has an S meter");
+            assert_eq!(
+                reading.s_unit(),
+                as_shipped(raw),
+                "raw {raw} changed meaning"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reading_carries_this_radios_range_and_not_some_other_ones() {
+        // 15 is mid-scale here and under 6% on an FT-991A. Getting the
+        // range from capabilities rather than a literal is what keeps the
+        // bar honest.
+        let state = RadioDisplay {
+            smeter: 15,
+            ..Default::default()
+        };
+        let reading = smeter_reading(&state).unwrap();
+        assert_eq!(reading.range.max, 30);
+        assert_eq!(reading.fraction(), 0.5);
     }
 
     #[test]

@@ -19,6 +19,14 @@ thiserror = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 
+# Shared console logic and terminal widgets (radio-cat-rs ADR 0011 rev 4).
+# What stays in this crate is the TS-570D's LAYOUT and FEATURE SET; what
+# moves out is anything with one correct answer per input. The acceptance
+# bar for the migration is that the operator sees no change.
+cat-ui = { workspace = true }
+cat-ui-ratatui = { workspace = true }
+cat-framework = { workspace = true }
+
 [dev-dependencies]
 
 [features]
