@@ -1,0 +1,28 @@
+[package]
+name = "gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GPU-rendered TS-570D console (egui/wgpu), speaking the native protocol"
+rust-version.workspace = true
+
+[[bin]]
+name = "ts570d-gui"
+path = "src/main.rs"
+
+[dependencies]
+# ADR 0008 section 3. This crate owns THIS RADIO'S layout, feature set and
+# visual identity, and nothing else. Notably absent, and deliberately:
+# `radio` (the GUI is network-only and never speaks CAT), any
+# `cat-transport-*`, and `cat-framework` directly -- `cat-native`
+# re-exports the vocabulary its own wire types are written in.
+cat-native = { workspace = true }
+cat-ui = { workspace = true }
+cat-ui-egui = { workspace = true }
+cat-signal = { workspace = true }
+
+eframe = { workspace = true }
+egui = { workspace = true }
+
+[dev-dependencies]

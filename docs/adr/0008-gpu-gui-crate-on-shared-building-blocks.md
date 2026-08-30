@@ -130,10 +130,33 @@ Extending `CLAUDE.md`'s existing numbered rules:
 `server` publishes `RadioCapabilities` on connect and serves ADR 0010 §6's
 native typed protocol on its own port. Rigctl stays a **compatibility
 layer** on its own port with unchanged wire behaviour, so WSJT-X does not
-regress. `server/src/rigctl_radio.rs` (269 lines) is **deleted**:
-`cat-rigctl` is reimplemented once over `RadioCapabilities`, so this radio
-gains rigctl support by describing itself rather than by hand-writing a
-bridge.
+regress.
+
+> **Amendment (2026-08-30): `rigctl_radio.rs` is not deleted.**
+>
+> This section said it would be — that `cat-rigctl` would be "reimplemented
+> once over `RadioCapabilities`", leaving nothing per-radio. That is not
+> what radio-cat-rs Task 17 delivered, and on inspection it is not what it
+> should have delivered.
+>
+> What is genuinely derivable from capabilities is the *description* of the
+> radio: `\dump_state`'s tail — coverage, tuning steps, filter widths,
+> RIT/XIT limits. That is now generated, and this radio publishes real
+> values instead of the placeholder it had been sending WSJT-X for its
+> whole life (one 10 Hz step, ±1200 Hz RIT; the truth is six steps and
+> ±9999).
+>
+> What is **not** derivable is the *typed delegation*: `get_vfo_a_hz`,
+> `set_mode`, `transmit`, and the Hamlib mode-name mapping. Those call this
+> radio's own client methods, and a capability set does not contain a
+> function pointer. `rigctl_radio.rs` is that seam, it is well tested, and
+> deleting it would delete WSJT-X support rather than generalise it.
+>
+> So the file shrank rather than vanished: what it stopped carrying is the
+> part that restated what capabilities now declare. Verified against a live
+> Hamlib 4.6.5 client, in CI, because a `\dump_state` reply Hamlib
+> disagrees with about length makes `netrigctl_open()` block forever rather
+> than fail (radio-cat-rs ADR 0005).
 
 ### Framework choice: egui/eframe on wgpu
 
@@ -203,6 +226,33 @@ repo's Apache-2.0 before it could be considered at all.
 - **The visual design.** A design process runs separately and feeds
   requirements + acceptance criteria into the normal spine.
 - **Packaging.** `packaging/` gains a GUI target later; not decided here.
+
+## What starting the crate found (2026-08-30)
+
+Three things the ADR assumed, which were not true:
+
+1. **"The ADR 0010 protocol client" did not exist.** The protocol lived
+   inside `cat-server`, which pulls monoio and every transport — precisely
+   what §2 says the GUI must not need. Fixed upstream by extracting
+   `cat-native` (radio-cat-rs v0.4.0), which also gave the protocol its
+   first test on an actual socket.
+
+2. **§3's "never depends on `cat-framework`" was unsatisfiable as
+   written**, because `CapabilitiesWire` is *written in* `cat-framework`'s
+   vocabulary — `ModeId`, `MeterKind`, `RawRange`. Fixed by having
+   `cat-native` re-export that vocabulary (v0.4.1), which is better API
+   regardless: a client crate that makes a caller add a second dependency
+   to read its own return values is badly factored. The rule stands, and
+   `gui/Cargo.toml` satisfies it.
+
+3. **The protocol has no read side.** `Command::ReadMeter` validates that
+   the meter exists and answers `Ack` without a reading; nothing reports
+   the dial, the mode or the split state. A console on this protocol can
+   send and cannot see. The GUI draws every unknown value as `—` rather
+   than as zero — which is the honest rendering, and is also what must
+   happen between connecting and the first state arriving on any protocol.
+   This is the next protocol change, and it is tracked in
+   `docs/renderer-parity.md`.
 
 ## Consequences
 
