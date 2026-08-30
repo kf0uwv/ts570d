@@ -14,16 +14,29 @@ Development cost is explicitly **not** a ground.
 
 ## Capability parity: TUI vs GUI
 
-**The GUI does not exist yet.** Every capability below is therefore
-TUI-only under ground (c), and this table collapses to a single row rather
-than one per feature — enumerating forty rows that all say "the GUI has not
-been written" would be noise, not a record. It becomes a real table the
-moment the first GUI panel ships, at which point anything still missing
-needs its own row.
+The GUI now exists (`gui/`, `ts570d-gui`), so this is a real table.
+
+It runs mostly in the **other** direction from what was expected: the
+first GUI slice brought the accepted design's structure — capability-derived
+workspaces, a persistent status strip, a command line — and the TUI does
+not have those yet. ADR 0008's design direction says option 3 is for *both*
+renderers, so these are ground (c) and tracked, not permanent.
 
 | capability | missing from | ground | tracking |
 |---|---|---|---|
-| all of them | GUI | (c) | the GUI console, not yet started |
+| Waterfall / spectrum | TUI | (c) | ADR 0008 is explicit that the TUI gets a **coarse, low-rate rendering of the same `SpectrumFrame`s, not an absence**. `cat-ui-ratatui::waterfall` already exists; the TUI is not yet wired to a frame source. |
+| Capability-derived workspaces (tabs) | TUI | (c) | `gui::workspace::tabs` is renderer-agnostic and takes a `CapabilitiesWire`. The TUI can call the same function. |
+| `:` command line | TUI | (c) | `gui::command::parse` is renderer-agnostic for the same reason. |
+| Quick-settings bar | TUI | (c) | The TUI shows mode, AF/RF/MIC and AGC already, but as a **readout**, not as controls. `gui::quick::controls` derives the control set from capabilities and the TUI can use it. |
+| Click-to-tune on the waterfall | TUI | **(b)** | A terminal has no pixel-accurate pointing gesture over a 20-column bar. The TUI reaches the same capability by `:t <freq>` — the same `Command::Retune`. **This one is permanent.** |
+| Attached-source view (SOURCE tab) | TUI | (c) | Waiting on the same thing the GUI is: the protocol does not report installation state yet. |
+
+### Neither renderer has these, and it is not their fault
+
+| capability | ground | why |
+|---|---|---|
+| Frequency, mode, split, meter **readout** | (c) | **The native protocol has no read side.** `Command::ReadMeter` validates that the meter exists and answers `Ack` without a reading, and no command reports the dial. A console on this protocol can send and cannot see. The GUI draws every unknown value as `—` rather than as zero, which is the honest rendering and is also what has to happen anyway between connecting and the first state arriving. Tracked as the next protocol change. |
+| Live spectrum from the CN4 tap | (c) | `cat-signal-rtlsdr`'s device layer is behind a default-off feature (radio-cat-rs ADR 0014 §5), and no server serves the native protocol yet — `ServerConfig` has no port for it. |
 
 ## Operator-visible changes from the shared-widget migration
 
