@@ -18,6 +18,12 @@ radio = { path = "../radio" }
 # exception, same as the `radio` dependency above.
 cat-framework = { workspace = true }
 
+# The native protocol and its blocking listener, so the emulator can be a
+# dummy radio a console connects to -- and a band of synthetic signals to
+# put in front of it.
+cat-native = { workspace = true }
+cat-signal = { workspace = true }
+
 # Error handling
 thiserror = { workspace = true }
 

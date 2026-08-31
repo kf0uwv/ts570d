@@ -50,6 +50,7 @@ pub struct Console {
     command_text: String,
     /// The last thing the console has to say to the operator.
     status: String,
+    last_state_request: std::time::Instant,
 }
 
 impl Console {
@@ -75,6 +76,7 @@ impl Console {
             command_open: false,
             command_text: String::new(),
             status: String::new(),
+            last_state_request: std::time::Instant::now(),
         }
     }
 
@@ -107,11 +109,23 @@ impl Console {
     /// Drain everything the reader thread has for us. Never blocks.
     fn pump(&mut self) {
         let mut lost = None;
+        let mut confirmed = None;
         if let Link::Up(client) = &self.link {
             while let Some(event) = client.try_event() {
                 match event {
                     Event::Reply(ServerMessage::Error { code, message }) => {
                         self.status = format!("{code:?}: {message}");
+                    }
+                    // The radio's own account of itself. It wins over
+                    // anything this console asked for -- see
+                    // `readout::Field::confirm`.
+                    Event::Reply(ServerMessage::State(state)) => {
+                        confirmed = Some(*state);
+                    }
+                    Event::Reply(ServerMessage::Meter(sample)) => {
+                        if sample.kind == cat_native::MeterKind::S {
+                            self.readout.smeter_raw.confirm(sample.raw);
+                        }
                     }
                     Event::Reply(_) => {}
                     Event::Disconnected(why) => {
@@ -124,9 +138,44 @@ impl Console {
                 self.latest = Some(frame);
             }
         }
+        if let Some(state) = confirmed {
+            self.readout.vfo_a_hz.confirm(state.vfo_a_hz);
+            self.readout.mode.confirm(state.mode);
+            self.readout.split.confirm(state.split);
+            if let Some(hz) = state.if_shift_hz {
+                self.readout.if_shift_hz.confirm(hz);
+            }
+            if let Some(hz) = state.filter_width_hz {
+                self.readout.filter_width_hz.confirm(hz);
+            }
+            if let Some(channel) = state.memory_channel {
+                self.readout.memory_channel.confirm(channel);
+            }
+            if let Some(raw) = state.meter(cat_native::MeterKind::S) {
+                self.readout.smeter_raw.confirm(raw);
+            }
+        }
         if let Some(why) = lost {
             self.status = format!("connection lost: {why}");
             self.link = Link::Down(why);
+        }
+    }
+
+    /// Ask the radio what it is doing, at a rate a human can read.
+    ///
+    /// Ten times a second, not per frame. State is request/response over
+    /// the same socket the spectrum uses, and asking at frame rate would
+    /// put sixty round trips a second in front of the traffic that
+    /// actually needs to be fast -- ADR 0011's two-rate discipline, which
+    /// exists precisely so a menu read cannot stall a waterfall.
+    fn poll_state(&mut self) {
+        const INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        if self.last_state_request.elapsed() < INTERVAL {
+            return;
+        }
+        self.last_state_request = std::time::Instant::now();
+        if let Link::Up(client) = &self.link {
+            client.request_state();
         }
     }
 
@@ -173,7 +222,8 @@ impl Console {
             Command::SetIfShift { hz } => self.readout.if_shift_hz.request(*hz),
             Command::SetFilterWidth { hz } => self.readout.filter_width_hz.request(*hz),
             Command::SetMemoryChannel { channel } => self.readout.memory_channel.request(*channel),
-            Command::ReadMeter { .. } => {}
+            // Reads ask a question; they do not request a change.
+            Command::ReadMeter { .. } | Command::ReadState => {}
         }
     }
 }
@@ -492,6 +542,7 @@ impl Console {
 impl eframe::App for Console {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
+        self.poll_state();
         // Spectrum arrives on its own schedule, not on input, so the
         // console has to ask to be woken rather than waiting for a click.
         ctx.request_repaint_after(std::time::Duration::from_millis(33));

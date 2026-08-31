@@ -16,6 +16,52 @@ The emulator creates a PTY pair and prints the slave device path (e.g. `/dev/pts
 ts570d-control --port /dev/pts/4
 ```
 
+## Network interface (a dummy radio for a console)
+
+```sh
+ts570d-emulator --native 127.0.0.1:4532
+```
+
+Serves the native typed protocol alongside the PTY, and prints the bound
+address as `NATIVE_LISTEN=…` so a script can find it. Point the GUI at it:
+
+```sh
+ts570d-gui 127.0.0.1:4532
+```
+
+**It is the same radio.** A native command is translated into the CAT frame
+a real client would have sent and fed to the same emulated radio the PTY
+serves, so tuning over the network moves this emulator's own display. A
+second state machine would be a dummy radio that disagrees with the dummy
+radio, and the first time the two drifted it would look exactly like a
+console bug.
+
+### Synthetic signals
+
+The emulator generates a spectrum with signals in it, so a waterfall has
+something to look like and click-to-tune has somewhere to tune to. Five
+kinds, with genuinely different shapes:
+
+| | width | behaviour |
+|---|---|---|
+| CW | ~100 Hz | keys on and off at sending speed |
+| Digital | ~50 Hz | 15-second slots, hard edges, FT8-shaped |
+| SSB | ~2.6 kHz | leans to its sideband, restless |
+| AM | ~6 kHz | carrier plus two symmetric sidebands |
+| Noise | ~20 kHz | flat and wide — deliberately *not* a signal |
+
+Signals live at **absolute frequencies**, and the window follows the dial
+the way an IF tap does. So retuning moves the window over a fixed
+landscape: tune to a carrier and it comes to the centre. They are crowded
+into the HF amateur bands, with the space between them close to empty,
+because a console that only ever sees busy spectrum is never tested
+against a quiet band.
+
+`--seed <n>` chooses the band. The same seed gives the same signals in the
+same places every run, which is what lets "the carrier that was here
+yesterday" be a useful thing to say while debugging a console. The default
+is fixed for that reason; pass a different one for a different band.
+
 ## Interface
 
 The emulator TUI has two panels:
