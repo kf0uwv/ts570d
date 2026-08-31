@@ -40,6 +40,25 @@ fn main() {
         lf
     };
 
+    // Optional `--native <addr>` and `--seed <n>`.
+    let (native_addr, native_seed) = {
+        let mut addr = None;
+        let mut seed = 0x5713_0DEFu64;
+        let mut it = args.iter().peekable();
+        while let Some(arg) = it.next() {
+            match arg.as_str() {
+                "--native" => addr = it.next().cloned(),
+                "--seed" => {
+                    if let Some(v) = it.next().and_then(|v| v.parse().ok()) {
+                        seed = v;
+                    }
+                }
+                _ => {}
+            }
+        }
+        (addr, seed)
+    };
+
     // Determine port mode from --port argument.
     let mode = port::parse_port_arg(args.into_iter());
 
@@ -69,6 +88,20 @@ fn main() {
     };
 
     let mut emu = Emulator::from_port(serial_port, slave_path);
+
+    // Optional network front-end: a dummy radio a console can connect to.
+    // The same emulated radio serves both, so tuning over the network
+    // moves this emulator's own display.
+    if let Some(addr) = native_addr {
+        // A fixed default seed rather than a random one. The band should
+        // look the same every run unless somebody asks otherwise -- "the
+        // signal that was here yesterday" is a useful thing to be able to
+        // say while debugging a console.
+        if let Err(err) = emulator::network::serve(emu.radio(), &addr, native_seed) {
+            eprintln!("Failed to serve the native protocol on {addr}: {err}");
+            std::process::exit(1);
+        }
+    }
 
     // Set up Ctrl-C handler for graceful shutdown.
     ctrlc::set_handler(|| {

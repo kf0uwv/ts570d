@@ -25,12 +25,26 @@ use serialport::SerialPort;
 
 use cat_framework::CatFramework;
 use radio::Ts570dRadio;
+use std::sync::{Arc, Mutex};
 
 use crate::io::EmulatorIo;
 use crate::logger::{now_ms, BackgroundLogger, LogEvent};
 use crate::pty::PtyPair;
 use crate::tui;
 use crate::EmulatorError;
+
+/// The emulated radio, shared between the serial front-end and the network
+/// one.
+///
+/// A `Mutex` rather than anything cleverer: the contended path is a human
+/// turning a dial and a console polling thirty times a second, which is
+/// not contention.
+pub type SharedRadio = Arc<Mutex<CatFramework<Ts570dRadio>>>;
+
+/// A fresh emulated radio.
+pub fn new_shared_radio() -> SharedRadio {
+    Arc::new(Mutex::new(CatFramework::new(Ts570dRadio::new())))
+}
 
 /// Maximum number of log entries kept for the TUI command panel.
 const LOG_LIMIT: usize = 40;
@@ -46,7 +60,13 @@ pub struct Emulator {
     /// Cached slave device path.
     slave_path: String,
     io: EmulatorIo,
-    framework: CatFramework<Ts570dRadio>,
+    /// The emulated radio, behind a lock.
+    ///
+    /// Shared rather than owned because the network interface is a
+    /// **second front-end onto the same radio**, not a second radio. A
+    /// separate state for the socket would be a dummy that disagrees with
+    /// the dummy on the PTY, which is worse than having no socket.
+    framework: SharedRadio,
     /// Rolling command/response log for the TUI command panel.
     log: VecDeque<String>,
 }
@@ -61,7 +81,7 @@ impl Emulator {
         // Take the master port out of PtyPair for use by EmulatorIo.
         let master = pty.take_master();
         let io = EmulatorIo::from_port(master);
-        let framework = CatFramework::new(Ts570dRadio::new());
+        let framework = new_shared_radio();
         Ok(Emulator {
             _pty: Some(pty),
             slave_path,
@@ -77,7 +97,7 @@ impl Emulator {
     /// The caller is responsible for printing status before calling this.
     pub fn from_port(port: Box<dyn SerialPort>, slave_path: String) -> Self {
         let io = EmulatorIo::from_port(port);
-        let framework = CatFramework::new(Ts570dRadio::new());
+        let framework = new_shared_radio();
         Emulator {
             _pty: None,
             slave_path,
@@ -85,6 +105,12 @@ impl Emulator {
             framework,
             log: VecDeque::new(),
         }
+    }
+
+    /// The radio this emulator is running, for a second front-end to
+    /// share.
+    pub fn radio(&self) -> SharedRadio {
+        Arc::clone(&self.framework)
     }
 
     /// Return the slave PTY path (e.g. `/dev/pts/5`).
@@ -104,7 +130,11 @@ impl Emulator {
                     for cmd in cmds {
                         let mut response = Vec::new();
                         let frame = format!("{};", cmd);
-                        let _ = self.framework.process_frame(&frame, &mut response);
+                        let _ = self
+                            .framework
+                            .lock()
+                            .unwrap()
+                            .process_frame(&frame, &mut response);
                         if !response.is_empty() {
                             self.io
                                 .write_response(&String::from_utf8_lossy(&response))?;
@@ -150,7 +180,12 @@ impl Emulator {
                     for cmd in cmds {
                         let mut response = Vec::new();
                         let frame = format!("{};", cmd);
-                        let outcome = self.framework.process_frame(&frame, &mut response).ok();
+                        let outcome = self
+                            .framework
+                            .lock()
+                            .unwrap()
+                            .process_frame(&frame, &mut response)
+                            .ok();
                         let response_text = String::from_utf8_lossy(&response).into_owned();
                         if !response_text.is_empty() {
                             self.io.write_response(&response_text)?;
@@ -234,8 +269,10 @@ impl Emulator {
             // 1. Draw the current state.
             let slave_path = self.slave_path.clone();
             let log_slice: Vec<String> = self.log.iter().cloned().collect();
-            terminal
-                .draw(|f| tui::draw(f, self.framework.radio().state(), &slave_path, &log_slice))?;
+            terminal.draw(|f| {
+                let guard = self.framework.lock().unwrap();
+                tui::draw(f, guard.radio().state(), &slave_path, &log_slice)
+            })?;
 
             // 2. Poll for keyboard events (non-blocking, 10 ms window).
             if event::poll(Duration::from_millis(10))? {
@@ -262,7 +299,11 @@ impl Emulator {
                     for cmd in cmds {
                         let mut response = Vec::new();
                         let frame = format!("{};", cmd);
-                        let _ = self.framework.process_frame(&frame, &mut response);
+                        let _ = self
+                            .framework
+                            .lock()
+                            .unwrap()
+                            .process_frame(&frame, &mut response);
                         let response = String::from_utf8_lossy(&response).into_owned();
                         // 5. Append to command log.
                         self.log_entry(&cmd, &response);
