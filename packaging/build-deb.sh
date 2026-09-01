@@ -16,8 +16,28 @@ STAGING="${ROOT}/target/debian/${PKG}"
 
 # ── 1. Build release binaries ────────────────────────────────────────────────
 if [[ "${1:-}" != "--skip-build" ]]; then
-    echo "==> cargo build --release"
-    (cd "${ROOT}" && cargo build --release)
+    # --workspace is load-bearing. The root Cargo.toml is a workspace root
+    # that is ALSO a package, and in that layout a bare `cargo build`
+    # builds only the root package and its dependencies. `emulator` and
+    # `pin-test` are members nothing at the root depends on, so they were
+    # never rebuilt -- the staging step below then installed whatever
+    # happened to be left in target/release from some earlier build.
+    #
+    # That shipped silently: the 0.3.0 package built this way carried an
+    # emulator eight days old, from before it had a network interface at
+    # all. A stale binary in a package is worse than a build failure,
+    # because nothing anywhere says so.
+    echo "==> cargo build --release --workspace"
+    (cd "${ROOT}" && cargo build --release --workspace)
+
+    # `pin-test` is not in this workspace at all any more -- it moved to
+    # radio-cat-rs's cat-transport-serial as a shared [[bin]] (CLAUDE.md).
+    # Without this line the staging step below installed an orphan: a
+    # binary left in target/release by a build predating the move, from
+    # source this repo no longer contains. On a clean checkout it would
+    # instead fail here with a missing file, which is at least loud.
+    echo "==> cargo build --release -p cat-transport-serial --bin pin-test"
+    (cd "${ROOT}" && cargo build --release -p cat-transport-serial --bin pin-test)
 fi
 
 RELEASE="${ROOT}/target/release"
@@ -35,6 +55,18 @@ install -m 0755 "${RELEASE}/ts570d"      "${STAGING}/usr/bin/ts570d-control"
 install -m 0755 "${RELEASE}/emulator"    "${STAGING}/usr/bin/ts570d-emulator"
 install -m 0755 "${RELEASE}/pin-test"    "${STAGING}/usr/bin/rs232c-pintest"
 install -m 0755 "${RELEASE}/ts570d-line" "${STAGING}/usr/bin/ts570d-line"
+install -m 0755 "${RELEASE}/ts570d-gui"  "${STAGING}/usr/bin/ts570d-gui"
+
+# Refuse to package anything older than this build. The failure that
+# motivates this shipped an eight-day-old emulator inside a package
+# labelled with today's version, and nothing anywhere said so -- a stale
+# binary is worse than a build failure precisely because it is quiet.
+NEWEST_SOURCE="$(find "${ROOT}" -name '*.rs' -newer "${STAGING}/usr/bin/ts570d-control" -not -path '*/target/*' -print -quit)"
+if [[ -n "${NEWEST_SOURCE}" ]]; then
+    echo "ERROR: ${NEWEST_SOURCE} is newer than the binaries being packaged." >&2
+    echo "       Re-run without --skip-build." >&2
+    exit 1
+fi
 
 # Control file (substitute version)
 sed "s/^Version:.*/Version: ${VERSION}/" \
