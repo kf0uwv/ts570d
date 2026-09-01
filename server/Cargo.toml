@@ -38,6 +38,15 @@ cat-rigctl = { workspace = true }
 # invented (radio-cat-rs ADR 0010 section 6).
 cat-framework = { workspace = true }
 
+# The console protocol's types, for `ConsoleTs570d`.
+cat-native = { workspace = true }
+
+# The CN4 tap. `cat-signal-rtlsdr`'s rtl_tcp client needs no C toolchain --
+# only the librtlsdr `device` feature does, and this does not enable it.
+cat-signal = { workspace = true }
+cat-signal-rtlsdr = { workspace = true }
+futures = { workspace = true }
+
 # Async traits (compatible with !Send futures for monoio).
 async-trait = { workspace = true }
 

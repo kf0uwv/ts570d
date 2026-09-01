@@ -327,8 +327,8 @@ dependencies = [
 
 [[package]]
 name = "cat-client"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -338,8 +338,8 @@ dependencies = [
 
 [[package]]
 name = "cat-framework"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "cat-signal",
  "serde",
@@ -348,8 +348,8 @@ dependencies = [
 
 [[package]]
 name = "cat-native"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "cat-framework",
  "cat-signal",
@@ -359,11 +359,12 @@ dependencies = [
 
 [[package]]
 name = "cat-rigctl"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "async-trait",
  "cat-framework",
+ "cat-native",
  "cat-server",
  "cat-signal",
  "cat-transport-core",
@@ -374,8 +375,8 @@ dependencies = [
 
 [[package]]
 name = "cat-server"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "async-trait",
  "cat-client",
@@ -393,8 +394,8 @@ dependencies = [
 
 [[package]]
 name = "cat-signal"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "async-trait",
  "serde",
@@ -402,8 +403,8 @@ dependencies = [
 
 [[package]]
 name = "cat-signal-rtlsdr"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "async-trait",
  "cat-signal",
@@ -412,8 +413,8 @@ dependencies = [
 
 [[package]]
 name = "cat-transport-core"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -423,8 +424,8 @@ dependencies = [
 
 [[package]]
 name = "cat-transport-serial"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -437,8 +438,8 @@ dependencies = [
 
 [[package]]
 name = "cat-transport-tcp"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -448,8 +449,8 @@ dependencies = [
 
 [[package]]
 name = "cat-transport-udp"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -459,8 +460,8 @@ dependencies = [
 
 [[package]]
 name = "cat-ui"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "cat-framework",
  "cat-signal",
@@ -468,8 +469,8 @@ dependencies = [
 
 [[package]]
 name = "cat-ui-egui"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "cat-framework",
  "cat-signal",
@@ -479,8 +480,8 @@ dependencies = [
 
 [[package]]
 name = "cat-ui-ratatui"
-version = "0.6.0"
-source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.6.0#bf9e7d2bde49df7a8dd4018c24d1ca9deb7b3508"
+version = "0.7.3"
+source = "git+https://github.com/kf0uwv/radio-cat-rs?tag=v0.7.3#8646682b3e5d267d14575951dcccafcc1abc25c1"
 dependencies = [
  "cat-framework",
  "cat-signal",
@@ -2845,9 +2846,13 @@ version = "0.3.0"
 dependencies = [
  "async-trait",
  "cat-framework",
+ "cat-native",
  "cat-rigctl",
  "cat-server",
+ "cat-signal",
+ "cat-signal-rtlsdr",
  "cat-transport-core",
+ "futures",
  "monoio",
  "radio",
  "thiserror 1.0.69",

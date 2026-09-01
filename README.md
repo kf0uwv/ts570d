@@ -30,6 +30,26 @@ Installs three binaries to `/usr/bin/`:
 | `rs232c-pintest` | RS-232C wiring/pin diagnostic |
 | `ts570d-gui` | GPU console (egui/wgpu), network-only — needs a display |
 
+### Running the whole thing against a virtual radio
+
+```sh
+# 1. virtual hardware: a CAT port and a CN4 tap that looks like an RTL-SDR
+ts570d-emulator --cn4 127.0.0.1:1234
+#    PTY_SLAVE=/dev/pts/5
+#    CN4_TAP=127.0.0.1:1234
+
+# 2. the control program, owning the radio and serving consoles
+ts570d-control server --port /dev/pts/5 \
+    --console-port 4532 --cn4 127.0.0.1:1234
+
+# 3. a console
+ts570d-gui 127.0.0.1:4532
+```
+
+Swap step 1 for a real radio and a real dongle behind `rtl_tcp` and steps
+2 and 3 are unchanged — which is the point of the emulator presenting
+hardware interfaces rather than serving the console protocol itself.
+
 ### Windows
 
 Download the latest `ts570d-radio-control_<version>_windows-x86_64.zip` from
