@@ -18,10 +18,10 @@ radio = { path = "../radio" }
 # exception, same as the `radio` dependency above.
 cat-framework = { workspace = true }
 
-# The native protocol and its blocking listener, so the emulator can be a
-# dummy radio a console connects to -- and a band of synthetic signals to
-# put in front of it.
-cat-native = { workspace = true }
+# A band of synthetic signals for the spoofed CN4 tap. The emulator serves
+# rtl_tcp itself -- twelve bytes of greeting and then IQ -- so it needs no
+# client crate, and deliberately no `cat-native`: the emulator is a radio,
+# not a server.
 cat-signal = { workspace = true }
 
 # Error handling
@@ -42,6 +42,11 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 
 [dev-dependencies]
+# The tap is consumed in tests exactly as the control program will consume
+# it: through the real rtl_tcp client and the real DSP. A test that read
+# the emulator's own band directly would prove nothing about the wire.
+cat-signal-rtlsdr = { workspace = true }
+futures = { workspace = true }
 tempfile = { workspace = true }
 mockall = { workspace = true }
 libc = { workspace = true }
