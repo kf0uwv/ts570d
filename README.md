@@ -28,6 +28,7 @@ Installs three binaries to `/usr/bin/`:
 | `ts570d-control` | Main control application |
 | `ts570d-emulator` | Virtual radio emulator |
 | `rs232c-pintest` | RS-232C wiring/pin diagnostic |
+| `ts570d-gui` | GPU console (egui/wgpu), network-only — needs a display |
 
 ### Windows
 
