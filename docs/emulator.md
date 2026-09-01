@@ -16,31 +16,47 @@ The emulator creates a PTY pair and prints the slave device path (e.g. `/dev/pts
 ts570d-control --port /dev/pts/4
 ```
 
-## Network interface (a dummy radio for a console)
+## Virtual devices
+
+The emulator is a **radio**, not a server. It presents the interfaces a
+TS-570D presents, and the control program connects to them exactly as it
+would to the real thing:
+
+| device | how |
+|---|---|
+| CAT serial | a PTY, path printed as `PTY_SLAVE=…` |
+| CN4 IF tap | `--cn4 <addr>`, an RTL-SDR over `rtl_tcp`, printed as `CN4_TAP=…` |
 
 ```sh
-ts570d-emulator --native 127.0.0.1:4532
+ts570d-emulator --cn4 127.0.0.1:1234
 ```
 
-Serves the native typed protocol alongside the PTY, and prints the bound
-address as `NATIVE_LISTEN=…` so a script can find it. Point the GUI at it:
+An earlier version served the console's own network protocol directly.
+That was the wrong layer: it put the radio and the server in one box and
+made the control program unnecessary to test anything. The control program
+is the thing that owns a radio and serves consoles.
 
-```sh
-ts570d-gui 127.0.0.1:4532
-```
+### The CN4 tap is an RTL-SDR
 
-**It is the same radio.** A native command is translated into the CAT frame
-a real client would have sent and fed to the same emulated radio the PTY
-serves, so tuning over the network moves this emulator's own display. A
-second state machine would be a dummy radio that disagrees with the dummy
-radio, and the first time the two drifted it would look exactly like a
-console bug.
+It speaks `rtl_tcp` — librtlsdr's own protocol — so a virtual tap, a real
+dongle and an actual `rtl_tcp` server are interchangeable to everything
+downstream. The FFT, the windowing and the inversion correction all run for
+real against it.
+
+**The IQ is mirrored**, because that is what comes off CN4: a TS-570D's LO1
+is high-side, so its tapped spectrum arrives reversed. A tap that served
+un-mirrored IQ would make the control program's correction cancel a
+distortion that was never applied — right on the bench and wrong the moment
+real hardware appeared.
+
+**The window follows the dial.** The SDR is parked on the 73.05 MHz first
+IF and the radio's local oscillator does the tuning, so retuning over CAT
+moves the window. That is the property a console's click-to-tune depends
+on.
 
 ### Synthetic signals
 
-The emulator generates a spectrum with signals in it, so a waterfall has
-something to look like and click-to-tune has somewhere to tune to. Five
-kinds, with genuinely different shapes:
+Five kinds, with genuinely different shapes:
 
 | | width | behaviour |
 |---|---|---|
@@ -50,19 +66,21 @@ kinds, with genuinely different shapes:
 | AM | ~6 kHz | carrier plus two symmetric sidebands |
 | Noise | ~20 kHz | flat and wide — deliberately *not* a signal |
 
-Signals live at **absolute frequencies**, and the window follows the dial
-the way an IF tap does. So retuning moves the window over a fixed
-landscape: tune to a carrier and it comes to the centre. They are crowded
-into the HF amateur bands, with the space between them close to empty,
-because a console that only ever sees busy spectrum is never tested
-against a quiet band.
+They live at absolute frequencies and are crowded into the HF amateur
+bands, with the space between them close to empty: a console that only
+ever sees busy spectrum is never tested against a quiet band. Density is
+about one signal per 8 kHz of window, which leaves each one its own shape.
 
 `--seed <n>` chooses the band. The same seed gives the same signals in the
-same places every run, which is what lets "the carrier that was here
-yesterday" be a useful thing to say while debugging a console. The default
-is fixed for that reason; pass a different one for a different band.
+same places every run, so "the carrier that was here yesterday" is a useful
+thing to say while debugging a console.
 
-## Interface
+### Not yet
+
+**ACC2** — the audio path and the DTR PTT line. DTR is already real (it is
+a PTY modem line); the audio is not emulated yet.
+
+## Interface## Interface
 
 The emulator TUI has two panels:
 

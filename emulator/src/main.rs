@@ -40,14 +40,14 @@ fn main() {
         lf
     };
 
-    // Optional `--native <addr>` and `--seed <n>`.
-    let (native_addr, native_seed) = {
+    // Optional `--cn4 <addr>` and `--seed <n>`.
+    let (tap_addr, tap_seed) = {
         let mut addr = None;
         let mut seed = 0x5713_0DEFu64;
         let mut it = args.iter().peekable();
         while let Some(arg) = it.next() {
             match arg.as_str() {
-                "--native" => addr = it.next().cloned(),
+                "--cn4" => addr = it.next().cloned(),
                 "--seed" => {
                     if let Some(v) = it.next().and_then(|v| v.parse().ok()) {
                         seed = v;
@@ -89,17 +89,20 @@ fn main() {
 
     let mut emu = Emulator::from_port(serial_port, slave_path);
 
-    // Optional network front-end: a dummy radio a console can connect to.
-    // The same emulated radio serves both, so tuning over the network
-    // moves this emulator's own display.
-    if let Some(addr) = native_addr {
-        // A fixed default seed rather than a random one. The band should
-        // look the same every run unless somebody asks otherwise -- "the
-        // signal that was here yesterday" is a useful thing to be able to
-        // say while debugging a console.
-        if let Err(err) = emulator::network::serve(emu.radio(), &addr, native_seed) {
-            eprintln!("Failed to serve the native protocol on {addr}: {err}");
-            std::process::exit(1);
+    // Optional spoofed CN4 tap, presenting itself as an RTL-SDR over
+    // rtl_tcp. This is hardware, not a service: the control program
+    // connects to it exactly as it would to a real dongle.
+    //
+    // A fixed default seed rather than a random one. The band should look
+    // the same every run unless somebody asks otherwise -- "the signal
+    // that was here yesterday" is useful while debugging a console.
+    if let Some(addr) = tap_addr {
+        match emulator::tap::serve(emu.radio(), &addr, tap_seed) {
+            Ok(bound) => println!("CN4_TAP={bound}"),
+            Err(err) => {
+                eprintln!("Failed to serve the CN4 tap on {addr}: {err}");
+                std::process::exit(1);
+            }
         }
     }
 

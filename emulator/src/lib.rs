@@ -15,9 +15,9 @@
 pub mod emulator;
 pub mod io;
 pub mod logger;
-pub mod network;
 pub mod port;
 pub mod pty;
+pub mod tap;
 pub mod tui;
 
 #[derive(Debug, thiserror::Error)]
