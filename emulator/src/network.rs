@@ -187,21 +187,27 @@ impl RadioHost for EmulatedRadio {
 /// busy spectrum is never tested against a quiet one.
 ///
 /// `(low, high, emitters)`. The counts are chosen so a 48 kHz window
-/// inside a band usually holds a few signals: enough that the display has
-/// something to show, not so many that everything overlaps and the
-/// distinct emission shapes stop being visible.
+/// inside a band usually holds a handful of signals.
+///
+/// The first attempt at these was eight times too dense and the waterfall
+/// came out a solid wall of colour — one emitter every 1.2 kHz across
+/// 20 m, so a 48 kHz view held forty of them and nothing had any space
+/// around it. Only looking at it showed that; every test still passed,
+/// because "there is a signal in the window" was exactly what they
+/// asserted. The rule of thumb is roughly one signal per 6-10 kHz of
+/// window, which leaves each one its own shape.
 const HF_BANDS: &[(u64, u64, usize)] = &[
-    (1_800_000, 2_000_000, 90),
-    (3_500_000, 4_000_000, 180),
-    (5_330_500, 5_405_000, 20),
-    (7_000_000, 7_300_000, 220),
-    (10_100_000, 10_150_000, 60),
-    (14_000_000, 14_350_000, 300),
-    (18_068_000, 18_168_000, 70),
-    (21_000_000, 21_450_000, 200),
-    (24_890_000, 24_990_000, 60),
-    (28_000_000, 29_700_000, 240),
-    (50_000_000, 54_000_000, 120),
+    (1_800_000, 2_000_000, 25),
+    (3_500_000, 4_000_000, 62),
+    (5_330_500, 5_405_000, 9),
+    (7_000_000, 7_300_000, 37),
+    (10_100_000, 10_150_000, 6),
+    (14_000_000, 14_350_000, 43),
+    (18_068_000, 18_168_000, 12),
+    (21_000_000, 21_450_000, 56),
+    (24_890_000, 24_990_000, 12),
+    (28_000_000, 29_700_000, 212),
+    (50_000_000, 54_000_000, 500),
 ];
 
 /// A band of synthetic signals across this radio's coverage.

@@ -30,6 +30,20 @@ mod win_sched;
 
 pub use terminal::run;
 
+/// Draw the whole console into a frame, for `examples/screen.rs`.
+///
+/// Exists so the layout can be looked at without a terminal. Not part of
+/// the running application's path — `terminal::run` owns that — but it
+/// draws the same panels through the same functions, so what it shows is
+/// what an operator sees.
+pub fn debug_draw(f: &mut ratatui::Frame, state: &RadioDisplay) {
+    let (header, status, errors, controls) = layout::split_areas(f.size());
+    layout::draw_header(f, header);
+    layout::draw_ui(f, status, state);
+    layout::draw_errors(f, errors, state);
+    layout::draw_control_panel(f, controls, &control::ControlState::Menu);
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum UiError {
     #[error("IO error: {0}")]

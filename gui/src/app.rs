@@ -51,6 +51,10 @@ pub struct Console {
     /// The last thing the console has to say to the operator.
     status: String,
     last_state_request: std::time::Instant,
+    /// Capabilities for a still, when there is no link to get them from.
+    offline_capabilities: Option<cat_native::CapabilitiesWire>,
+    /// GPU copy of the waterfall, re-uploaded as rows arrive.
+    waterfall_texture: Option<egui::TextureHandle>,
 }
 
 impl Console {
@@ -77,7 +81,44 @@ impl Console {
             command_text: String::new(),
             status: String::new(),
             last_state_request: std::time::Instant::now(),
+            offline_capabilities: None,
+            waterfall_texture: None,
         }
+    }
+
+    /// Fill the readout with plausible values, for the offscreen renderer.
+    ///
+    /// Not a demo mode: it exists so a still of the console shows the
+    /// layout under load rather than a row of em dashes, which is what an
+    /// unconnected console correctly shows and which says nothing about
+    /// whether the design is right.
+    /// Install a capability set without a socket, so a still shows the
+    /// real layout rather than the disconnected state.
+    pub fn demo_capabilities(&mut self, caps: cat_native::CapabilitiesWire) {
+        self.tabs = crate::workspace::tabs(&caps);
+        self.active = self.tabs.first().map(|t| t.tab).unwrap_or(Tab::Source);
+        self.offline_capabilities = Some(caps);
+    }
+
+    /// Push a spectrum frame in, for a still.
+    ///
+    /// A screenshot showing NO STREAM proves the empty state and nothing
+    /// about the waterfall, which is the part of this console with the
+    /// most that can go wrong.
+    pub fn demo_spectrum(&mut self, frames: &[cat_signal::SpectrumFrame]) {
+        for frame in frames {
+            self.waterfall.push(frame);
+        }
+        self.latest = frames.last().cloned();
+    }
+
+    pub fn demo_state(&mut self) {
+        self.readout.vfo_a_hz.confirm(14_074_000);
+        self.readout.mode.confirm(cat_native::ModeId::Usb);
+        self.readout.split.confirm(false);
+        self.readout.smeter_raw.confirm(17);
+        self.readout.if_shift_hz.confirm(0);
+        self.status = "connected to Kenwood TS-570D".to_string();
     }
 
     /// Try to connect, replacing whatever link there was.
@@ -102,7 +143,7 @@ impl Console {
     fn capabilities(&self) -> Option<&cat_native::CapabilitiesWire> {
         match &self.link {
             Link::Up(client) => Some(client.capabilities()),
-            Link::Down(_) => None,
+            Link::Down(_) => self.offline_capabilities.as_ref(),
         }
     }
 
@@ -230,124 +271,284 @@ impl Console {
 
 // ---------------------------------------------------------------------------
 // Drawing
+//
+// Placement only. The structure follows the accepted mockup: a persistent
+// strip of key-over-value fields, a left rail of meters that is always
+// there, capability-derived tabs, and a command line. Everything is
+// square, tight and bordered -- an instrument panel, not a form.
 // ---------------------------------------------------------------------------
 
+fn key(text: impl Into<String>) -> RichText {
+    RichText::new(text.into().to_uppercase())
+        .color(theme::DIM)
+        .size(theme::SIZE_KEY)
+}
+
+fn value(text: impl Into<String>, colour: Color32) -> RichText {
+    RichText::new(text).color(colour).size(theme::SIZE_VALUE)
+}
+
 fn dim(text: impl Into<String>) -> RichText {
-    RichText::new(text).color(theme::DIM).size(11.0)
+    RichText::new(text).color(theme::DIM).size(theme::SIZE_BODY)
 }
 
 fn absent(text: impl Into<String>) -> RichText {
-    RichText::new(text).color(theme::ABSENT).size(11.0)
+    RichText::new(text)
+        .color(theme::ABSENT)
+        .size(theme::SIZE_BODY)
+}
+
+/// A hairline, for separating regions.
+fn rule(ui: &mut egui::Ui, horizontal: bool) {
+    let rect = ui.max_rect();
+    let (a, b) = if horizontal {
+        (
+            egui::pos2(rect.left(), rect.top()),
+            egui::pos2(rect.right(), rect.top()),
+        )
+    } else {
+        (
+            egui::pos2(rect.left(), rect.top()),
+            egui::pos2(rect.left(), rect.bottom()),
+        )
+    };
+    ui.painter()
+        .line_segment([a, b], Stroke::new(1.0, theme::LINE));
 }
 
 impl Console {
-    /// The persistent capability strip: what this radio is, and what is
-    /// actually attached to it right now.
-    fn strip(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            match self.capabilities() {
-                Some(caps) => {
-                    ui.label(RichText::new(&caps.model).color(theme::AMBER).strong());
-                    ui.label(dim("│"));
-                    ui.label(dim("LINK"));
-                    ui.label(RichText::new("CAT").color(theme::GREEN).size(11.0));
-                    ui.label(dim("│"));
-                    ui.label(dim("SIGNAL"));
-                    match caps.signal {
-                        cat_native::SignalSupport::None => {
-                            ui.label(absent("NO SPECTRUM SOURCE"));
-                        }
-                        cat_native::SignalSupport::IfTapPoint { .. } => {
-                            let colour = if self.latest.is_some() {
-                                theme::GREEN
-                            } else {
-                                theme::ABSENT
-                            };
-                            ui.label(RichText::new("IF-TAP").color(colour).size(11.0));
-                        }
-                        cat_native::SignalSupport::NativeScope { .. } => {
-                            ui.label(RichText::new("SCOPE").color(theme::GREEN).size(11.0));
-                        }
-                        // `SignalSupport` is `#[non_exhaustive]`: a source
-                        // kind added upstream must show as unrecognised
-                        // rather than stop this console compiling, and an
-                        // unrecognised source is drawn as absent because
-                        // that is what it is to a console that cannot read
-                        // it.
-                        _ => {
-                            ui.label(absent("UNKNOWN SOURCE"));
-                        }
-                    }
-                }
-                None => {
-                    ui.label(RichText::new("NO RADIO").color(theme::RED).strong());
-                    ui.label(dim(format!("— {}", self.address)));
-                }
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if self.capabilities().is_none() && ui.button("connect").clicked() {
-                    // Deferred: `connect` needs &mut self, and this closure
-                    // holds &self. Handled by the caller via the return.
-                }
+    /// One field of the persistent strip: a dim key with a value under it.
+    ///
+    /// The mockup's basic unit. Stacking the label above the value is what
+    /// lets twelve facts sit in one strip and still be scannable — inline
+    /// `KEY: value` pairs need separators and twice the width.
+    fn field(ui: &mut egui::Ui, k: &str, v: RichText, width: f32) {
+        ui.allocate_ui(Vec2::new(width, 34.0), |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(key(k));
+                ui.label(v);
             });
         });
     }
 
-    /// The frequency and meter row.
-    fn readout_row(&self, ui: &mut egui::Ui) {
+    /// The persistent capability strip.
+    fn strip(&mut self, ui: &mut egui::Ui) {
+        let caps = self.capabilities().cloned();
         ui.horizontal(|ui| {
-            ui.label(dim("VFO A"));
-            let (text, colour) = match self.readout.vfo_a_hz.value() {
-                Some(hz) => (
-                    cat_ui::format_hz(hz),
-                    if self.readout.vfo_a_hz.is_pending() {
-                        theme::AMBER
-                    } else {
-                        theme::TEXT
-                    },
-                ),
-                // Unknown is drawn as unknown. See `readout`'s docs: the
-                // protocol has no read side yet, and a console showing
-                // 0.000.000 MHz would be asserting something false.
-                None => ("—.———.——— MHz".to_string(), theme::ABSENT),
-            };
-            ui.label(RichText::new(text).color(colour).size(22.0).strong());
+            ui.spacing_mut().item_spacing.x = 14.0;
 
-            ui.label(dim("│"));
-            ui.label(dim("S"));
-            let reading = self.smeter_reading();
-            let (w, h) = (140.0, 12.0);
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
-            match reading {
-                Some(r) => {
-                    cat_ui_egui::meter_bar(ui, rect, r, theme::GREEN, theme::LINE_BRIGHT);
-                    ui.label(RichText::new(r.s_unit()).color(theme::GREEN).size(12.0));
-                }
-                None => {
-                    ui.painter().rect_filled(rect, 0.0, theme::PANEL_ALT);
-                    ui.label(absent("—"));
-                }
+            match &caps {
+                Some(c) => Self::field(ui, "radio", value(&c.model, theme::AMBER), 150.0),
+                None => Self::field(ui, "radio", value("NO RADIO", theme::RED), 150.0),
             }
+
+            let (link_text, link_colour) = match &self.link {
+                Link::Up(_) => (format!("◆ {}", self.address), theme::GREEN),
+                Link::Down(_) => (format!("◇ {}", self.address), theme::ABSENT),
+            };
+            Self::field(ui, "link", value(link_text, link_colour).size(11.0), 190.0);
+
+            // The dial. The one thing on the strip that gets read from
+            // across the room, so it is the one thing that is large.
+            let mode_label = caps
+                .as_ref()
+                .and_then(|c| {
+                    self.readout
+                        .mode
+                        .value()
+                        .and_then(|id| c.modes.iter().find(|m| m.id == id))
+                })
+                .map(|m| m.label.clone())
+                .unwrap_or_else(|| "—".to_string());
+            ui.allocate_ui(Vec2::new(280.0, 34.0), |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.label(key(format!("vfo a · {mode_label}")));
+                    let (text, colour) = match self.readout.vfo_a_hz.value() {
+                        Some(hz) => (
+                            cat_ui::format_hz_compact(hz),
+                            if self.readout.vfo_a_hz.is_pending() {
+                                theme::AMBER
+                            } else {
+                                theme::TEXT
+                            },
+                        ),
+                        None => ("—.———.———".to_string(), theme::ABSENT),
+                    };
+                    ui.label(RichText::new(text).color(colour).size(theme::SIZE_DIAL));
+                });
+            });
+
+            let split = match self.readout.split.value() {
+                Some(true) => value("ON", theme::AMBER),
+                Some(false) => value("OFF", theme::DIM),
+                None => value("—", theme::ABSENT),
+            };
+            Self::field(ui, "split", split, 60.0);
+
+            let s = match self.smeter_reading() {
+                Some(r) => value(
+                    format!("{}  {}/{}", r.s_unit(), r.raw, r.range.max),
+                    theme::TEXT,
+                ),
+                None => value("—", theme::ABSENT),
+            };
+            Self::field(ui, "s", s, 130.0);
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let state = if self.readout.split.value().is_some() {
+                    value("RX", theme::GREEN)
+                } else {
+                    value("—", theme::ABSENT)
+                };
+                Self::field(ui, "state", state, 44.0);
+
+                let signal = match caps.as_ref().map(|c| c.signal) {
+                    Some(cat_native::SignalSupport::IfTapPoint { .. }) => {
+                        let live = self.latest.is_some();
+                        value("IF-TAP", if live { theme::GREEN } else { theme::ABSENT })
+                    }
+                    Some(cat_native::SignalSupport::None) => value("NONE", theme::ABSENT),
+                    Some(_) => value("SCOPE", theme::GREEN),
+                    None => value("—", theme::ABSENT),
+                };
+                Self::field(ui, "signal · rf", signal.size(11.0), 80.0);
+            });
         });
     }
 
-    /// The S-meter reading, carrying the radio's own range and table.
+    /// The left rail: every meter this radio has, always visible.
     ///
-    /// Built through `MeterReading` rather than by hand so the raw value
-    /// never travels without its scale — raw 15 is mid-scale here and
-    /// under 6% on an FT-991A.
-    fn smeter_reading(&self) -> Option<MeterReading> {
-        let caps = self.capabilities()?;
-        let raw = self.readout.smeter_raw.value()?;
-        let descriptor = caps
-            .meters
-            .iter()
-            .find(|m| m.kind == cat_native::MeterKind::S)?;
-        let mut reading = MeterReading::new(descriptor.kind, raw, descriptor.raw_range);
-        if let Some(scale) = descriptor.s_units {
-            reading = reading.with_s_units(scale);
+    /// A rail rather than a row, and never reflowed. A meter that is inert
+    /// keeps its place dimmed — a TX meter appearing and vanishing on every
+    /// transmit would make the whole panel jump.
+    fn rail(&mut self, ui: &mut egui::Ui) {
+        let Some(caps) = self.capabilities().cloned() else {
+            ui.label(absent("no radio"));
+            return;
+        };
+        Self::pane_header(ui, "METERS · MeterSet", None);
+        ui.add_space(4.0);
+
+        for descriptor in &caps.meters {
+            let reading = if descriptor.kind == cat_native::MeterKind::S {
+                self.smeter_reading()
+            } else {
+                None
+            };
+            let active = reading.is_some();
+            let label_colour = if active { theme::TEXT } else { theme::ABSENT };
+
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{:?}", descriptor.kind).to_uppercase())
+                        .color(label_colour)
+                        .size(theme::SIZE_BODY),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let v = reading
+                        .map(|r| r.raw.to_string())
+                        .unwrap_or_else(|| "—".to_string());
+                    ui.label(RichText::new(v).color(label_colour).size(theme::SIZE_BODY));
+                });
+            });
+
+            let (rect, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 9.0), Sense::hover());
+            ui.painter().rect_filled(rect, 0.0, theme::PANEL_ALT);
+            ui.painter()
+                .rect_stroke(rect, 0.0, Stroke::new(1.0, theme::LINE));
+            if let Some(r) = reading {
+                cat_ui_egui::meter_bar(ui, rect.shrink(1.0), r, theme::GREEN, theme::PANEL_ALT);
+            }
+            ui.add_space(7.0);
         }
-        Some(reading)
+    }
+
+    /// A pane header: dim uppercase left, an optional note right.
+    fn pane_header(ui: &mut egui::Ui, left: &str, right: Option<&str>) {
+        let height = 17.0;
+        let rect = ui
+            .allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover())
+            .0;
+        ui.painter().rect_filled(rect, 0.0, theme::PANEL_ALT);
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left(), rect.bottom()),
+                egui::pos2(rect.right(), rect.bottom()),
+            ],
+            Stroke::new(1.0, theme::LINE_BRIGHT),
+        );
+        ui.painter().text(
+            egui::pos2(rect.left() + 7.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            left,
+            egui::FontId::monospace(theme::SIZE_KEY),
+            theme::DIM,
+        );
+        if let Some(right) = right {
+            ui.painter().text(
+                egui::pos2(rect.right() - 7.0, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                right,
+                egui::FontId::monospace(theme::SIZE_KEY),
+                theme::DIMMER,
+            );
+        }
+    }
+
+    /// The tab bar, derived from what the radio says it is.
+    fn tab_bar(&mut self, ui: &mut egui::Ui) {
+        let entries = self.tabs.clone();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for (i, entry) in entries.iter().enumerate() {
+                let selected = self.active == entry.tab;
+                let (rect, response) = ui.allocate_exact_size(
+                    Vec2::new(entry.label.len() as f32 * 8.0 + 46.0, 26.0),
+                    Sense::click(),
+                );
+                if selected {
+                    ui.painter().rect_filled(rect, 0.0, theme::PANEL);
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(rect.left(), rect.bottom() - 1.0),
+                            egui::pos2(rect.right(), rect.bottom() - 1.0),
+                        ],
+                        Stroke::new(2.0, theme::AMBER),
+                    );
+                }
+                let colour = if selected { theme::AMBER } else { theme::DIM };
+                // The digit that selects it, then the name. The digits are
+                // the whole reason this design can hold TUI parity.
+                ui.painter().text(
+                    egui::pos2(rect.left() + 10.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    format!("{}", i + 1),
+                    egui::FontId::monospace(theme::SIZE_KEY),
+                    theme::DIMMER,
+                );
+                ui.painter().text(
+                    egui::pos2(rect.left() + 24.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    &entry.label,
+                    egui::FontId::monospace(theme::SIZE_BODY),
+                    colour,
+                );
+                if response.clicked() {
+                    self.active = entry.tab;
+                }
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new("1–9 switch · : command")
+                        .color(theme::DIMMER)
+                        .size(theme::SIZE_KEY),
+                );
+            });
+        });
     }
 
     /// The always-visible quick controls.
@@ -361,12 +562,12 @@ impl Console {
         };
         let controls = quick::controls(&caps);
         if controls.is_empty() {
-            ui.label(absent("this radio has no quick controls"));
             return;
         }
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
             for control in &controls {
-                ui.label(dim(control.label()));
+                ui.label(key(control.label()));
                 match control {
                     quick::Control::Mode => {
                         let label = self
@@ -376,7 +577,14 @@ impl Console {
                             .and_then(|id| caps.modes.iter().find(|m| m.id == id))
                             .map(|m| m.label.clone())
                             .unwrap_or_else(|| "—".to_string());
-                        if ui.button(RichText::new(label).size(12.0)).clicked() {
+                        if ui
+                            .add(egui::Button::new(
+                                RichText::new(format!("{label:<8}"))
+                                    .color(theme::TEXT)
+                                    .size(theme::SIZE_BODY),
+                            ))
+                            .clicked()
+                        {
                             if let Some(next) = quick::next_mode(&caps, self.readout.mode.value()) {
                                 self.readout.mode.request(next);
                                 self.send(Command::SetMode { mode: next });
@@ -387,7 +595,7 @@ impl Console {
                         let current = self.readout.filter_width_hz.value();
                         let label = current.map(|w| format!("{w} Hz")).unwrap_or("—".into());
                         egui::ComboBox::from_id_salt("filter_width")
-                            .selected_text(RichText::new(label).size(12.0))
+                            .selected_text(RichText::new(label).size(theme::SIZE_BODY))
                             .show_ui(ui, |ui| {
                                 for width in widths_hz {
                                     if ui
@@ -405,7 +613,11 @@ impl Console {
                     }
                     quick::Control::IfShift { limit_hz } => {
                         let current = self.readout.if_shift_hz.value().unwrap_or(0);
-                        ui.label(RichText::new(format!("{current:+} Hz")).size(12.0));
+                        ui.label(
+                            RichText::new(format!("{current:+5} Hz"))
+                                .color(theme::TEXT)
+                                .size(theme::SIZE_BODY),
+                        );
                         for (caption, delta) in [("−", -100), ("+", 100)] {
                             if ui.small_button(caption).clicked() {
                                 let next = quick::clamp_shift(current + delta, *limit_hz);
@@ -414,18 +626,16 @@ impl Console {
                             }
                         }
                     }
-                    quick::Control::Notch => {
-                        ui.label(absent("—"));
-                    }
+                    quick::Control::Notch => {}
                     quick::Control::Split => {
                         let on = self.readout.split.value().unwrap_or(false);
-                        let colour = if on { theme::AMBER } else { theme::ABSENT };
+                        let colour = if on { theme::AMBER } else { theme::DIM };
                         if ui
-                            .button(
-                                RichText::new(if on { "ON" } else { "OFF" })
+                            .add(egui::Button::new(
+                                RichText::new(if on { "ON " } else { "OFF" })
                                     .color(colour)
-                                    .size(12.0),
-                            )
+                                    .size(theme::SIZE_BODY),
+                            ))
                             .clicked()
                         {
                             self.readout.split.request(!on);
@@ -433,24 +643,28 @@ impl Console {
                         }
                     }
                 }
-                ui.label(dim("│"));
+                ui.label(
+                    RichText::new("│")
+                        .color(theme::LINE_BRIGHT)
+                        .size(theme::SIZE_BODY),
+                );
             }
         });
     }
 
-    fn tab_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            for (i, entry) in self.tabs.clone().iter().enumerate() {
-                let selected = self.active == entry.tab;
-                let colour = if selected { theme::AMBER } else { theme::DIM };
-                let text = RichText::new(format!("{}  {}", i + 1, entry.label))
-                    .color(colour)
-                    .size(12.0);
-                if ui.selectable_label(selected, text).clicked() {
-                    self.active = entry.tab;
-                }
-            }
-        });
+    /// The S-meter reading, carrying the radio's own range and table.
+    fn smeter_reading(&self) -> Option<MeterReading> {
+        let caps = self.capabilities()?;
+        let raw = self.readout.smeter_raw.value()?;
+        let descriptor = caps
+            .meters
+            .iter()
+            .find(|m| m.kind == cat_native::MeterKind::S)?;
+        let mut reading = MeterReading::new(descriptor.kind, raw, descriptor.raw_range);
+        if let Some(scale) = descriptor.s_units {
+            reading = reading.with_s_units(scale);
+        }
+        Some(reading)
     }
 
     /// The waterfall, and the click that tunes it.
@@ -458,27 +672,66 @@ impl Console {
         let Some(caps) = self.capabilities().cloned() else {
             return;
         };
+        let span = match caps.signal {
+            cat_native::SignalSupport::IfTapPoint { .. } => "IF TAP · CN4 → RTL-SDR",
+            _ => "SPECTRUM",
+        };
+        Self::pane_header(
+            ui,
+            span,
+            Some("click to tune · snaps to the radio's finest step"),
+        );
+
         let available = ui.available_size();
         let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(available.x, available.y - 4.0), Sense::click());
-
-        ui.painter().rect_filled(rect, 0.0, theme::PANEL_ALT);
+            ui.allocate_exact_size(Vec2::new(available.x, available.y.max(1.0)), Sense::click());
+        ui.painter()
+            .rect_filled(rect, 0.0, Color32::from_rgb(4, 7, 10));
 
         let Some(frame) = self.latest.clone() else {
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "NO STREAM",
-                egui::FontId::proportional(13.0),
+                egui::FontId::monospace(13.0),
                 theme::ABSENT,
             );
             return;
         };
 
         self.waterfall.push(&frame);
+
+        // Paint it. The buffer was being filled and never drawn -- a
+        // waterfall the console maintained and never showed, which is the
+        // kind of thing only looking at the thing catches.
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [
+                self.waterfall.width() as usize,
+                self.waterfall.height() as usize,
+            ],
+            &self.waterfall.rgba(),
+        );
+        match &mut self.waterfall_texture {
+            Some(handle) => handle.set(image, egui::TextureOptions::NEAREST),
+            None => {
+                self.waterfall_texture = Some(ui.ctx().load_texture(
+                    "waterfall",
+                    image,
+                    egui::TextureOptions::NEAREST,
+                ))
+            }
+        }
+        if let Some(handle) = &self.waterfall_texture {
+            ui.painter().image(
+                handle.id(),
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+
         // A fixed reticle at the centre, not a movable cursor. An IF tap is
-        // dial-centred by construction, so the dial IS the centre -- see
-        // `tuning`.
+        // dial-centred by construction, so the dial IS the centre.
         let x = rect.center().x;
         ui.painter().line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
@@ -514,10 +767,16 @@ impl Console {
     fn command_line(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if self.command_open {
-                ui.label(RichText::new(":").color(theme::SELECT_LINE).strong());
+                ui.label(
+                    RichText::new(":")
+                        .color(theme::SELECT_LINE)
+                        .size(theme::SIZE_BODY)
+                        .strong(),
+                );
                 let edit = ui.add(
                     egui::TextEdit::singleline(&mut self.command_text)
                         .desired_width(f32::INFINITY)
+                        .font(egui::FontId::monospace(theme::SIZE_BODY))
                         .frame(false),
                 );
                 edit.request_focus();
@@ -530,9 +789,17 @@ impl Console {
                     self.command_text.clear();
                 }
             } else {
-                ui.label(dim(&self.status));
+                ui.label(
+                    RichText::new(&self.status)
+                        .color(theme::DIM)
+                        .size(theme::SIZE_KEY),
+                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(absent("1–9 switch · : command"));
+                    ui.label(
+                        RichText::new("press :  for a command")
+                            .color(theme::DIMMER)
+                            .size(theme::SIZE_KEY),
+                    );
                 });
             }
         });
@@ -541,6 +808,20 @@ impl Console {
 
 impl eframe::App for Console {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.draw(ctx);
+    }
+}
+
+impl Console {
+    /// One frame, against a bare `egui::Context`.
+    ///
+    /// Split out from `eframe::App::update` so the console can be drawn
+    /// without a window. `examples/render.rs` rasterises this offscreen
+    /// through lavapipe and writes a PNG, which is the only way to *look*
+    /// at a change here on a machine with no display — and looking is the
+    /// thing that was missing when this first shipped not resembling the
+    /// design it was built from.
+    pub fn draw(&mut self, ctx: &egui::Context) {
         self.pump();
         self.poll_state();
         // Spectrum arrives on its own schedule, not on input, so the
@@ -572,60 +853,95 @@ impl eframe::App for Console {
             }
         });
 
-        egui::TopBottomPanel::top("strip").show(ctx, |ui| {
-            self.strip(ui);
-            ui.separator();
-            self.readout_row(ui);
-            self.quick_bar(ui);
-            self.tab_bar(ui);
-        });
+        egui::TopBottomPanel::top("strip")
+            .frame(
+                egui::Frame::none()
+                    .fill(theme::PANEL)
+                    .inner_margin(egui::Margin {
+                        left: 10.0,
+                        right: 10.0,
+                        top: 6.0,
+                        bottom: 0.0,
+                    }),
+            )
+            .show(ctx, |ui| {
+                self.strip(ui);
+                ui.add_space(4.0);
+                self.quick_bar(ui);
+                ui.add_space(2.0);
+                self.tab_bar(ui);
+            });
 
-        egui::TopBottomPanel::bottom("command").show(ctx, |ui| self.command_line(ui));
+        egui::TopBottomPanel::bottom("command")
+            .exact_height(24.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(theme::PANEL_ALT)
+                    .inner_margin(egui::Margin::symmetric(10.0, 4.0)),
+            )
+            .show(ctx, |ui| self.command_line(ui));
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if self.capabilities().is_none() {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(40.0);
-                    ui.label(RichText::new("NOT CONNECTED").color(theme::RED).size(16.0));
-                    // The reason travels with the state rather than only
-                    // in `status`, which the next message would overwrite.
-                    let why = match &self.link {
-                        Link::Down(why) => why.as_str(),
-                        Link::Up(_) => "",
-                    };
-                    ui.label(dim(format!("{} — {why}", self.address)));
-                    if ui.button("connect").clicked() {
-                        wants_connect = true;
+        // The rail is part of the console's permanent furniture, not part
+        // of a workspace, so it lives outside the central panel.
+        egui::SidePanel::left("rail")
+            .exact_width(230.0)
+            .resizable(false)
+            .frame(
+                egui::Frame::none()
+                    .fill(theme::PANEL)
+                    .inner_margin(egui::Margin::symmetric(8.0, 0.0)),
+            )
+            .show(ctx, |ui| {
+                rule(ui, false);
+                self.rail(ui);
+            });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(theme::BG))
+            .show(ctx, |ui| {
+                if self.capabilities().is_none() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(40.0);
+                        ui.label(RichText::new("NOT CONNECTED").color(theme::RED).size(16.0));
+                        // The reason travels with the state rather than only
+                        // in `status`, which the next message would overwrite.
+                        let why = match &self.link {
+                            Link::Down(why) => why.as_str(),
+                            Link::Up(_) => "",
+                        };
+                        ui.label(dim(format!("{} — {why}", self.address)));
+                        if ui.button("connect").clicked() {
+                            wants_connect = true;
+                        }
+                    });
+                    return;
+                }
+                match self.active {
+                    Tab::Spectrum => self.spectrum(ui),
+                    Tab::Memory => {
+                        ui.label(dim("memory workspace"));
+                        ui.label(absent(
+                            "the protocol has no read side yet — see docs/renderer-parity.md",
+                        ));
                     }
-                });
-                return;
-            }
-            match self.active {
-                Tab::Spectrum => self.spectrum(ui),
-                Tab::Memory => {
-                    ui.label(dim("memory workspace"));
-                    ui.label(absent(
-                        "the protocol has no read side yet — see docs/renderer-parity.md",
-                    ));
-                }
-                Tab::Menu => {
-                    ui.label(dim("menu workspace"));
-                    ui.label(absent(
-                        "the protocol has no read side yet — see docs/renderer-parity.md",
-                    ));
-                }
-                Tab::Source => {
-                    ui.label(dim("attached sources"));
-                    let installed = self
-                        .capabilities()
-                        .map(|c| c.installation.sources.len())
-                        .unwrap_or(0);
-                    if installed == 0 {
-                        ui.label(absent("nothing attached"));
+                    Tab::Menu => {
+                        ui.label(dim("menu workspace"));
+                        ui.label(absent(
+                            "the protocol has no read side yet — see docs/renderer-parity.md",
+                        ));
+                    }
+                    Tab::Source => {
+                        ui.label(dim("attached sources"));
+                        let installed = self
+                            .capabilities()
+                            .map(|c| c.installation.sources.len())
+                            .unwrap_or(0);
+                        if installed == 0 {
+                            ui.label(absent("nothing attached"));
+                        }
                     }
                 }
-            }
-        });
+            });
 
         if wants_connect {
             self.connect();
