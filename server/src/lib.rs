@@ -25,15 +25,52 @@
 //! names, frequency range, which typed methods back which rigctld command)
 //! plugs in.
 
+mod console;
 mod rigctl_radio;
+mod spectrum;
 
+pub use console::ConsoleTs570d;
 pub use rigctl_radio::RigctlTs570d;
 
 /// Which network listeners to bring up — re-exported unconditionally from
 /// `cat_rigctl`, which is itself cross-platform since
 /// docs/adr/0006-windows-network-transport.md's 2026-07-26 amendment
 /// (`radio-cat-rs`).
-pub use cat_rigctl::ServerConfig;
+/// Which listeners to bring up, plus where this radio's spectrum comes
+/// from.
+///
+/// A superset of `cat_rigctl::ServerConfig` rather than a re-export,
+/// because the SDR is this radio's business: `cat-rigctl` orchestrates
+/// listeners and has no opinion about where a spectrum comes from, and
+/// the CN4 tap is a TS-570D fact.
+#[derive(Debug, Clone, Default)]
+pub struct ServerConfig {
+    /// `cat-server`'s raw length-prefixed TCP protocol.
+    pub raw_tcp_port: Option<u16>,
+    /// `cat-server`'s raw enveloped UDP protocol.
+    pub raw_udp_port: Option<u16>,
+    /// The Hamlib rigctld-compatible listener, for WSJT-X.
+    pub rigctl_port: Option<u16>,
+    /// The typed console protocol, for `ts570d-gui`.
+    pub console_port: Option<u16>,
+    /// An RTL-SDR on CN4, as `host:port` speaking `rtl_tcp` — the
+    /// emulator's `--cn4`, or a real dongle behind `rtl_tcp`.
+    pub cn4: Option<String>,
+}
+
+impl ServerConfig {
+    fn listeners(&self) -> cat_rigctl::ServerConfig {
+        cat_rigctl::ServerConfig {
+            raw_tcp_port: self.raw_tcp_port,
+            raw_udp_port: self.raw_udp_port,
+            rigctl_port: self.rigctl_port,
+            native_port: self.console_port,
+            // Consoles are told what this radio is from the one
+            // declaration, so the handshake cannot disagree with the
+            // rigctl bridge about the same facts.
+        }
+    }
+}
 
 /// Bring up the broker (owning `session`, the one physical radio
 /// connection) plus every listener `config` requests, and run until one of
@@ -58,11 +95,19 @@ where
     S: cat_transport_core::CatSession + 'static,
     S::Error: std::error::Error + 'static,
 {
-    cat_rigctl::run(
+    let shared = config
+        .console_port
+        .map(|_| cat_rigctl::native_bridge::NativeShared::new(&radio::capabilities::TS570D));
+    if let (Some(shared), Some(addr)) = (shared.clone(), config.cn4.clone()) {
+        spectrum::spawn(shared, addr);
+    }
+    cat_rigctl::run_with_native(
         session,
         &radio::TS570D_COMMAND_TABLE,
-        config,
+        config.listeners(),
         |broker_session| RigctlTs570d(radio::Ts570d::new(broker_session)),
+        |broker_session| ConsoleTs570d(radio::Ts570d::new(broker_session)),
+        shared,
     )
     .await
 }
@@ -77,11 +122,19 @@ where
     S: cat_transport_core::CatSession + Send + 'static,
     S::Error: std::error::Error + 'static,
 {
-    cat_rigctl::run(
+    let shared = config
+        .console_port
+        .map(|_| cat_rigctl::native_bridge::NativeShared::new(&radio::capabilities::TS570D));
+    if let (Some(shared), Some(addr)) = (shared.clone(), config.cn4.clone()) {
+        spectrum::spawn(shared, addr);
+    }
+    cat_rigctl::run_with_native(
         session,
         &radio::TS570D_COMMAND_TABLE,
-        config,
+        config.listeners(),
         |broker_session| RigctlTs570d(radio::Ts570d::new(broker_session)),
+        |broker_session| ConsoleTs570d(radio::Ts570d::new(broker_session)),
+        shared,
     )
 }
 

@@ -72,20 +72,20 @@ mockall = "0.12.1"
 # to the v0.1.0 release tag (rather than floating on `branch = "main"`) so
 # this app's build is reproducible against a known-good, released snapshot
 # of the shared library.
-cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-native = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-ui-egui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-signal = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-signal-rtlsdr = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-ui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-ui-ratatui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
-cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.6.0" }
+cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-native = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-ui-egui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-signal = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-signal-rtlsdr = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-ui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-ui-ratatui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 
 [package]
 name = "ts570d"

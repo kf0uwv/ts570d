@@ -70,6 +70,11 @@ struct ServerArgs {
     raw_tcp_port: Option<u16>,
     raw_udp_port: Option<u16>,
     rigctl_port: Option<u16>,
+    /// The typed console protocol, for `ts570d-gui`.
+    console_port: Option<u16>,
+    /// An RTL-SDR on the CN4 IF tap, as `host:port` speaking rtl_tcp.
+    /// Either the emulator's `--cn4` or a real dongle behind `rtl_tcp`.
+    cn4: Option<String>,
 }
 
 /// Print usage and exit with code 1.
@@ -183,6 +188,7 @@ fn server_usage_exit() -> ! {
     eprintln!(
         "Usage: ts570d server --port <serial-port-path> [--baud <rate>] [--stop-bits <n>]\n\
                      [--raw-tcp-port <port>] [--raw-udp-port <port>] [--rigctl-port <port>]\n\
+                     [--console-port <port>] [--cn4 <host:port>]\n\
          \n\
            --port          Serial port path (required)\n\
            --baud          Baud rate: 1200, 2400, 4800, 9600  (default: 9600)\n\
@@ -191,7 +197,12 @@ fn server_usage_exit() -> ! {
            --raw-udp-port  Bind cat-server's raw enveloped UDP protocol\n\
            --rigctl-port   Bind a Hamlib rigctld-compatible TCP listener\n\
                            (for WSJT-X's \"Hamlib NET rigctl\" rig type)\n\
-           At least one of --raw-tcp-port/--raw-udp-port/--rigctl-port is required."
+           --console-port  Bind the typed console protocol, for ts570d-gui\n\
+           --cn4           An RTL-SDR on the CN4 IF tap, speaking rtl_tcp:\n\
+                           the emulator's --cn4, or a real dongle behind\n\
+                           rtl_tcp. Needs --console-port to go anywhere.\n\
+           At least one of --raw-tcp-port/--raw-udp-port/--rigctl-port/--console-port\n\
+           is required."
     );
     std::process::exit(1);
 }
@@ -207,6 +218,8 @@ fn parse_server_args() -> ServerArgs {
     let mut raw_tcp_port: Option<u16> = None;
     let mut raw_udp_port: Option<u16> = None;
     let mut rigctl_port: Option<u16> = None;
+    let mut console_port: Option<u16> = None;
+    let mut cn4: Option<String> = None;
 
     fn parse_port_number(val: Option<String>, flag: &str) -> u16 {
         match val.and_then(|v| v.parse::<u16>().ok()) {
@@ -274,13 +287,31 @@ fn parse_server_args() -> ServerArgs {
             Some("--rigctl-port") => {
                 rigctl_port = Some(parse_port_number(args_iter.next(), "--rigctl-port"))
             }
+            Some("--console-port") => {
+                console_port = Some(parse_port_number(args_iter.next(), "--console-port"))
+            }
+            Some("--cn4") => cn4 = args_iter.next(),
             Some(_) => {}
             None => break,
         }
     }
 
-    if raw_tcp_port.is_none() && raw_udp_port.is_none() && rigctl_port.is_none() {
-        eprintln!("error: at least one of --raw-tcp-port/--raw-udp-port/--rigctl-port is required");
+    if raw_tcp_port.is_none()
+        && raw_udp_port.is_none()
+        && rigctl_port.is_none()
+        && console_port.is_none()
+    {
+        eprintln!(
+            "error: at least one of --raw-tcp-port/--raw-udp-port/--rigctl-port/--console-port is required"
+        );
+        std::process::exit(1);
+    }
+
+    // A tap with nothing to serve it to is a thread reading a socket for
+    // no reason, and much more likely a mistyped invocation than an
+    // intention.
+    if cn4.is_some() && console_port.is_none() {
+        eprintln!("error: --cn4 needs --console-port; nothing else consumes the spectrum");
         std::process::exit(1);
     }
 
@@ -292,6 +323,8 @@ fn parse_server_args() -> ServerArgs {
             raw_tcp_port,
             raw_udp_port,
             rigctl_port,
+            console_port,
+            cn4,
         },
         None => server_usage_exit(),
     }
@@ -384,6 +417,8 @@ async fn run_server_mode() {
         raw_tcp_port: args.raw_tcp_port,
         raw_udp_port: args.raw_udp_port,
         rigctl_port: args.rigctl_port,
+        console_port: args.console_port,
+        cn4: args.cn4.clone(),
     };
 
     // `server::run` is `async fn` on Linux and a plain blocking `fn` on
