@@ -125,7 +125,7 @@ pub fn clamp_shift(hz: i32, limit_hz: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{caps_bare, caps_ts570d};
+    use crate::demo::{bare as caps_bare, ts570d as caps_ts570d};
 
     #[test]
     fn the_bar_offers_what_this_radio_can_actually_do() {

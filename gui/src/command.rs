@@ -204,7 +204,7 @@ pub const VERBS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{caps_bare, caps_ts570d};
+    use crate::demo::{bare as caps_bare, ts570d as caps_ts570d};
     use cat_native::ModeId;
 
     fn parse_ts(line: &str) -> Result<Action, ParseError> {

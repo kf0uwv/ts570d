@@ -42,7 +42,7 @@ pub mod theme;
 pub mod tuning;
 pub mod workspace;
 
-mod test_support;
+pub mod demo;
 
 pub use command::{Action, ParseError};
 pub use quick::Control;

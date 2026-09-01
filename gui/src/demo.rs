@@ -14,6 +14,10 @@
 
 //! Capability sets to render against, without a radio or a socket.
 //!
+//! Not `#[cfg(test)]`: `examples/render.rs` needs these too, and a still
+//! of the console showing a disconnected state says nothing about whether
+//! the layout is right.
+//!
 //! These are `CapabilitiesWire` — the shape that arrives from a server —
 //! rather than the `radio` crate's declaration, because that is what this
 //! crate can see. `gui` never depends on `radio`: it is network-only, and
@@ -23,8 +27,6 @@
 //! against a well-equipped radio quietly grows assumptions that it has a
 //! memory, a menu, a spectrum source — and then draws a control that can
 //! never work the first time somebody points it at something simpler.
-
-#![cfg(test)]
 
 use cat_native::{
     CapabilitiesWire, FilterWire, FrequencyRange, Installation, MemoryCapability, MenuCapability,
@@ -43,7 +45,7 @@ fn mode(id: ModeId, label: &str, kind: ModeKind, sideband: Option<Sideband>, bw:
 }
 
 /// A TS-570D as a server describes it.
-pub fn caps_ts570d() -> CapabilitiesWire {
+pub fn ts570d() -> CapabilitiesWire {
     CapabilitiesWire {
         model: "Kenwood TS-570D".to_string(),
         endpoints: Vec::new(),
@@ -88,12 +90,35 @@ pub fn caps_ts570d() -> CapabilitiesWire {
             widths_hz: None,
             notch: false,
         },
-        meters: vec![MeterDescriptorWire {
-            kind: MeterKind::S,
-            raw_range: RawRange::new(0, 30),
-            active_on_transmit: false,
-            s_units: Some(SUnitScale::TS570D),
-        }],
+        // All four the radio actually publishes. A fixture with one meter
+        // in it makes a meter rail look right when it is not: the inert
+        // rows are the ones whose treatment is easy to get wrong.
+        meters: vec![
+            MeterDescriptorWire {
+                kind: MeterKind::S,
+                raw_range: RawRange::new(0, 30),
+                active_on_transmit: false,
+                s_units: Some(SUnitScale::TS570D),
+            },
+            MeterDescriptorWire {
+                kind: MeterKind::Po,
+                raw_range: RawRange::new(0, 30),
+                active_on_transmit: true,
+                s_units: None,
+            },
+            MeterDescriptorWire {
+                kind: MeterKind::Swr,
+                raw_range: RawRange::new(0, 30),
+                active_on_transmit: true,
+                s_units: None,
+            },
+            MeterDescriptorWire {
+                kind: MeterKind::Alc,
+                raw_range: RawRange::new(0, 30),
+                active_on_transmit: true,
+                s_units: None,
+            },
+        ],
         memory: Some(MemoryCapability {
             channels: RawRange::new(0, 99),
             named: false,
@@ -117,7 +142,7 @@ pub fn caps_ts570d() -> CapabilitiesWire {
 /// No memory, no menu, no spectrum, no shift, no split. Every panel has to
 /// survive this, and the console has to say what is missing rather than
 /// offer a control that cannot work.
-pub fn caps_bare() -> CapabilitiesWire {
+pub fn bare() -> CapabilitiesWire {
     CapabilitiesWire {
         model: "Bare Radio".to_string(),
         endpoints: Vec::new(),

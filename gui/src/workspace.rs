@@ -90,7 +90,7 @@ pub fn tab_for_digit(entries: &[TabEntry], digit: usize) -> Option<Tab> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{caps_bare, caps_ts570d};
+    use crate::demo::{bare as caps_bare, ts570d as caps_ts570d};
 
     #[test]
     fn the_tabs_are_the_radios_own_description_of_itself() {
