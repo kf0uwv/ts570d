@@ -25,6 +25,8 @@
 //!   commands and reading responses
 //! - `ts570d_radio`: The single [`TS570D_COMMAND_TABLE`] and the `Ts570dRadio` state machine
 //! - `radio_trait`: Controller/UI-facing `Radio` trait + domain types (`Mode`, `Frequency`, ...)
+//! - `ptt_line`: the optional `PttLine` capability — keying from the port's
+//!   DTR/RTS handshake line rather than over CAT (see `docs/adr/0010`)
 //! - `protocol`: Typed TS-570D response parsing
 //!
 //! # Usage
@@ -39,7 +41,9 @@
 //! ```
 
 pub mod capabilities;
+pub mod console_layout;
 pub mod protocol;
+pub mod ptt_line;
 pub mod radio_trait;
 pub mod ts570d;
 pub mod ts570d_radio;
@@ -56,9 +60,10 @@ mod radio_state {
 mod ts570d_radio_handlers;
 
 pub use protocol::{Response, ResponseFramer, ResponseParser};
+pub use ptt_line::{HandshakeState, NoPttLine, PttLine, PttLineHandle, PttLineKind};
 pub use radio_trait::{
-    Frequency, InformationResponse, MemoryChannelEntry, Mode, NopRadio, Radio, RadioError,
-    RadioResult,
+    audio_passband_hz, Frequency, InformationResponse, MemoryChannelEntry, Mode, NopRadio, Radio,
+    RadioError, RadioResult,
 };
 pub use ts570d::Ts570d;
 pub use ts570d_radio::{

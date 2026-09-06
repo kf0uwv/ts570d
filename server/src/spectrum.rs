@@ -37,12 +37,12 @@
 //! unaffected either way, which is the point of the tap being a separate
 //! device rather than part of the radio's own link.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cat_rigctl::native_bridge::NativeShared;
 use cat_signal::{IfTapConfig, SpectrumSource};
-use cat_signal_rtlsdr::{RtlSdrSource, RtlTcpSource};
 use tracing::{info, warn};
 
 /// What a TS-570D's CN4 header actually is.
@@ -73,36 +73,164 @@ fn tap_config() -> IfTapConfig {
     }
 }
 
-/// 96 kHz across the display. Wide enough that a 2.4 kHz SSB signal is a
-/// shape rather than a line, narrow enough for an RTL-SDR to sustain.
-const SAMPLE_RATE_HZ: u32 = 96_000;
+/// Which IF source the tap thread should be reading.
+///
+/// A source can be chosen at startup with `--if-out` or later by a console
+/// picking one over the native protocol, and both have to reach the same
+/// thread. This is that seam: the thread watches it, and notices a change
+/// between frames rather than only when its current source dies.
+///
+/// # Why the opened source is handed over, not the spec
+///
+/// [`IfSelection::select`] takes a source the caller has already opened.
+/// That puts the failure where an operator is waiting for it -- a busy
+/// dongle refuses the attach then and there, with the driver's own words
+/// -- instead of two seconds later on a background thread with nobody
+/// listening. It also means the device is never open twice.
+pub struct IfSelection {
+    /// A source that has been opened and not yet picked up by the thread.
+    pending: Mutex<Option<cat_signal_rtlsdr::IfSource>>,
+    /// The last spec chosen, so the thread can reconnect after a drop
+    /// without an operator re-picking.
+    spec: Mutex<Option<String>>,
+    /// Bumped on every selection, so the reader can tell "still the same
+    /// source" from "a new one is waiting" without holding a lock per
+    /// frame.
+    generation: AtomicU64,
+}
 
-/// One frame per FFT. 2048 bins over 96 kHz is about 47 Hz per bin, which
-/// resolves a CW signal comfortably.
-const FFT: usize = 2048;
+impl IfSelection {
+    /// Start with whatever `--if-out` named, if anything.
+    pub fn new(spec: Option<String>) -> Arc<Self> {
+        Arc::new(Self {
+            pending: Mutex::new(None),
+            spec: Mutex::new(spec),
+            generation: AtomicU64::new(0),
+        })
+    }
 
-/// Read `addr` forever, publishing frames into `shared`.
+    /// Hand over an already-opened source, replacing whatever is running.
+    pub fn select(&self, spec: String, source: cat_signal_rtlsdr::IfSource) {
+        if let Ok(mut slot) = self.pending.lock() {
+            *slot = Some(source);
+        }
+        if let Ok(mut current) = self.spec.lock() {
+            *current = Some(spec);
+        }
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Whether anything has ever been selected.
+    pub fn is_set(&self) -> bool {
+        self.spec.lock().map(|s| s.is_some()).unwrap_or(false)
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn take_pending(&self) -> Option<cat_signal_rtlsdr::IfSource> {
+        self.pending.lock().ok()?.take()
+    }
+
+    fn spec(&self) -> Option<String> {
+        self.spec.lock().ok()?.clone()
+    }
+}
+
+/// Read the selected source forever, publishing frames into `shared`.
 ///
 /// Spawns a thread and returns.
-pub fn spawn(shared: Arc<NativeShared>, addr: String) {
+pub fn spawn(shared: Arc<NativeShared>, selection: Arc<IfSelection>) {
     std::thread::spawn(move || loop {
-        match run_once(&shared, &addr) {
-            Ok(()) => warn!("CN4 tap at {addr} closed the connection"),
-            Err(e) => warn!("CN4 tap at {addr}: {e}"),
+        let generation = selection.generation();
+        match run_once(&shared, &selection, generation) {
+            // Not a warning: this is what a console choosing a different
+            // source looks like from in here, and it is the normal case.
+            Ok(Ended::Replaced) => info!("CN4 tap: switching to a new source"),
+            Ok(Ended::Idle) => {}
+            // A source going away arrives as an error from `next_frame`,
+            // so there is no separate "closed cleanly" outcome to report.
+            Err(e) => warn!("CN4 tap: {e}"),
         }
         // Slow enough not to spin on a tap that is not there, quick
-        // enough that restarting an emulator does not need patience.
-        std::thread::sleep(Duration::from_secs(2));
+        // enough that restarting an emulator does not need patience. A
+        // replacement is already open and waiting, so it does not pay it.
+        if selection.generation() == generation {
+            std::thread::sleep(Duration::from_secs(2));
+        }
     });
 }
 
-fn run_once(shared: &NativeShared, addr: &str) -> Result<(), String> {
-    let iq = RtlTcpSource::connect(addr).map_err(|e| e.to_string())?;
-    info!("CN4 tap connected: {addr}");
-    let mut source = RtlSdrSource::new(iq, SAMPLE_RATE_HZ, FFT, tap_config());
+/// Why a reading run stopped.
+enum Ended {
+    /// A console selected a different source.
+    Replaced,
+    /// Nothing is selected at all. Normal for a server started without
+    /// `--if-out` and never given a source.
+    Idle,
+}
 
+fn run_once(
+    shared: &NativeShared,
+    selection: &IfSelection,
+    generation: u64,
+) -> Result<Ended, String> {
+    // A source a console already opened for us wins: it is known good,
+    // and reopening it here would be a second claim on the same dongle.
+    let mut source = match selection.take_pending() {
+        Some(source) => {
+            info!("CN4 tap: using the source the console attached");
+            source
+        }
+        None => match selection.spec() {
+            Some(spec) => open_spec(&spec)?,
+            None => {
+                std::thread::sleep(Duration::from_millis(250));
+                return Ok(Ended::Idle);
+            }
+        },
+    };
+    read_frames(shared, selection, generation, &mut source)
+}
+
+/// Open the source named by `spec`.
+///
+/// Public because the attach path opens through it too: an operator's
+/// choice and a `--if-out` flag must produce the same thing, and two call
+/// sites building it separately is how they drift apart.
+pub fn open_spec(spec: &str) -> Result<cat_signal_rtlsdr::IfSource, String> {
+    // One call, and this crate's whole contribution is `tap_config()`.
+    // The rate, the bin count, and whether `addr` names a socket or a
+    // local dongle are the library's to decide -- it is the only place
+    // that knows which rates an RTL2832U can actually produce. This used
+    // to be assembled here against a hard-coded 96 kHz, which is not one
+    // of them; the emulator answered anyway, because rtl_tcp is a socket
+    // and a socket will serve any number you ask it for.
+    let source = cat_signal_rtlsdr::open(
+        spec,
+        tap_config(),
+        cat_signal_rtlsdr::IfSourceConfig::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    info!("CN4 tap connected: {spec}");
+    Ok(source)
+}
+
+fn read_frames(
+    shared: &NativeShared,
+    selection: &IfSelection,
+    generation: u64,
+    source: &mut cat_signal_rtlsdr::IfSource,
+) -> Result<Ended, String> {
     let mut last_dial = None;
     loop {
+        // Checked per frame, so an operator who picks a new source sees
+        // the waterfall change now rather than whenever this one happens
+        // to fail. An atomic load, not a lock: this runs at frame rate.
+        if selection.generation() != generation {
+            return Ok(Ended::Replaced);
+        }
         // Follow the dial. Retuning the pipeline is arithmetic, not a
         // command to the dongle: the SDR never moves.
         if let Some(dial) = shared.dial_hz() {
@@ -113,7 +241,7 @@ fn run_once(shared: &NativeShared, addr: &str) -> Result<(), String> {
         }
         match futures::executor::block_on(source.next_frame()) {
             Ok(frame) => shared.publish_spectrum(frame),
-            Err(e) => return Err(format!("{e}")),
+            Err(e) => return Err(e),
         }
     }
 }

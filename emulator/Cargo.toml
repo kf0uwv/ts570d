@@ -24,6 +24,12 @@ cat-framework = { workspace = true }
 # not a server.
 cat-signal = { workspace = true }
 
+# The radio's COM port is served as an RFC 2217 device server, because a
+# pseudo-terminal carries no modem control lines and this station keys PTT
+# from DTR. The protocol lives in the shared crate so the emulator's server
+# and the control program's client read the same codec.
+cat-transport-rfc2217 = { workspace = true }
+
 # Error handling
 thiserror = { workspace = true }
 
@@ -46,6 +52,10 @@ crossterm = { workspace = true }
 # it: through the real rtl_tcp client and the real DSP. A test that read
 # the emulator's own band directly would prove nothing about the wire.
 cat-signal-rtlsdr = { workspace = true }
+# The ACC2-IF tests drive the emulator's COM port with the same client and
+# the same framing layer the control program uses -- see tests/acc2_if.rs.
+cat-transport-core = { workspace = true }
+cat-transport-serial = { workspace = true }
 futures = { workspace = true }
 tempfile = { workspace = true }
 mockall = { workspace = true }

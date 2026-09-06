@@ -25,9 +25,18 @@
 //! names, frequency range, which typed methods back which rigctld command)
 //! plugs in.
 
+pub mod audio;
+
+use cat_framework::installation::Installation;
 mod console;
 mod rigctl_radio;
-mod spectrum;
+pub mod spectrum;
+
+// Shared with the binary rather than duplicated: what counts as a device
+// path and what counts as a host:port must not be two different answers
+// depending on which program is asking.
+#[path = "../../src/endpoint.rs"]
+mod endpoint;
 
 pub use console::ConsoleTs570d;
 pub use rigctl_radio::RigctlTs570d;
@@ -42,8 +51,8 @@ pub use rigctl_radio::RigctlTs570d;
 /// A superset of `cat_rigctl::ServerConfig` rather than a re-export,
 /// because the SDR is this radio's business: `cat-rigctl` orchestrates
 /// listeners and has no opinion about where a spectrum comes from, and
-/// the CN4 tap is a TS-570D fact.
-#[derive(Debug, Clone, Default)]
+/// where the IF output comes from is this radio's business.
+#[derive(Clone, Default)]
 pub struct ServerConfig {
     /// `cat-server`'s raw length-prefixed TCP protocol.
     pub raw_tcp_port: Option<u16>,
@@ -53,9 +62,56 @@ pub struct ServerConfig {
     pub rigctl_port: Option<u16>,
     /// The typed console protocol, for `ts570d-gui`.
     pub console_port: Option<u16>,
-    /// An RTL-SDR on CN4, as `host:port` speaking `rtl_tcp` — the
-    /// emulator's `--cn4`, or a real dongle behind `rtl_tcp`.
-    pub cn4: Option<String>,
+    /// Which IF source the tap thread reads, and the handle a console
+    /// uses to change it. On a TS-570D the connector is the CN4 header;
+    /// the field names the signal, because that is what a radio-generic
+    /// consumer of this would want.
+    ///
+    /// Constructed by the wiring layer rather than from a string here, so
+    /// that a source an operator picks at runtime and one named by
+    /// `--if-out` are opened by the same code (Rule 5).
+    pub if_source: Option<std::sync::Arc<spectrum::IfSelection>>,
+    /// Which ACC2 receive-audio source the capture thread reads, and the
+    /// handle a console uses to change it.
+    ///
+    /// Separate from `if_source` because they are separate hardware: a
+    /// bench can have an SDR on the IF tap and nothing on the audio pair,
+    /// or the reverse.
+    pub audio_source: Option<std::sync::Arc<audio::AudioSelection>>,
+    /// What the *radio's* machine can see, for a console on another one.
+    ///
+    /// Supplied by the wiring layer, because enumerating a sound card
+    /// needs that card's driver and this crate should not link one to say
+    /// so (Rule 5). `None` declines the question, and a client is told
+    /// exactly that rather than being handed an empty list -- which would
+    /// be a claim about this machine that a server which never looked is
+    /// in no position to make.
+    pub devices: Option<std::sync::Arc<dyn cat_signal::DeviceDirectory>>,
+    /// What this bench has wired, for a console to be told at handshake.
+    ///
+    /// A closure rather than a value, because it changes: a console can
+    /// attach a source at runtime, and the next console to connect should
+    /// be told what is actually there rather than what was there when the
+    /// server started.
+    pub installation: Option<std::sync::Arc<dyn Fn() -> Installation + Send + Sync>>,
+}
+
+/// Hand-written because neither a device directory nor an IF selection is
+/// `Debug`, and both are the kind of thing whose *presence* is what a log
+/// line wants anyway -- the contents are a live socket and a live dongle.
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("raw_tcp_port", &self.raw_tcp_port)
+            .field("raw_udp_port", &self.raw_udp_port)
+            .field("rigctl_port", &self.rigctl_port)
+            .field("console_port", &self.console_port)
+            .field("if_source", &self.if_source.is_some())
+            .field("audio_source", &self.audio_source.is_some())
+            .field("devices", &self.devices.is_some())
+            .field("installation", &self.installation.is_some())
+            .finish()
+    }
 }
 
 impl ServerConfig {
@@ -95,11 +151,32 @@ where
     S: cat_transport_core::CatSession + 'static,
     S::Error: std::error::Error + 'static,
 {
-    let shared = config
-        .console_port
-        .map(|_| cat_rigctl::native_bridge::NativeShared::new(&radio::capabilities::TS570D));
-    if let (Some(shared), Some(addr)) = (shared.clone(), config.cn4.clone()) {
-        spectrum::spawn(shared, addr);
+    let shared = config.console_port.map(|_| match &config.devices {
+        Some(devices) => cat_rigctl::native_bridge::NativeShared::with_devices(
+            &radio::capabilities::TS570D,
+            std::sync::Arc::clone(devices),
+        ),
+        None => cat_rigctl::native_bridge::NativeShared::new(&radio::capabilities::TS570D),
+    });
+    if let (Some(shared), Some(selection)) = (shared.clone(), config.if_source.clone()) {
+        spectrum::spawn(shared, selection);
+    }
+    if let (Some(shared), Some(selection)) = (shared.clone(), config.audio_source.clone()) {
+        audio::spawn(shared, selection);
+    }
+    if let Some(shared) = shared.clone() {
+        // What this radio's console should look like, authored by the
+        // crate that knows the radio. Published in the handshake, so a
+        // console is told how to arrange itself in the same breath as
+        // what it is arranging.
+        shared.set_layout(radio::console_layout::layout());
+        shared.set_theme(radio::console_layout::theme());
+    }
+    if let (Some(shared), Some(installation)) = (shared.clone(), config.installation.clone()) {
+        // The closure, not its result: it is called afresh per connection,
+        // so a console connecting after somebody attached a source is told
+        // what is now wired rather than what was there at startup.
+        shared.set_installation(installation);
     }
     cat_rigctl::run_with_native(
         session,
@@ -122,11 +199,32 @@ where
     S: cat_transport_core::CatSession + Send + 'static,
     S::Error: std::error::Error + 'static,
 {
-    let shared = config
-        .console_port
-        .map(|_| cat_rigctl::native_bridge::NativeShared::new(&radio::capabilities::TS570D));
-    if let (Some(shared), Some(addr)) = (shared.clone(), config.cn4.clone()) {
-        spectrum::spawn(shared, addr);
+    let shared = config.console_port.map(|_| match &config.devices {
+        Some(devices) => cat_rigctl::native_bridge::NativeShared::with_devices(
+            &radio::capabilities::TS570D,
+            std::sync::Arc::clone(devices),
+        ),
+        None => cat_rigctl::native_bridge::NativeShared::new(&radio::capabilities::TS570D),
+    });
+    if let (Some(shared), Some(selection)) = (shared.clone(), config.if_source.clone()) {
+        spectrum::spawn(shared, selection);
+    }
+    if let (Some(shared), Some(selection)) = (shared.clone(), config.audio_source.clone()) {
+        audio::spawn(shared, selection);
+    }
+    if let Some(shared) = shared.clone() {
+        // What this radio's console should look like, authored by the
+        // crate that knows the radio. Published in the handshake, so a
+        // console is told how to arrange itself in the same breath as
+        // what it is arranging.
+        shared.set_layout(radio::console_layout::layout());
+        shared.set_theme(radio::console_layout::theme());
+    }
+    if let (Some(shared), Some(installation)) = (shared.clone(), config.installation.clone()) {
+        // The closure, not its result: it is called afresh per connection,
+        // so a console connecting after somebody attached a source is told
+        // what is now wired rather than what was there at startup.
+        shared.set_installation(installation);
     }
     cat_rigctl::run_with_native(
         session,

@@ -10,6 +10,13 @@ rust-version.workspace = true
 [dependencies]
 # Generic CAT engine + client mechanics (extracted; see docs/adr/0004, 0005)
 cat-framework = { workspace = true }
+# The signal vocabulary this radio's declaration is written in: an IF tap
+# point is a `cat-signal` concept, and `capabilities` re-exports the types
+# so a consumer names one crate rather than three to describe one bench.
+cat-signal = { workspace = true }
+# The console arrangement this radio asks for. A declaration about the
+# rig, like `capabilities`, and it lives beside it for the same reason.
+cat-layout = { workspace = true }
 cat-client = { workspace = true }
 cat-transport-core = { workspace = true }
 

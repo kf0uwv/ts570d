@@ -71,15 +71,30 @@ impl<S> SharedSession<S> {
 
     /// Take ownership of the session for the duration of one synchronous or
     /// asynchronous operation, then hand it back with [`Self::put_back`].
-    fn take(&self) -> S {
+    pub(crate) fn take(&self) -> S {
         self.0
             .borrow_mut()
             .take()
             .expect("SharedSession: session unavailable (unexpected re-entrant use)")
     }
 
-    fn put_back(&self, session: S) {
+    pub(crate) fn put_back(&self, session: S) {
         *self.0.borrow_mut() = Some(session);
+    }
+
+    /// Borrow the session without taking it, and without panicking if it is
+    /// not there.
+    ///
+    /// [`Self::take`] `expect`s, which is right for the code paths that
+    /// promise non-reentrancy (`Ts570d`'s own methods all take `&mut self`).
+    /// The PTT line is the exception: `crate::ptt_line::PttLine`'s methods
+    /// take `&self` precisely so a console can key the transmitter from
+    /// wherever the operator's keystroke is handled, and that can land in the
+    /// middle of a CAT command, with the session checked out. `None` says
+    /// "not now"; the caller retries. It must never say "the process dies".
+    pub(crate) fn try_with<T>(&self, f: impl FnOnce(&S) -> T) -> Option<T> {
+        let guard = self.0.try_borrow().ok()?;
+        guard.as_ref().map(f)
     }
 
     /// Read-only, non-consuming access to the underlying session, for this
@@ -140,6 +155,13 @@ impl<S: CatSession> CatSession for SharedSession<S> {
 pub struct Ts570d<S: CatSession> {
     pub(crate) client: CatClient<Ts570dCommandId, SharedSession<S>>,
     session: SharedSession<S>,
+}
+
+impl<S: CatSession> Ts570d<S> {
+    /// The shared session, for `crate::ptt_line`'s `&self` capability methods.
+    pub(crate) fn shared_session(&self) -> &SharedSession<S> {
+        &self.session
+    }
 }
 
 impl<S> Ts570d<S>

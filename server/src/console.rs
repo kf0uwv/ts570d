@@ -23,45 +23,19 @@
 //! seam from `RigctlTs570d`: showing a frequency read at one moment beside
 //! a mode read at another describes a radio that never existed.
 
-use cat_native::{Command, MeterKind, MeterSample, ModeId, RadioState};
+use cat_native::{Command, MeterKind, MeterSample, RadioState};
 use cat_rigctl::native_bridge::NativeRadio;
 use cat_transport_core::{CatSession, TransportError};
-use radio::{Frequency, Mode, Ts570d};
+use radio::{Frequency, Ts570d};
 
 /// This radio, as the console protocol sees it.
 pub struct ConsoleTs570d<S: CatSession>(pub Ts570d<S>);
 
-/// The TS-570D's `MD` digit for a mode, or `None` if it has no such mode.
-///
-/// `capabilities` already refuses a mode this radio lacks, so `None` here
-/// is unreachable from the protocol — it exists so this mapping is total
-/// rather than a panic waiting for a wider `ModeId`.
-fn to_mode(id: ModeId) -> Option<Mode> {
-    Some(match id {
-        ModeId::Lsb => Mode::Lsb,
-        ModeId::Usb => Mode::Usb,
-        ModeId::CwUpper => Mode::Cw,
-        ModeId::Fm => Mode::Fm,
-        ModeId::Am => Mode::Am,
-        ModeId::RttyLsb => Mode::Fsk,
-        ModeId::CwLower => Mode::CwReverse,
-        ModeId::RttyUsb => Mode::FskReverse,
-        _ => return None,
-    })
-}
-
-fn from_mode(mode: Mode) -> ModeId {
-    match mode {
-        Mode::Lsb => ModeId::Lsb,
-        Mode::Usb => ModeId::Usb,
-        Mode::Cw => ModeId::CwUpper,
-        Mode::Fm => ModeId::Fm,
-        Mode::Am => ModeId::Am,
-        Mode::Fsk => ModeId::RttyLsb,
-        Mode::CwReverse => ModeId::CwLower,
-        Mode::FskReverse => ModeId::RttyUsb,
-    }
-}
+// The mode mapping lives in `radio` (`capabilities::to_mode` /
+// `from_mode`): the console's own native client needs the same one, and a
+// radio that disagreed with itself about `CwLower` depending on which end
+// of the socket asked would be a bad afternoon.
+use radio::capabilities::{from_mode, to_mode};
 
 #[async_trait::async_trait(?Send)]
 impl<S> NativeRadio for ConsoleTs570d<S>
@@ -130,7 +104,15 @@ where
                 Err(_) => return Err("memory channel out of range".to_string()),
             },
             // Reads are answered from the published state, never sent.
-            Command::ReadMeter { .. } | Command::ReadState => return Ok(()),
+            Command::ReadMeter { .. } | Command::ReadState | Command::ReadDevices => return Ok(()),
+            // Never reaches here: `NativeShared::apply` handles an attach
+            // against its device directory and does not queue it. Kept
+            // explicit rather than swept into a `_` arm, so the next
+            // command added to the protocol fails to compile here instead
+            // of being silently accepted and ignored.
+            Command::AttachDevice { .. } => {
+                return Err("a device attach is not a CAT command".to_string())
+            }
             Command::SetIfShift { .. } | Command::SetFilterWidth { .. } => {
                 return Err("not wired to CAT on this radio yet".to_string())
             }
@@ -143,35 +125,11 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_mode_this_radio_has_round_trips() {
-        // The two mappings are written out separately, so a mode added to
-        // one and forgotten in the other is exactly the drift to catch.
-        for mode in [
-            Mode::Lsb,
-            Mode::Usb,
-            Mode::Cw,
-            Mode::Fm,
-            Mode::Am,
-            Mode::Fsk,
-            Mode::CwReverse,
-            Mode::FskReverse,
-        ] {
-            assert_eq!(
-                to_mode(from_mode(mode)),
-                Some(mode),
-                "{mode:?} did not survive the round trip"
-            );
-        }
-    }
-
-    #[test]
-    fn a_mode_this_radio_lacks_maps_to_nothing_rather_than_to_something_wrong() {
-        // C4FM is an FT-991A mode. Silently mapping it onto USB would put
-        // the radio in a mode nobody asked for.
-        assert_eq!(to_mode(ModeId::C4fm), None);
-        assert_eq!(to_mode(ModeId::DataUsb), None);
-    }
+    // The round-trip and unknown-mode tests moved with the mapping into
+    // `radio::capabilities`, which is where the two functions now live.
+    // What stays here is the question only this seam can ask: whether the
+    // modes the capability set *offers a console* are the same ones this
+    // adapter can actually apply.
 
     #[test]
     fn the_declared_modes_are_exactly_the_ones_this_seam_accepts() {

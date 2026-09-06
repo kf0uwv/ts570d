@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use emulator::acc2::Acc2Faults;
 use emulator::emulator::Emulator;
 use emulator::logger::BackgroundLogger;
 use emulator::port::{self, PortMode};
@@ -40,24 +41,48 @@ fn main() {
         lf
     };
 
-    // Optional `--cn4 <addr>` and `--seed <n>`.
-    let (tap_addr, tap_seed) = {
-        let mut addr = None;
-        let mut seed = 0x5713_0DEFu64;
+    // The virtual hardware this radio presents, and the band behind it.
+    //
+    // `--com` and `--acc2-audio` are the ACC2-IF's two connectors;
+    // `--if-out` is the SMA on the radio's IF output -- the CN4 header on
+    // a TS-570D. The flag names the signal rather than the connector,
+    // matching the control program's own flag. All optional: an emulator with none of them
+    // is still a radio with a CAT port, which is what most tests want.
+    let mut tap_addr = None;
+    let mut com_addr = None;
+    let mut audio_addr = None;
+    let mut faults = Acc2Faults::default();
+    let mut tap_seed = 0x5713_0DEFu64;
+    {
         let mut it = args.iter().peekable();
         while let Some(arg) = it.next() {
             match arg.as_str() {
-                "--cn4" => addr = it.next().cloned(),
+                "--if-out" => tap_addr = it.next().cloned(),
+                "--com" => com_addr = it.next().cloned(),
+                "--acc2-audio" => audio_addr = it.next().cloned(),
+                "--acc2-fault" => match it.next().map(String::as_str) {
+                    Some("pin13-bonded") => faults.pin13_bonded_to_braid = true,
+                    Some("phantom-keying") => faults.phantom_keying = true,
+                    Some(other) => {
+                        eprintln!(
+                            "Unknown --acc2-fault {other:?} (want pin13-bonded or phantom-keying)"
+                        );
+                        std::process::exit(2);
+                    }
+                    None => {
+                        eprintln!("--acc2-fault needs a fault name");
+                        std::process::exit(2);
+                    }
+                },
                 "--seed" => {
                     if let Some(v) = it.next().and_then(|v| v.parse().ok()) {
-                        seed = v;
+                        tap_seed = v;
                     }
                 }
                 _ => {}
             }
         }
-        (addr, seed)
-    };
+    }
 
     // Determine port mode from --port argument.
     let mode = port::parse_port_arg(args.into_iter());
@@ -96,14 +121,63 @@ fn main() {
     // A fixed default seed rather than a random one. The band should look
     // the same every run unless somebody asks otherwise -- "the signal
     // that was here yesterday" is useful while debugging a console.
+    // One band, shared by everything that renders it. The tap and the ACC2
+    // receive-audio pin must describe the same radio, or a console's
+    // waterfall and its AF display would disagree about what is on the air.
+    let band = emulator::tap::band_for(tap_seed);
+
+    // The S-meter follows that same band, whether or not anything is
+    // watching the IF output: a radio's meter is a property of the radio,
+    // not of somebody having a waterfall open. Without this the needle sat
+    // at a constant 10 while the spectrum showed a band full of signals,
+    // and a console could not be tested against it at all.
+    emulator::meter::spawn(emu.radio(), band.clone());
+
     if let Some(addr) = tap_addr {
-        match emulator::tap::serve(emu.radio(), &addr, tap_seed) {
-            Ok(bound) => println!("CN4_TAP={bound}"),
+        match emulator::tap::serve_band(emu.radio(), &addr, band.clone()) {
+            Ok(bound) => println!("IF_OUT={bound}"),
             Err(err) => {
-                eprintln!("Failed to serve the CN4 tap on {addr}: {err}");
+                eprintln!("Failed to serve the IF output on {addr}: {err}");
                 std::process::exit(1);
             }
         }
+    }
+
+    // The ACC2 socket. Faults are set before anything is plugged into it,
+    // because SN-1's whole character is that the damage happens on seating.
+    let acc2 = emu.acc2();
+    acc2.lock().expect("acc2 lock").set_faults(faults);
+
+    // The radio's COM port, as an RFC 2217 device server. A pseudo-terminal
+    // carries no modem control lines at all, so this is the only endpoint
+    // on which the DTR that keys this station's PTT exists.
+    if let Some(addr) = com_addr {
+        match emulator::com::serve(emu.radio(), acc2.clone(), &addr) {
+            Ok(bound) => println!("COM_PORT={bound}"),
+            Err(err) => {
+                eprintln!("Failed to serve the radio's COM port on {addr}: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // ACC2 pins 3 and 11 -- the pair that goes to the sound device.
+    if let Some(addr) = audio_addr {
+        match emulator::acc2_audio::serve(emu.radio(), band, &addr) {
+            Ok(bound) => println!("ACC2_AUDIO={bound}"),
+            Err(err) => {
+                eprintln!("Failed to serve the ACC2 audio pair on {addr}: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Seat the plug once its connectors are being served. Under SN-1 this
+    // is the moment a bonded pin 13 keys the radio -- which is the point of
+    // being able to reproduce it.
+    let seated = acc2.lock().expect("acc2 lock").seat(true);
+    if let Some(keying) = seated {
+        emulator::com::apply_keying(&emu.radio(), keying);
     }
 
     // Set up Ctrl-C handler for graceful shutdown.

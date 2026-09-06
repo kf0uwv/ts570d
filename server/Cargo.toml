@@ -45,6 +45,9 @@ cat-native = { workspace = true }
 # only the librtlsdr `device` feature does, and this does not enable it.
 cat-signal = { workspace = true }
 cat-signal-rtlsdr = { workspace = true }
+# The ACC2 receive-audio pair, for a console on another machine. Opening a
+# sound card needs the `device` feature; a PCM server needs nothing.
+cat-signal-audio = { workspace = true }
 futures = { workspace = true }
 
 # Async traits (compatible with !Send futures for monoio).
@@ -59,6 +62,12 @@ tracing = { workspace = true }
 [features]
 default = []
 
+# Capture the ACC2 receive audio from a sound card on *this* machine, for
+# a console somewhere else. Off by default for the same reason as the
+# binary's: it wants the platform's sound headers, and a server pointed at
+# a PCM server needs none of it.
+audio-device = ["cat-signal-audio/device"]
+
 # Platform-specific configuration
 [target.'cfg(target_os = "linux")'.dependencies]
 # Async runtime (io_uring-based, Linux-only). Windows is now a supported
@@ -66,3 +75,8 @@ default = []
 # code has no direct monoio dependency outside #[monoio::test]-based unit
 # tests; `cat-server`/`cat-rigctl` bring their own target-gated monoio.
 monoio = { workspace = true }
+
+[dev-dependencies]
+# Synthetic bands, so a test can stand up two distinguishable rtl_tcp
+# sources and prove a swap actually took effect.
+cat-signal = { workspace = true }

@@ -23,6 +23,24 @@ use ratatui::{
 
 use radio::ts570d_radio::{Ts570dState as RadioState, VfoSel};
 
+use crate::acc2::KeySource;
+
+/// What the back panel is doing, for the connector line.
+///
+/// The front panel of a TS-570D says nothing about ACC2 — an operator
+/// looking at the real radio cannot tell whether the interface has it keyed
+/// or which pin did it. That is exactly why the emulator shows it: the
+/// whole value of a virtual radio is being able to see the things the real
+/// one hides.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Acc2Status {
+    pub seated: bool,
+    pub key_source: Option<KeySource>,
+    pub mic_muted: bool,
+    /// Transmit audio arriving on pin 11, 0.0-1.0.
+    pub pkd_level: f32,
+}
+
 /// Look up the human-readable description for a 2-character CAT command code.
 fn lookup_description(code: &str) -> Option<&'static str> {
     TS570D_COMMAND_TABLE.find(code).map(|cmd| cmd.description)
@@ -121,7 +139,7 @@ pub fn bargraph(ratio: f64, width: usize) -> String {
 /// - Col 1 (~22 chars):  Meter column — S-meter (RX) or TX meters (TX)
 /// - Col 2 (remaining):  Main LCD — annunciators, frequency, modes
 /// - Col 3 (~45% total): Command/status panel — port, command log, controls
-pub fn draw(f: &mut Frame, state: &RadioState, port: &str, log: &[String]) {
+pub fn draw(f: &mut Frame, state: &RadioState, port: &str, log: &[String], acc2: Acc2Status) {
     let area = f.size();
 
     // Outer border titled "KENWOOD TS-570D" in amber.
@@ -157,7 +175,7 @@ pub fn draw(f: &mut Frame, state: &RadioState, port: &str, log: &[String]) {
 
     draw_meter_col(f, meter_area, state);
     draw_lcd_main(f, lcd_area, state);
-    draw_command_panel(f, cmd_area, port, log);
+    draw_command_panel(f, cmd_area, port, log, acc2);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -594,11 +612,73 @@ fn draw_mode_row(f: &mut Frame, area: Rect, state: &RadioState) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// The ACC2 connector, in one line.
+///
+/// The key source is named rather than reduced to "keyed", because PKS and
+/// SS are not interchangeable: one mutes the microphone and one does not,
+/// and an operator debugging a station that is transmitting room noise
+/// needs to know which pin did it.
+fn acc2_line(acc2: Acc2Status) -> Line<'static> {
+    let mut spans = vec![Span::styled("ACC2: ", Style::default().fg(Color::Cyan))];
+
+    if !acc2.seated {
+        spans.push(Span::styled(
+            "no plug",
+            Style::default().fg(Color::DarkGray),
+        ));
+        return Line::from(spans);
+    }
+
+    match acc2.key_source {
+        Some(KeySource::Pks) => spans.push(Span::styled(
+            "PKS keyed",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        // Louder than PKS on purpose: reaching TX through pin 13 means the
+        // pin that should be cut is not, and the microphone is live.
+        Some(KeySource::Ss) => spans.push(Span::styled(
+            "SS keyed (pin 13!)",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Some(KeySource::Cat) | None => {
+            spans.push(Span::styled("idle", Style::default().fg(Color::Green)))
+        }
+    }
+
+    if acc2.key_source.is_some() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            if acc2.mic_muted {
+                "MIC MUTED"
+            } else {
+                "MIC LIVE"
+            },
+            Style::default().fg(if acc2.mic_muted {
+                Color::DarkGray
+            } else {
+                Color::Red
+            }),
+        ));
+    }
+
+    if acc2.pkd_level > 0.0 {
+        spans.push(Span::styled(
+            format!("  PKD {:>3.0}%", acc2.pkd_level * 100.0),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
+    Line::from(spans)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  COL 3 — Command/status panel
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn draw_command_panel(f: &mut Frame, area: Rect, port: &str, log: &[String]) {
+fn draw_command_panel(f: &mut Frame, area: Rect, port: &str, log: &[String], acc2: Acc2Status) {
     let panel_block = Block::default()
         .borders(Borders::ALL)
         .title(" Commands ")
@@ -610,6 +690,7 @@ fn draw_command_panel(f: &mut Frame, area: Rect, port: &str, log: &[String]) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // PORT line
+            Constraint::Length(1), // ACC2 connector line
             Constraint::Min(1),    // scrolling command log
             Constraint::Length(1), // controls
         ])
@@ -627,8 +708,10 @@ fn draw_command_panel(f: &mut Frame, area: Rect, port: &str, log: &[String]) {
     ]);
     f.render_widget(Paragraph::new(port_line), sections[0]);
 
+    f.render_widget(Paragraph::new(acc2_line(acc2)), sections[1]);
+
     // COMMANDS section — show last N lines that fit.
-    let log_area = sections[1];
+    let log_area = sections[2];
     let max_lines = log_area.height as usize;
 
     let visible: Vec<Line> = if log.len() > max_lines {
@@ -647,7 +730,7 @@ fn draw_command_panel(f: &mut Frame, area: Rect, port: &str, log: &[String]) {
         "[q] quit",
         Style::default().fg(Color::DarkGray),
     )]);
-    f.render_widget(Paragraph::new(controls_line), sections[2]);
+    f.render_widget(Paragraph::new(controls_line), sections[3]);
 }
 
 /// Extract a 2-character CAT command code from a log entry string.

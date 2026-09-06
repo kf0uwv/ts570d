@@ -15,6 +15,7 @@
 //! Interactive control state machine for keyboard-driven radio commands.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use radio::PttLineKind;
 
 use crate::diag::DiagState;
 use crate::RadioDisplay;
@@ -126,14 +127,61 @@ pub enum ControlState {
     },
     /// Showing feedback after a command.
     Feedback { message: String, is_error: bool },
-    /// Pre-diagnostic warning gate: shown when `[D]` is pressed, before any
-    /// radio command is issued. States plainly that the run will key the
-    /// transmitter and requires a connected antenna or dummy load. Requires
-    /// an explicit acknowledgment (Enter/`y`) to proceed to the callsign
-    /// prompt, or Esc to cancel back to the menu with nothing started.
-    DiagWarning,
+    /// Pre-transmit warning gate: shown before anything that genuinely keys
+    /// the transmitter, and before any radio command is issued. States
+    /// plainly what is about to happen and requires a connected antenna or
+    /// dummy load. Requires an explicit acknowledgment (Enter/`y`) to
+    /// proceed, or Esc to cancel back to the menu with nothing started.
+    ///
+    /// Carries what it is gating: the diagnostic run (`[D]`) and the PTT
+    /// line (`[P]`) key the transmitter by different means but pose the
+    /// identical hazard, so they share one gate rather than growing a second
+    /// one that could drift out of step with it (ADR 0007, ADR 0010).
+    DiagWarning(WarnedAction),
     /// Running or displaying diagnostics.
     Diagnostic(DiagState),
+    /// Driving the port's PTT handshake line by hand.
+    ///
+    /// `asserted` is what the line was last *observed* to do, not what the
+    /// operator asked for: it advances only after the port accepted the
+    /// change, so a failed assert can never render as key-down.
+    PttLine {
+        /// The line being driven.
+        line: PttLineKind,
+        /// Whether that line is currently asserted.
+        asserted: bool,
+        /// Last read of CTS.
+        cts: bool,
+        /// Last read of DSR.
+        dsr: bool,
+        /// Why the last request did not take effect, if it did not.
+        error: Option<String>,
+    },
+}
+
+/// What a [`ControlState::DiagWarning`] gate is standing in front of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarnedAction {
+    /// The diagnostic run: PTT, and CW if a callsign is supplied.
+    Diagnostics,
+    /// Hand control of the port's PTT line.
+    PttLine,
+}
+
+/// A request to move the port's PTT handshake line.
+///
+/// Not an [`ExecuteAction`]: those go through the radio task's command
+/// channel and are executed between poll cycles, which costs up to a whole
+/// poll cycle in each direction. An unkey that arrives a second after the
+/// key was pressed is a safety defect, so these are applied where the
+/// keystroke is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PttLineAction {
+    /// Drive `line` to `asserted`.
+    Set { line: PttLineKind, asserted: bool },
+    /// Put both lines back where an idle console leaves them: DTR
+    /// deasserted, RTS asserted (the radio's receive-enable input).
+    Idle,
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +200,8 @@ pub enum KeyResult {
     /// CW keying test step (`None` if left blank, in which case that step is
     /// recorded as skipped rather than sent without station ID).
     StartDiag(Option<String>),
+    /// Move the port's PTT handshake line. See [`PttLineAction`].
+    PttLine(PttLineAction),
 }
 
 /// A validated radio command ready to execute.
@@ -1190,7 +1240,14 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, radio: &RadioDisplay)
                 KeyResult::Continue
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
-                *state = ControlState::DiagWarning;
+                *state = ControlState::DiagWarning(WarnedAction::Diagnostics);
+                KeyResult::Continue
+            }
+            // Only offered when the port actually has handshake lines. A
+            // TCP client has none, and an item that could only ever report
+            // an error is worse than no item.
+            KeyCode::Char('p') | KeyCode::Char('P') if radio.ptt_line_available => {
+                *state = ControlState::DiagWarning(WarnedAction::PttLine);
                 KeyResult::Continue
             }
             KeyCode::Char('q') | KeyCode::Char('Q') => KeyResult::Quit,
@@ -1245,19 +1302,73 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, radio: &RadioDisplay)
             KeyResult::Continue
         }
 
-        ControlState::DiagWarning => match key.code {
-            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                *state = ControlState::TextInput {
-                    prompt: "Callsign for CW test (blank to skip):".to_string(),
-                    buffer: String::new(),
-                    error: None,
-                    action: InputAction::DiagCallsign,
+        ControlState::DiagWarning(what) => {
+            let what = *what;
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    *state = match what {
+                        WarnedAction::Diagnostics => ControlState::TextInput {
+                            prompt: "Callsign for CW test (blank to skip):".to_string(),
+                            buffer: String::new(),
+                            error: None,
+                            action: InputAction::DiagCallsign,
+                        },
+                        // DTR is where every interface this console has met
+                        // is wired, so it is what the screen opens on.
+                        WarnedAction::PttLine => ControlState::PttLine {
+                            line: PttLineKind::Dtr,
+                            asserted: false,
+                            cts: false,
+                            dsr: false,
+                            error: None,
+                        },
+                    };
+                    KeyResult::Continue
+                }
+                KeyCode::Esc => {
+                    *state = ControlState::Menu;
+                    KeyResult::Continue
+                }
+                _ => KeyResult::Continue,
+            }
+        }
+
+        ControlState::PttLine {
+            line,
+            asserted,
+            error,
+            ..
+        } => match key.code {
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                let want = !*asserted;
+                *error = None;
+                // `asserted` is deliberately not flipped here: the caller
+                // flips it once the port has actually moved the line.
+                KeyResult::PttLine(PttLineAction::Set {
+                    line: *line,
+                    asserted: want,
+                })
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Char('r') | KeyCode::Char('R') => {
+                let wanted = if matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D')) {
+                    PttLineKind::Dtr
+                } else {
+                    PttLineKind::Rts
                 };
+                if *asserted {
+                    // Switching the selection while a line is up would leave
+                    // that line up with nothing on screen still pointing at
+                    // it — one keystroke from keying two things at once.
+                    *error = Some("Unkey before changing line".to_string());
+                } else {
+                    *line = wanted;
+                    *error = None;
+                }
                 KeyResult::Continue
             }
             KeyCode::Esc => {
                 *state = ControlState::Menu;
-                KeyResult::Continue
+                KeyResult::PttLine(PttLineAction::Idle)
             }
             _ => KeyResult::Continue,
         },
@@ -1598,12 +1709,15 @@ mod tests {
         let radio = RadioDisplay::default();
         let result = handle_key(key(KeyCode::Char('d')), &mut state, &radio);
         assert!(matches!(result, KeyResult::Continue));
-        assert!(matches!(state, ControlState::DiagWarning));
+        assert!(matches!(
+            state,
+            ControlState::DiagWarning(WarnedAction::Diagnostics)
+        ));
     }
 
     #[test]
     fn test_diag_warning_esc_cancels_to_menu() {
-        let mut state = ControlState::DiagWarning;
+        let mut state = ControlState::DiagWarning(WarnedAction::Diagnostics);
         let radio = RadioDisplay::default();
         let result = handle_key(key(KeyCode::Esc), &mut state, &radio);
         assert!(matches!(result, KeyResult::Continue));
@@ -1612,7 +1726,7 @@ mod tests {
 
     #[test]
     fn test_diag_warning_enter_transitions_to_callsign_prompt() {
-        let mut state = ControlState::DiagWarning;
+        let mut state = ControlState::DiagWarning(WarnedAction::Diagnostics);
         let radio = RadioDisplay::default();
         let result = handle_key(key(KeyCode::Enter), &mut state, &radio);
         assert!(matches!(result, KeyResult::Continue));
@@ -1627,7 +1741,7 @@ mod tests {
 
     #[test]
     fn test_diag_warning_y_also_transitions_to_callsign_prompt() {
-        let mut state = ControlState::DiagWarning;
+        let mut state = ControlState::DiagWarning(WarnedAction::Diagnostics);
         let radio = RadioDisplay::default();
         let result = handle_key(key(KeyCode::Char('y')), &mut state, &radio);
         assert!(matches!(result, KeyResult::Continue));
@@ -1707,5 +1821,163 @@ mod tests {
         } else {
             panic!("Expected TextInput state (should not have started diagnostics)");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // PTT line: the same TX gate, then hand control of the line
+    // -----------------------------------------------------------------
+
+    /// A console whose port has handshake lines.
+    fn wired() -> RadioDisplay {
+        RadioDisplay {
+            ptt_line_available: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn p_does_nothing_when_the_port_has_no_handshake_lines() {
+        // A TCP client has no line to drive. An item that could only ever
+        // report an error is worse than no item.
+        let mut state = ControlState::Menu;
+        let radio = RadioDisplay::default();
+        assert!(!radio.ptt_line_available);
+        let result = handle_key(key(KeyCode::Char('p')), &mut state, &radio);
+        assert!(matches!(result, KeyResult::Continue));
+        assert!(matches!(state, ControlState::Menu));
+    }
+
+    #[test]
+    fn p_goes_through_the_transmit_warning_first() {
+        // This keys the transmitter as surely as the diagnostic run does,
+        // so it is behind the same gate (ADR 0007, ADR 0010).
+        let mut state = ControlState::Menu;
+        let result = handle_key(key(KeyCode::Char('p')), &mut state, &wired());
+        assert!(matches!(result, KeyResult::Continue));
+        assert!(matches!(
+            state,
+            ControlState::DiagWarning(WarnedAction::PttLine)
+        ));
+    }
+
+    #[test]
+    fn acknowledging_the_warning_opens_the_line_screen_unkeyed() {
+        let mut state = ControlState::DiagWarning(WarnedAction::PttLine);
+        let result = handle_key(key(KeyCode::Enter), &mut state, &wired());
+        assert!(matches!(result, KeyResult::Continue));
+        match state {
+            ControlState::PttLine {
+                line,
+                asserted,
+                error,
+                ..
+            } => {
+                assert_eq!(line, PttLineKind::Dtr);
+                assert!(!asserted, "the screen must open with the line released");
+                assert!(error.is_none());
+            }
+            _ => panic!("expected the PTT line screen"),
+        }
+    }
+
+    #[test]
+    fn declining_the_warning_starts_nothing() {
+        let mut state = ControlState::DiagWarning(WarnedAction::PttLine);
+        let result = handle_key(key(KeyCode::Esc), &mut state, &wired());
+        assert!(matches!(result, KeyResult::Continue));
+        assert!(matches!(state, ControlState::Menu));
+    }
+
+    fn line_screen(line: PttLineKind, asserted: bool) -> ControlState {
+        ControlState::PttLine {
+            line,
+            asserted,
+            cts: false,
+            dsr: false,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn space_asks_for_the_line_but_does_not_claim_it_moved() {
+        // `asserted` is what the port was last seen to do. If the request
+        // failed and the screen had already flipped, it would be showing
+        // key-down on a radio that is receiving -- or the reverse.
+        let mut state = line_screen(PttLineKind::Dtr, false);
+        let result = handle_key(key(KeyCode::Char(' ')), &mut state, &wired());
+        assert!(matches!(
+            result,
+            KeyResult::PttLine(PttLineAction::Set {
+                line: PttLineKind::Dtr,
+                asserted: true
+            })
+        ));
+        match state {
+            ControlState::PttLine { asserted, .. } => assert!(!asserted),
+            _ => panic!("expected to stay on the PTT line screen"),
+        }
+    }
+
+    #[test]
+    fn space_releases_a_line_that_is_up() {
+        let mut state = line_screen(PttLineKind::Rts, true);
+        let result = handle_key(key(KeyCode::Enter), &mut state, &wired());
+        assert!(matches!(
+            result,
+            KeyResult::PttLine(PttLineAction::Set {
+                line: PttLineKind::Rts,
+                asserted: false
+            })
+        ));
+    }
+
+    #[test]
+    fn r_and_d_choose_the_line_while_it_is_down() {
+        let mut state = line_screen(PttLineKind::Dtr, false);
+        handle_key(key(KeyCode::Char('r')), &mut state, &wired());
+        match state {
+            ControlState::PttLine { line, .. } => assert_eq!(line, PttLineKind::Rts),
+            _ => panic!("expected the PTT line screen"),
+        }
+        handle_key(key(KeyCode::Char('d')), &mut state, &wired());
+        match state {
+            ControlState::PttLine { line, .. } => assert_eq!(line, PttLineKind::Dtr),
+            _ => panic!("expected the PTT line screen"),
+        }
+    }
+
+    #[test]
+    fn the_line_cannot_be_changed_while_it_is_up() {
+        // Switching the selection while DTR is asserted would leave DTR up
+        // with the screen pointing at RTS: one keystroke from keying two
+        // things at once, and nothing on screen saying so.
+        let mut state = line_screen(PttLineKind::Dtr, true);
+        let result = handle_key(key(KeyCode::Char('r')), &mut state, &wired());
+        assert!(matches!(result, KeyResult::Continue));
+        match state {
+            ControlState::PttLine {
+                line,
+                asserted,
+                error,
+                ..
+            } => {
+                assert_eq!(line, PttLineKind::Dtr);
+                assert!(asserted);
+                assert!(
+                    error.is_some(),
+                    "the operator must be told why nothing moved"
+                );
+            }
+            _ => panic!("expected the PTT line screen"),
+        }
+    }
+
+    #[test]
+    fn leaving_the_screen_releases_the_line() {
+        // Esc must never be a way to walk away from a keyed transmitter.
+        let mut state = line_screen(PttLineKind::Dtr, true);
+        let result = handle_key(key(KeyCode::Esc), &mut state, &wired());
+        assert!(matches!(result, KeyResult::PttLine(PttLineAction::Idle)));
+        assert!(matches!(state, ControlState::Menu));
     }
 }

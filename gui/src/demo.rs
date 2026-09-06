@@ -133,6 +133,11 @@ pub fn ts570d() -> CapabilitiesWire {
             if_center_hz: 73_050_000,
             inverted: true,
         },
+        // A fixture for a still, not a server: the arrangement is the
+        // server's to author, so a console drawn from this uses its own
+        // default.
+        layout: None,
+        theme: None,
         installation: Installation::default(),
     }
 }
@@ -164,6 +169,11 @@ pub fn bare() -> CapabilitiesWire {
         memory: None,
         menu: None,
         signal: SignalSupport::None,
+        // A fixture for a still, not a server: the arrangement is the
+        // server's to author, so a console drawn from this uses its own
+        // default.
+        layout: None,
+        theme: None,
         installation: Installation::default(),
     }
 }

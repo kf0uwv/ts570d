@@ -16,8 +16,14 @@
 //!
 //! Provides the ratatui-based terminal interface for the radio controller.
 
+// The console lives in `cat-ui-ratatui` now. It was 1805 lines whose only
+// radio-specific parts were a meter table and a mode-label lookup, both of
+// which the capability document already answers. Re-exported so this
+// crate's own paths are unchanged.
+pub use cat_ui_ratatui::console;
 pub(crate) mod control;
 pub(crate) mod diag;
+pub mod feeds;
 pub(crate) mod layout;
 mod terminal;
 // Not `#[cfg(target_os = "windows")]`-gated (see its own module doc): it has
@@ -29,6 +35,13 @@ mod terminal;
 mod win_sched;
 
 pub use terminal::run;
+// The PTT-line-carrying variant of `run`. The wiring layer picks between
+// them by whether the transport it opened has modem control lines at all:
+// `--port` and `--rfc2217` do, `--server` does not. See `docs/adr/0010`.
+/// [`run_with_ptt_line`], for a console with a spectrum and/or audio
+/// source attached. See `feeds`.
+pub use terminal::run_console;
+pub use terminal::run_with_ptt_line;
 
 /// Draw the whole console into a frame, for `examples/screen.rs`.
 ///
@@ -37,11 +50,17 @@ pub use terminal::run;
 /// draws the same panels through the same functions, so what it shows is
 /// what an operator sees.
 pub fn debug_draw(f: &mut ratatui::Frame, state: &RadioDisplay) {
-    let (header, status, errors, controls) = layout::split_areas(f.size());
-    layout::draw_header(f, header);
-    layout::draw_ui(f, status, state);
-    layout::draw_errors(f, errors, state);
-    layout::draw_control_panel(f, controls, &control::ControlState::Menu);
+    let caps = cat_native::CapabilitiesWire::from(&radio::capabilities::TS570D);
+    let view = console::ConsoleView::for_capabilities(&caps);
+    console::draw(f, f.size(), state, &view, &caps);
+}
+
+/// Draw the console with a caller-supplied view, for a still of a state the
+/// default does not reach (a tab that is not the first, a command line
+/// mid-type, a spectrum that has frames in it).
+pub fn debug_draw_view(f: &mut ratatui::Frame, state: &RadioDisplay, view: &console::ConsoleView) {
+    let caps = cat_native::CapabilitiesWire::from(&radio::capabilities::TS570D);
+    console::draw(f, f.size(), state, view, &caps);
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -52,104 +71,7 @@ pub enum UiError {
 
 pub type UiResult<T> = Result<T, UiError>;
 
-/// Live radio state for UI rendering.
-/// All fields have defaults matching TS-570D power-on state.
-#[derive(Debug, Clone)]
-pub struct RadioDisplay {
-    // --- Primary (from IF / get_information) ---
-    pub vfo_a_hz: u64,
-    pub vfo_b_hz: u64,
-    pub mode: String,
-    pub tx: bool,
-    pub rit: bool,
-    pub xit: bool,
-    pub rit_xit_offset_hz: i32,
-    pub split: bool,
-    pub scan: bool,
-    pub memory_channel: u8,
-    pub memory_mode: bool,
-
-    // --- Meters ---
-    pub smeter: u16,
-
-    // --- Gains / levels ---
-    pub af_gain: u8,
-    pub rf_gain: u8,
-    pub squelch: u8,
-    pub mic_gain: u8,
-    pub power_pct: u8,
-    pub agc: u8,
-
-    // --- Receiver features ---
-    pub noise_blanker: bool,
-    pub noise_reduction: u8,
-    pub preamp: bool,
-    pub attenuator: bool,
-    pub speech_processor: bool,
-    pub beat_cancel: u8,
-
-    // --- Transmit ---
-    pub vox: bool,
-    pub antenna: u8,
-
-    // --- VFO routing ---
-    pub rx_vfo: u8,
-    pub tx_vfo: u8,
-
-    // --- Tone ---
-    pub ctcss: bool,
-    pub freq_lock: bool,
-    pub fine_step: bool,
-
-    // --- Poll errors (from most recent poll cycle) ---
-    pub poll_errors: Vec<String>,
-
-    // --- Connection health ---
-    /// `false` when the radio has been unresponsive for 3 consecutive poll cycles.
-    pub connected: bool,
-
-    /// `true` from startup until the first successful poll cycle completes.
-    /// Used to show "Connecting..." instead of "CONNECTION LOST" on startup.
-    pub initializing: bool,
-}
-
-impl Default for RadioDisplay {
-    fn default() -> Self {
-        Self {
-            vfo_a_hz: 14_000_000,
-            vfo_b_hz: 14_100_000,
-            mode: "USB".to_string(),
-            tx: false,
-            rit: false,
-            xit: false,
-            rit_xit_offset_hz: 0,
-            split: false,
-            scan: false,
-            memory_channel: 0,
-            memory_mode: false,
-            smeter: 0,
-            af_gain: 200,
-            rf_gain: 255,
-            squelch: 0,
-            mic_gain: 50,
-            power_pct: 100,
-            agc: 2,
-            noise_blanker: false,
-            noise_reduction: 0,
-            preamp: false,
-            attenuator: false,
-            speech_processor: false,
-            beat_cancel: 0,
-            vox: false,
-            antenna: 1,
-            rx_vfo: 0,
-            tx_vfo: 0,
-            ctcss: false,
-            freq_lock: false,
-            fine_step: false,
-            poll_errors: Vec::new(),
-            connected: true,
-            initializing: true,
-        }
-    }
-}
+// `RadioDisplay` moved to `cat-ui` when a second radio needed the same
+// console. It was already radio-generic in shape -- a dial, a mode,
+// meters, gains -- and two copies would have agreed until one was edited.
+pub use cat_ui::display::RadioDisplay;

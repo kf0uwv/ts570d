@@ -20,137 +20,26 @@ use ratatui::{
     Frame,
 };
 
-use crate::control::{group_command_labels, ControlState};
+use crate::control::{group_command_labels, ControlState, WarnedAction};
 use crate::diag::{DiagResult, DiagState};
 use crate::terminal::DIAG_STEP_COUNT;
-use crate::RadioDisplay;
 
 // Shared console logic and terminal widgets (radio-cat-rs ADR 0011 rev 4).
 // What stays here is this radio's LAYOUT and FEATURE SET; what comes from
 // these crates is anything with one correct answer per input.
-use cat_framework::capabilities::MeterKind;
-use cat_ui::{format_hz, MeterReading};
-use cat_ui_ratatui::{
-    bar_spans, error_panel, header, link_panel, menu_column, meter_spans, ErrorPanelStyles,
-    LinkState,
-};
-
-/// This radio's S-meter, with the raw value the last poll returned.
-///
-/// Goes through `from_meters` rather than being built by hand so the
-/// reading arrives carrying both its 0-30 range and this radio's S-unit
-/// table. Neither is a thing the widgets should have to be told.
-fn smeter_reading(state: &RadioDisplay) -> Option<MeterReading> {
-    MeterReading::from_meters(
-        &radio::capabilities::TS570D.meters,
-        MeterKind::S,
-        state.smeter,
-    )
-}
-
-/// Build AGC label from numeric code.
-fn agc_label(agc: u8) -> &'static str {
-    match agc {
-        0 => "Off",
-        1 => "Slow",
-        2 => "Mid",
-        3 => "Fast",
-        _ => "?",
-    }
-}
-
-/// Build noise reduction label.
-fn nr_label(nr: u8) -> &'static str {
-    match nr {
-        1 => "NR1",
-        2 => "NR2",
-        _ => "OFF",
-    }
-}
-
-/// Build beat cancel label.
-fn bc_label(bc: u8) -> &'static str {
-    match bc {
-        1 => "BC1",
-        2 => "BC2",
-        _ => "OFF",
-    }
-}
-
-/// Style for an ON indicator.
-fn on_style() -> Style {
-    Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD)
-}
-
-/// Style for an OFF indicator.
-fn off_style() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
+use cat_ui_ratatui::{link_panel, menu_column, LinkState};
 
 // ---------------------------------------------------------------------------
 // Top-level layout splitter
 // ---------------------------------------------------------------------------
 
-/// Split the full terminal area into (header, status, errors, controls) areas.
-pub fn split_areas(area: Rect) -> (Rect, Rect, Rect, Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Length(7), // Status
-            Constraint::Length(5), // Errors  (border + 3 lines)
-            Constraint::Min(8),    // Controls
-        ])
-        .split(area);
-    (chunks[0], chunks[1], chunks[2], chunks[3])
-}
-
 // ---------------------------------------------------------------------------
 // draw_header
 // ---------------------------------------------------------------------------
 
-/// Draw the TS-570D title header block.
-pub fn draw_header(f: &mut Frame, area: Rect) {
-    header(
-        "TS-570D RADIO CONTROL",
-        Alignment::Center,
-        area,
-        f.buffer_mut(),
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
-}
-
 // ---------------------------------------------------------------------------
 // draw_errors — poll error panel
 // ---------------------------------------------------------------------------
-
-/// Draw the poll error panel.
-///
-/// The slot is reserved whether or not anything went wrong, so an empty
-/// list draws "No errors" rather than nothing — an empty bordered box
-/// reads as a panel that has failed, not one with nothing to say.
-///
-/// One thing changed when this moved onto the shared widget: the three
-/// errors shown are now the **most recent** three rather than the first
-/// three. A radio failing in a loop used to pin this panel to its oldest
-/// failures and never show the current one. Recorded in
-/// `docs/renderer-parity.md`.
-pub fn draw_errors(f: &mut Frame, area: Rect, state: &RadioDisplay) {
-    error_panel(
-        &state.poll_errors,
-        "Errors",
-        ErrorPanelStyles {
-            error: Style::default().fg(Color::Red),
-            quiet: Some(("No errors", Style::default().fg(Color::DarkGray))),
-        },
-        area,
-        f.buffer_mut(),
-    );
-}
 
 // ---------------------------------------------------------------------------
 // draw_disconnected — connection-lost overlay (replaces control panel)
@@ -180,327 +69,6 @@ pub fn draw_disconnected(f: &mut Frame, area: Rect, errors: &[String], initializ
 // draw_ui — status panel (accepts explicit area)
 // ---------------------------------------------------------------------------
 
-pub fn draw_ui(f: &mut Frame, area: Rect, state: &RadioDisplay) {
-    // Outer block with title
-    let outer_block = Block::default().title(" Status ").borders(Borders::ALL);
-    let inner = outer_block.inner(area);
-    f.render_widget(outer_block, area);
-
-    // Inner vertical layout: 5 rows
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2), // Row 1: Primary (VFO + S-meter)
-            Constraint::Length(1), // Row 2: Gains
-            Constraint::Length(1), // Row 3: Receiver features
-            Constraint::Length(1), // Row 4: Flags
-            Constraint::Length(1), // Row 5: Status bar
-            Constraint::Min(0),    // Filler
-        ])
-        .split(inner);
-
-    // -----------------------------------------------------------------------
-    // Row 1 — Primary
-    // -----------------------------------------------------------------------
-
-    let smeter = smeter_reading(state);
-    let label = smeter.map(|r| r.s_unit()).unwrap_or("--");
-    let (tx_text, tx_color) = if state.tx {
-        ("TX", Color::Red)
-    } else {
-        ("RX", Color::Green)
-    };
-
-    let mut line1_spans = vec![
-        Span::styled("VFO A  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format_hz(state.vfo_a_hz),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("{:<6}", state.mode),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::raw("  S "),
-        Span::styled("▐", Style::default().fg(Color::Green)),
-    ];
-    // The end caps are layout and stay here; the 20 cells between them are
-    // the shared bar. Both halves keep the green this panel has always
-    // used -- the block characters carry the contrast -- so the only thing
-    // an operator sees change is that the bar now resolves eight sub-levels
-    // per cell instead of whole cells.
-    line1_spans.extend(match smeter {
-        Some(r) => meter_spans(
-            r,
-            20,
-            Style::default().fg(Color::Green),
-            Style::default().fg(Color::Green),
-        ),
-        None => bar_spans(
-            0.0,
-            20,
-            Style::default().fg(Color::DarkGray),
-            Style::default().fg(Color::DarkGray),
-        ),
-    });
-    line1_spans.extend([
-        Span::styled("▌", Style::default().fg(Color::Green)),
-        Span::raw(" "),
-        Span::styled(format!("{:<6}", label), Style::default().fg(Color::Green)),
-        Span::styled(
-            tx_text,
-            Style::default().fg(tx_color).add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    let line1 = Line::from(line1_spans);
-
-    let mut line2_spans = vec![
-        Span::styled("VFO B  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format_hz(state.vfo_b_hz), Style::default().fg(Color::White)),
-        Span::raw("  "),
-    ];
-
-    if state.rit {
-        line2_spans.push(Span::styled(
-            format!("RIT: {:+}Hz  ", state.rit_xit_offset_hz),
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-    if state.xit {
-        line2_spans.push(Span::styled(
-            format!("XIT: {:+}Hz  ", state.rit_xit_offset_hz),
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-    if !state.rit && !state.xit {
-        line2_spans.push(Span::styled("RIT:OFF  XIT:OFF  ", off_style()));
-    }
-
-    let split_style = if state.split { on_style() } else { off_style() };
-    let split_text = if state.split {
-        "Split:ON  "
-    } else {
-        "Split:OFF  "
-    };
-    line2_spans.push(Span::styled(split_text, split_style));
-
-    if state.memory_mode {
-        line2_spans.push(Span::styled(
-            format!("CH: {:02}", state.memory_channel),
-            Style::default().fg(Color::Cyan),
-        ));
-    } else {
-        line2_spans.push(Span::styled(
-            format!("ANT:{}", state.antenna),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-
-    let primary = Paragraph::new(vec![line1, Line::from(line2_spans)]);
-    f.render_widget(primary, rows[0]);
-
-    // -----------------------------------------------------------------------
-    // Row 2 — Gains
-    // -----------------------------------------------------------------------
-
-    let label_style = Style::default().fg(Color::DarkGray);
-    let value_style = Style::default().fg(Color::White);
-    let bracket_style = Style::default().fg(Color::DarkGray);
-    let filled_style = Style::default().fg(Color::Yellow);
-    let empty_style = Style::default().fg(Color::DarkGray);
-
-    // These used to build a bar string and then filter it character by
-    // character back into the two halves the line needs. `bar_spans`
-    // returns those halves directly -- it is the same bar `meter_bar`
-    // draws, in the shape this panel composes in.
-    let af = bar_spans(state.af_gain as f32 / 255.0, 10, filled_style, empty_style);
-    let rf = bar_spans(state.rf_gain as f32 / 255.0, 10, filled_style, empty_style);
-    let mic = bar_spans(state.mic_gain as f32 / 100.0, 10, filled_style, empty_style);
-
-    let mut gain_spans = vec![
-        Span::styled("AF:", label_style),
-        Span::styled("[", bracket_style),
-    ];
-    gain_spans.extend(af);
-    gain_spans.extend([
-        Span::styled("]", bracket_style),
-        Span::raw("  "),
-        Span::styled("RF:", label_style),
-        Span::styled("[", bracket_style),
-    ]);
-    gain_spans.extend(rf);
-    gain_spans.extend([
-        Span::styled("]", bracket_style),
-        Span::raw("  "),
-        Span::styled("MIC:", label_style),
-        Span::styled("[", bracket_style),
-    ]);
-    gain_spans.extend(mic);
-    gain_spans.extend([
-        Span::styled("]", bracket_style),
-        Span::raw("  "),
-        Span::styled("SQL:", label_style),
-        Span::styled(format!("{:>3}", state.squelch), value_style),
-        Span::raw("  "),
-        Span::styled("PWR:", label_style),
-        Span::styled(format!("{:3}W", state.power_pct), value_style),
-        Span::raw("  "),
-        Span::styled("AGC:", label_style),
-        Span::styled(agc_label(state.agc), value_style),
-    ]);
-    let gains_line = Line::from(gain_spans);
-
-    f.render_widget(Paragraph::new(gains_line), rows[1]);
-
-    // -----------------------------------------------------------------------
-    // Row 3 — Receiver features
-    // -----------------------------------------------------------------------
-
-    let nb_style = if state.noise_blanker {
-        on_style()
-    } else {
-        off_style()
-    };
-    let nb_text = if state.noise_blanker { "ON " } else { "OFF" };
-
-    let nr_text = nr_label(state.noise_reduction);
-    let nr_style = if state.noise_reduction != 0 {
-        on_style()
-    } else {
-        off_style()
-    };
-
-    let att_style = if state.attenuator {
-        on_style()
-    } else {
-        off_style()
-    };
-    let att_text = if state.attenuator { "ON " } else { "OFF" };
-
-    let pre_style = if state.preamp {
-        on_style()
-    } else {
-        off_style()
-    };
-    let pre_text = if state.preamp { "ON " } else { "OFF" };
-
-    let proc_style = if state.speech_processor {
-        on_style()
-    } else {
-        off_style()
-    };
-    let proc_text = if state.speech_processor { "ON " } else { "OFF" };
-
-    let vox_style = if state.vox { on_style() } else { off_style() };
-    let vox_text = if state.vox { "ON " } else { "OFF" };
-
-    let bc_text = bc_label(state.beat_cancel);
-    let bc_style = if state.beat_cancel != 0 {
-        on_style()
-    } else {
-        off_style()
-    };
-
-    let rx_line = Line::from(vec![
-        Span::styled("NB:", label_style),
-        Span::styled(nb_text, nb_style),
-        Span::raw("  "),
-        Span::styled("NR:", label_style),
-        Span::styled(nr_text, nr_style),
-        Span::raw("  "),
-        Span::styled("ATT:", label_style),
-        Span::styled(att_text, att_style),
-        Span::raw("  "),
-        Span::styled("PRE:", label_style),
-        Span::styled(pre_text, pre_style),
-        Span::raw("  "),
-        Span::styled("PROC:", label_style),
-        Span::styled(proc_text, proc_style),
-        Span::raw("  "),
-        Span::styled("VOX:", label_style),
-        Span::styled(vox_text, vox_style),
-        Span::raw("  "),
-        Span::styled("BC:", label_style),
-        Span::styled(bc_text, bc_style),
-    ]);
-
-    f.render_widget(Paragraph::new(rx_line), rows[2]);
-
-    // -----------------------------------------------------------------------
-    // Row 4 — Flags
-    // -----------------------------------------------------------------------
-
-    let scan_style = if state.scan { on_style() } else { off_style() };
-    let scan_text = if state.scan { "ON " } else { "OFF" };
-
-    let lock_style = if state.freq_lock {
-        on_style()
-    } else {
-        off_style()
-    };
-    let lock_text = if state.freq_lock { "ON " } else { "OFF" };
-
-    let fine_style = if state.fine_step {
-        on_style()
-    } else {
-        off_style()
-    };
-    let fine_text = if state.fine_step { "ON " } else { "OFF" };
-
-    let ctcss_style = if state.ctcss { on_style() } else { off_style() };
-    let ctcss_text = if state.ctcss { "ON " } else { "OFF" };
-
-    let flags_line = Line::from(vec![
-        Span::styled("Scan:", label_style),
-        Span::styled(scan_text, scan_style),
-        Span::raw("  "),
-        Span::styled("Lock:", label_style),
-        Span::styled(lock_text, lock_style),
-        Span::raw("  "),
-        Span::styled("Fine:", label_style),
-        Span::styled(fine_text, fine_style),
-        Span::raw("  "),
-        Span::styled("CTCSS:", label_style),
-        Span::styled(ctcss_text, ctcss_style),
-    ]);
-
-    f.render_widget(Paragraph::new(flags_line), rows[3]);
-
-    // -----------------------------------------------------------------------
-    // Row 5 — Status bar
-    // -----------------------------------------------------------------------
-
-    let rx_vfo_label = match state.rx_vfo {
-        0 => "VFO-A",
-        1 => "VFO-B",
-        2 => "MEM",
-        _ => "?",
-    };
-    let ant_label = match state.antenna {
-        1 => "ANT1",
-        2 => "ANT2",
-        _ => "ANT?",
-    };
-    let status_line = Line::from(vec![
-        Span::styled(
-            "TS-570D Radio Control",
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw("  |  "),
-        Span::styled("RX:", Style::default().fg(Color::DarkGray)),
-        Span::styled(rx_vfo_label, Style::default().fg(Color::White)),
-        Span::raw("  "),
-        Span::styled(ant_label, Style::default().fg(Color::White)),
-        Span::raw("  |  "),
-        Span::styled("q: quit", Style::default().fg(Color::DarkGray)),
-    ]);
-
-    f.render_widget(Paragraph::new(status_line), rows[4]);
-}
-
 // ---------------------------------------------------------------------------
 // draw_control_panel
 // ---------------------------------------------------------------------------
@@ -518,13 +86,33 @@ fn menu_key_style() -> Style {
 }
 
 /// Draw the interactive control panel.
-pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
+///
+/// `ptt_line_available` decides whether the `[P]` PTT-line item appears in
+/// the menu: it is a property of the port, not of the radio, and a console
+/// talking to a remote server over TCP has no line to drive.
+pub fn draw_control_panel(
+    f: &mut Frame,
+    area: Rect,
+    state: &ControlState,
+    ptt_line_available: bool,
+) {
     if let ControlState::Diagnostic(diag_state) = state {
         draw_diag_panel(f, area, diag_state);
         return;
     }
-    if let ControlState::DiagWarning = state {
-        draw_diag_warning_panel(f, area);
+    if let ControlState::DiagWarning(what) = state {
+        draw_diag_warning_panel(f, area, *what);
+        return;
+    }
+    if let ControlState::PttLine {
+        line,
+        asserted,
+        cts,
+        dsr,
+        error,
+    } = state
+    {
+        draw_ptt_line_panel(f, area, *line, *asserted, *cts, *dsr, error.as_deref());
         return;
     }
 
@@ -555,13 +143,13 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
                 ("R", "Receive"),
                 ("T", "Transmit"),
             ];
-            let right: &[(&str, &str)] = &[
-                ("C", "CW"),
-                ("O", "Tones"),
-                ("S", "System"),
-                ("D", "Diag"),
-                ("Q", "Quit"),
-            ];
+            let mut right: Vec<(&str, &str)> =
+                vec![("C", "CW"), ("O", "Tones"), ("S", "System"), ("D", "Diag")];
+            if ptt_line_available {
+                right.push(("P", "PTT line"));
+            }
+            right.push(("Q", "Quit"));
+            let right: &[(&str, &str)] = &right;
 
             f.render_widget(
                 Paragraph::new(menu_column(left, menu_key_style(), Style::default())),
@@ -708,29 +296,53 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
 // draw_diag_warning_panel — pre-diagnostic TX safety gate
 // ---------------------------------------------------------------------------
 
-/// Draw the hard-to-miss warning shown before a diagnostic run starts.
+/// Draw the hard-to-miss warning shown before anything that keys the
+/// transmitter.
 ///
-/// The diagnostic run genuinely keys the transmitter (PTT, and CW if a
-/// callsign is supplied). Transmitting into an open or mismatched load can
-/// damage the transceiver's final amplifier stage, so this screen requires
-/// an explicit acknowledgment before anything is sent to the radio.
-pub fn draw_diag_warning_panel(f: &mut Frame, area: Rect) {
+/// Both things behind this gate genuinely key the transmitter: the
+/// diagnostic run (PTT, and CW if a callsign is supplied) does it over CAT,
+/// and the PTT-line screen does it by asserting a handshake line on the
+/// port. Transmitting into an open or mismatched load can damage the
+/// transceiver's final amplifier stage, so this screen requires an explicit
+/// acknowledgment before either one starts. See `docs/adr/0007` and
+/// `docs/adr/0010`.
+pub fn draw_diag_warning_panel(f: &mut Frame, area: Rect, what: WarnedAction) {
+    let title = match what {
+        WarnedAction::Diagnostics => " \u{26a0} DIAGNOSTICS \u{2014} TRANSMIT WARNING \u{26a0} ",
+        WarnedAction::PttLine => " \u{26a0} PTT LINE \u{2014} TRANSMIT WARNING \u{26a0} ",
+    };
     let outer_block = Block::default()
-        .title(" \u{26a0} DIAGNOSTICS \u{2014} TRANSMIT WARNING \u{26a0} ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
     let inner = outer_block.inner(area);
     f.render_widget(outer_block, area);
 
-    let lines = vec![
+    let headline = match what {
+        WarnedAction::Diagnostics => "This diagnostic run will KEY THE TRANSMITTER.",
+        WarnedAction::PttLine => "The next screen will KEY THE TRANSMITTER.",
+    };
+    let detail: Vec<Line> = match what {
+        WarnedAction::Diagnostics => vec![
+            Line::from("It briefly transmits PTT, and sends a real CW test"),
+            Line::from("message if you supply a callsign on the next screen."),
+        ],
+        WarnedAction::PttLine => vec![
+            Line::from("Asserting the line an interface is wired to holds the"),
+            Line::from("radio in transmit for as long as you leave it up."),
+        ],
+    };
+
+    let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "This diagnostic run will KEY THE TRANSMITTER.",
+            headline,
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("It briefly transmits PTT, and sends a real CW test"),
-        Line::from("message if you supply a callsign on the next screen."),
+    ];
+    lines.extend(detail);
+    lines.extend(vec![
         Line::from(""),
         Line::from(Span::styled(
             "The radio MUST be connected to a proper antenna or dummy load.",
@@ -757,7 +369,7 @@ pub fn draw_diag_warning_panel(f: &mut Frame, area: Rect) {
             ),
             Span::raw(" cancel"),
         ]),
-    ];
+    ]);
 
     f.render_widget(
         Paragraph::new(lines)
@@ -765,6 +377,85 @@ pub fn draw_diag_warning_panel(f: &mut Frame, area: Rect) {
             .wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+// ---------------------------------------------------------------------------
+// draw_ptt_line_panel -- hand control of the port's PTT handshake line
+// ---------------------------------------------------------------------------
+
+/// Draw the PTT-line screen.
+///
+/// Shows which line is selected, whether it is up, and the handshake inputs
+/// the port reports back. CTS is the useful one on this radio: it follows
+/// the radio's COM port being alive, so an operator who sees the line go up
+/// with CTS down knows the radio, not the cable, is what is missing.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_ptt_line_panel(
+    f: &mut Frame,
+    area: Rect,
+    line: radio::PttLineKind,
+    asserted: bool,
+    cts: bool,
+    dsr: bool,
+    error: Option<&str>,
+) {
+    let outer_block = Block::default()
+        .title(" PTT line ")
+        .borders(Borders::ALL)
+        .border_style(if asserted {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        });
+    let inner = outer_block.inner(area);
+    f.render_widget(outer_block, area);
+
+    let (state_text, state_style) = if asserted {
+        (
+            format!("{} ASSERTED \u{2014} TRANSMITTING", line.name()),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            format!("{} deasserted", line.name()),
+            Style::default().fg(Color::Green),
+        )
+    };
+
+    fn flag(name: &str, up: bool) -> Span<'static> {
+        Span::styled(
+            format!("{name}:{} ", if up { "up" } else { "--" }),
+            Style::default().fg(if up { Color::Green } else { Color::DarkGray }),
+        )
+    }
+
+    let mut lines = vec![
+        Line::from(Span::styled(state_text, state_style)),
+        Line::from(vec![
+            Span::styled("handshake  ", Style::default().fg(Color::DarkGray)),
+            flag("CTS", cts),
+            flag("DSR", dsr),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("[Space/Enter]", menu_key_style()),
+            Span::raw(if asserted { " unkey   " } else { " key   " }),
+            Span::styled("[D]", menu_key_style()),
+            Span::raw(" DTR   "),
+            Span::styled("[R]", menu_key_style()),
+            Span::raw(" RTS   "),
+            Span::styled("[Esc]", menu_key_style()),
+            Span::raw(" back (releases the line)"),
+        ]),
+    ];
+    if let Some(error) = error {
+        lines.push(Line::from(Span::styled(
+            error.to_string(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 // ---------------------------------------------------------------------------
@@ -979,80 +670,82 @@ fn build_summary_lines(results: &[DiagResult]) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_format_hz_14mhz() {
-        assert_eq!(format_hz(14_000_000), "14.000.000 MHz");
-    }
-
-    #[test]
-    fn test_format_hz_7250khz() {
-        assert_eq!(format_hz(7_250_000), "7.250.000 MHz");
-    }
-
-    /// The table this console shipped with, before any of it moved into a
-    /// shared crate. Written out in full rather than referenced, so that a
-    /// change to `SUnitScale::TS570D` upstream shows up here as a failure
-    /// rather than as agreement.
-    fn as_shipped(smeter: u16) -> &'static str {
-        match smeter {
-            0..=2 => "S0",
-            3..=4 => "S1",
-            5..=6 => "S2",
-            7..=8 => "S3",
-            9..=10 => "S4",
-            11..=12 => "S5",
-            13..=14 => "S6",
-            15..=16 => "S7",
-            17..=18 => "S8",
-            19..=20 => "S9",
-            21..=24 => "S9+10",
-            25..=28 => "S9+20",
-            _ => "S9+30",
-        }
-    }
-
-    #[test]
-    fn every_value_the_meter_can_report_still_reads_the_way_it_always_has() {
-        // The acceptance bar for moving onto shared widgets (radio-cat-rs
-        // ADR 0011 rev 4) is that the operator sees no change. For the
-        // S-unit readout that is checkable exhaustively, so it is: the
-        // meter reports 0-30 and this walks all 31.
-        //
-        // It also exercises the whole migrated path rather than a formula
-        // -- capabilities to `MeterReading` to label -- so it fails if the
-        // radio stops publishing its table, not only if the table changes.
-        for raw in 0..=30u16 {
-            let state = RadioDisplay {
-                smeter: raw,
-                ..Default::default()
-            };
-            let reading = smeter_reading(&state).expect("this radio has an S meter");
-            assert_eq!(
-                reading.s_unit(),
-                as_shipped(raw),
-                "raw {raw} changed meaning"
-            );
-        }
-    }
-
-    #[test]
-    fn the_reading_carries_this_radios_range_and_not_some_other_ones() {
-        // 15 is mid-scale here and under 6% on an FT-991A. Getting the
-        // range from capabilities rather than a literal is what keeps the
-        // bar honest.
-        let state = RadioDisplay {
-            smeter: 15,
-            ..Default::default()
-        };
-        let reading = smeter_reading(&state).unwrap();
-        assert_eq!(reading.range.max, 30);
-        assert_eq!(reading.fraction(), 0.5);
-    }
+    use crate::RadioDisplay;
 
     #[test]
     fn test_radio_display_default() {
         let d = RadioDisplay::default();
         assert_eq!(d.vfo_a_hz, 14_000_000);
+    }
+
+    // -----------------------------------------------------------------
+    // PTT line
+    // -----------------------------------------------------------------
+
+    /// Render one panel into a throwaway terminal and return its text.
+    fn rendered(state: &ControlState, ptt_line_available: bool) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(72, 12)).unwrap();
+        terminal
+            .draw(|f| draw_control_panel(f, f.size(), state, ptt_line_available))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn the_menu_offers_the_ptt_line_only_when_the_port_has_one() {
+        assert!(!rendered(&ControlState::Menu, false).contains("PTT line"));
+        assert!(rendered(&ControlState::Menu, true).contains("PTT line"));
+    }
+
+    #[test]
+    fn the_warning_names_which_thing_is_about_to_key_the_transmitter() {
+        // One gate, two things behind it -- an operator has to be able to
+        // tell which one they just agreed to.
+        let diag = rendered(&ControlState::DiagWarning(WarnedAction::Diagnostics), true);
+        assert!(diag.contains("DIAGNOSTICS"));
+        let ptt = rendered(&ControlState::DiagWarning(WarnedAction::PttLine), true);
+        assert!(ptt.contains("PTT LINE"));
+        // Both must still say the words that matter.
+        for screen in [&diag, &ptt] {
+            assert!(screen.contains("KEY THE TRANSMITTER"));
+            assert!(screen.contains("antenna or dummy load"));
+        }
+    }
+
+    #[test]
+    fn the_line_screen_says_plainly_when_the_radio_is_transmitting() {
+        let up = rendered(
+            &ControlState::PttLine {
+                line: radio::PttLineKind::Dtr,
+                asserted: true,
+                cts: true,
+                dsr: false,
+                error: None,
+            },
+            true,
+        );
+        assert!(up.contains("DTR ASSERTED"));
+        assert!(up.contains("TRANSMITTING"));
+        assert!(up.contains("CTS:up"));
+
+        let down = rendered(
+            &ControlState::PttLine {
+                line: radio::PttLineKind::Rts,
+                asserted: false,
+                cts: false,
+                dsr: false,
+                error: Some("Radio session busy".to_string()),
+            },
+            true,
+        );
+        assert!(down.contains("RTS deasserted"));
+        assert!(!down.contains("TRANSMITTING"));
+        assert!(down.contains("Radio session busy"));
     }
 }

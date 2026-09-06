@@ -42,8 +42,23 @@ use crate::EmulatorError;
 pub type SharedRadio = Arc<Mutex<CatFramework<Ts570dRadio>>>;
 
 /// A fresh emulated radio.
+///
+/// Powers up with Menu 34 — the ACC2 receive-audio output level — at full
+/// scale. `Ts570dState::default()` zeroes all fifty-two menus, which is an
+/// artifact of the struct's `Default` and not a claim about what a
+/// TS-570D's factory settings are; taken literally it means ACC2 pin 3 is
+/// muted, so a virtual radio would come up with a silent audio path and
+/// look broken. Set through `EX` rather than by writing the field, for the
+/// same reason keying goes through `TX;`: there is one way to change this
+/// radio's state and it is the command table.
 pub fn new_shared_radio() -> SharedRadio {
-    Arc::new(Mutex::new(CatFramework::new(Ts570dRadio::new())))
+    let framework = Arc::new(Mutex::new(CatFramework::new(Ts570dRadio::new())));
+    let mut out = Vec::new();
+    let _ = framework
+        .lock()
+        .expect("radio lock")
+        .process_frame("EX0340009;", &mut out);
+    framework
 }
 
 /// Maximum number of log entries kept for the TUI command panel.
@@ -69,6 +84,13 @@ pub struct Emulator {
     framework: SharedRadio,
     /// Rolling command/response log for the TUI command panel.
     log: VecDeque<String>,
+    /// The ACC2 socket on the back of this radio.
+    ///
+    /// Owned here rather than by the COM port that drives its PTT pin,
+    /// because the connector is part of the radio and outlives any one
+    /// client: a plug stays seated whether or not anything is talking to
+    /// it, which is exactly what SN-1 depends on.
+    acc2: crate::com::SharedAcc2,
 }
 
 impl Emulator {
@@ -88,6 +110,7 @@ impl Emulator {
             io,
             framework,
             log: VecDeque::new(),
+            acc2: crate::com::new_shared_acc2(),
         })
     }
 
@@ -104,6 +127,7 @@ impl Emulator {
             io,
             framework,
             log: VecDeque::new(),
+            acc2: crate::com::new_shared_acc2(),
         }
     }
 
@@ -111,6 +135,11 @@ impl Emulator {
     /// share.
     pub fn radio(&self) -> SharedRadio {
         Arc::clone(&self.framework)
+    }
+
+    /// The ACC2 socket, for a front-end that drives or displays it.
+    pub fn acc2(&self) -> crate::com::SharedAcc2 {
+        std::sync::Arc::clone(&self.acc2)
     }
 
     /// Return the slave PTY path (e.g. `/dev/pts/5`).
@@ -269,9 +298,24 @@ impl Emulator {
             // 1. Draw the current state.
             let slave_path = self.slave_path.clone();
             let log_slice: Vec<String> = self.log.iter().cloned().collect();
+            let acc2_status = {
+                let acc2 = self.acc2.lock().unwrap();
+                tui::Acc2Status {
+                    seated: acc2.seated(),
+                    key_source: acc2.key_source(),
+                    mic_muted: acc2.mic_muted(),
+                    pkd_level: crate::acc2_audio::pkd_level(),
+                }
+            };
             terminal.draw(|f| {
                 let guard = self.framework.lock().unwrap();
-                tui::draw(f, guard.radio().state(), &slave_path, &log_slice)
+                tui::draw(
+                    f,
+                    guard.radio().state(),
+                    &slave_path,
+                    &log_slice,
+                    acc2_status,
+                )
             })?;
 
             // 2. Poll for keyboard events (non-blocking, 10 ms window).

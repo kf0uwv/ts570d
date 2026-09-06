@@ -29,6 +29,20 @@
 
 use cat_framework::capabilities::*;
 
+// Re-exported because a consumer that reads this radio's declaration has
+// to name the type it is matching on, and `radio` is the crate that owns
+// the declaration. Without this, every caller would need its own
+// dependency on `cat-framework` to ask what `TS570D.signal` is — which the
+// dependency rules deliberately do not allow the wiring layer or the
+// renderers to have.
+pub use cat_framework::capabilities::{EndpointRole, ModeId, SignalSupport};
+// The installation model too (ADR 0015): the wiring layer has to say what
+// this bench has attached, and it names these types to do it.
+pub use cat_framework::installation::{AudioOrigin, Installation, InstalledSource, SourceState};
+// `SignalCapability` is `cat-signal`'s, re-exported here so the wiring
+// layer names one crate rather than three to describe one bench.
+pub use cat_signal::SignalCapability;
+
 /// The single RS-232C port carries CAT **and** keying at once.
 ///
 /// This is the case `shareable_with` exists for: one handle, two roles.
@@ -255,5 +269,90 @@ mod tests {
             .find(|e| e.role == EndpointRole::Cat)
             .expect("has a CAT endpoint");
         assert!(cat.shareable_with.contains(&EndpointRole::Keying));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mode identity across the two vocabularies
+// ---------------------------------------------------------------------------
+
+/// This radio's mode for a protocol [`ModeId`], or `None` if it has none.
+///
+/// One mapping, here, because there are now two callers -- the server's
+/// console adapter and the console's own native client -- and a radio that
+/// disagreed with itself about what `CwLower` means depending on which end
+/// of the socket you asked would be a genuinely confusing bug to chase.
+///
+/// `None` is unreachable from the protocol, since `capabilities` refuses a
+/// mode this radio lacks before dispatch. It exists so the mapping is
+/// total rather than a panic waiting for a wider `ModeId`.
+pub fn to_mode(id: ModeId) -> Option<crate::Mode> {
+    use crate::Mode;
+    Some(match id {
+        ModeId::Lsb => Mode::Lsb,
+        ModeId::Usb => Mode::Usb,
+        ModeId::CwUpper => Mode::Cw,
+        ModeId::Fm => Mode::Fm,
+        ModeId::Am => Mode::Am,
+        ModeId::RttyLsb => Mode::Fsk,
+        ModeId::CwLower => Mode::CwReverse,
+        ModeId::RttyUsb => Mode::FskReverse,
+        _ => return None,
+    })
+}
+
+/// The protocol [`ModeId`] for one of this radio's modes.
+pub fn from_mode(mode: crate::Mode) -> ModeId {
+    use crate::Mode;
+    match mode {
+        Mode::Lsb => ModeId::Lsb,
+        Mode::Usb => ModeId::Usb,
+        Mode::Cw => ModeId::CwUpper,
+        Mode::Fm => ModeId::Fm,
+        Mode::Am => ModeId::Am,
+        Mode::Fsk => ModeId::RttyLsb,
+        Mode::CwReverse => ModeId::CwLower,
+        Mode::FskReverse => ModeId::RttyUsb,
+    }
+}
+
+#[cfg(test)]
+mod mode_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn every_mode_this_radio_has_survives_a_round_trip() {
+        // The property that matters: a mode set over the protocol and read
+        // back must be the same mode. A mapping that lost `CwReverse` on
+        // the way out would silently put an operator on the wrong sideband.
+        for mode in [
+            crate::Mode::Lsb,
+            crate::Mode::Usb,
+            crate::Mode::Cw,
+            crate::Mode::Fm,
+            crate::Mode::Am,
+            crate::Mode::Fsk,
+            crate::Mode::CwReverse,
+            crate::Mode::FskReverse,
+        ] {
+            assert_eq!(to_mode(from_mode(mode)), Some(mode), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn the_two_cw_modes_stay_distinct() {
+        // The pair most easily collapsed, and the one where collapsing it
+        // puts the operator's injection on the wrong side.
+        assert_ne!(
+            from_mode(crate::Mode::Cw),
+            from_mode(crate::Mode::CwReverse)
+        );
+        assert_eq!(to_mode(ModeId::CwLower), Some(crate::Mode::CwReverse));
+    }
+
+    #[test]
+    fn a_mode_this_radio_does_not_have_maps_to_nothing() {
+        assert_eq!(to_mode(ModeId::C4fm), None);
+        assert_eq!(to_mode(ModeId::DataUsb), None);
     }
 }

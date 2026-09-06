@@ -12,20 +12,36 @@
 //! DTR/RTS when the last close happens, so a state set by an exiting process
 //! is not trustworthy. `hold` is the honest primitive.
 //!
-//! Usage:
-//!   ts570d-line <port> status
-//!   ts570d-line <port> dtr|rts hold
-//!   ts570d-line <port> dtr|rts pulse <ms>
+//! `<port>` is a local serial device, or a `host:port` endpoint on an
+//! RFC 2217 device server -- `ser2net`, a Moxa/Digi box, or this repo's
+//! emulator run with `--com`. The lines behave identically either way,
+//! which is what makes it possible to rehearse a keying problem against
+//! the emulator before touching the radio.
 //!
-//! Example (Linux):   ts570d-line /dev/ttyUSB0 dtr hold
-//! Example (Windows): ts570d-line COM3 dtr pulse 500
+//! Usage:
+//!   ts570d-line <port|host:port> status
+//!   ts570d-line <port|host:port> dtr|rts hold
+//!   ts570d-line <port|host:port> dtr|rts pulse <ms>
+//!
+//! Example (Linux):    ts570d-line /dev/ttyUSB0 dtr hold
+//! Example (Windows):  ts570d-line COM3 dtr pulse 500
+//! Example (emulator): ts570d-line 127.0.0.1:4001 dtr hold
 //!
 //! Like every `SerialPort::open` caller, on Linux this must run inside an
 //! active monoio runtime (the fd is registered with io_uring at open); on
 //! Windows open is a plain synchronous call, so `main` is synchronous there
 //! -- nothing here ever awaits.
 
+// Shared with `ts570d` by path, because this package is two binaries and
+// no lib. Each consumer uses part of it -- this tool only needs the
+// predicate, not the classifier -- so the unused half is expected rather
+// than a sign anything is wrong.
+#[path = "../endpoint.rs"]
+#[allow(dead_code)]
+mod endpoint;
+
 use cat_transport_core::ModemControlLines;
+use cat_transport_rfc2217::{Rfc2217Config, Rfc2217Port};
 use cat_transport_serial::{FlowControl, Parity, SerialConfig, SerialPort};
 
 /// Which output line the action drives.
@@ -56,9 +72,9 @@ enum Action {
 }
 
 const USAGE: &str = "Usage:\n  \
-     ts570d-line <port> status\n  \
-     ts570d-line <port> dtr|rts hold\n  \
-     ts570d-line <port> dtr|rts pulse <ms>";
+     ts570d-line <port|host:port> status\n  \
+     ts570d-line <port|host:port> dtr|rts hold\n  \
+     ts570d-line <port|host:port> dtr|rts pulse <ms>";
 
 /// Parse `argv` (program name already stripped). Pure so it can be unit
 /// tested on every platform.
@@ -116,7 +132,23 @@ fn open_quiet(port: &str) -> Result<SerialPort, String> {
     .map_err(|e| format!("could not open {port}: {e}"))
 }
 
-fn set_line(port: &SerialPort, line: Line, asserted: bool) -> Result<(), String> {
+/// Open a remote port with everything in the same known-clear state
+/// `open_quiet` establishes locally.
+fn open_remote(addr: &str) -> Result<Rfc2217Port, String> {
+    Rfc2217Port::connect(
+        addr,
+        Rfc2217Config {
+            baud_rate: 9600,
+            stop_bits: 2,
+            initial_rts: false,
+            initial_dtr: false,
+            ..Rfc2217Config::default()
+        },
+    )
+    .map_err(|e| format!("could not open {addr}: {e}"))
+}
+
+fn set_line<P: ModemControlLines>(port: &P, line: Line, asserted: bool) -> Result<(), String> {
     let r = match line {
         Line::Dtr => port.set_dtr(asserted),
         Line::Rts => port.set_rts(asserted),
@@ -124,7 +156,7 @@ fn set_line(port: &SerialPort, line: Line, asserted: bool) -> Result<(), String>
     r.map_err(|e| format!("set_{} failed: {e}", line.name().to_lowercase()))
 }
 
-fn print_status(port: &SerialPort) {
+fn print_status<P: ModemControlLines>(port: &P) {
     // Input lines are best-effort: a USB adapter that doesn't wire one
     // reports an error, which is itself useful bench information.
     for (name, read) in [
@@ -140,32 +172,48 @@ fn print_status(port: &SerialPort) {
 }
 
 fn run(port_path: &str, action: Action) -> i32 {
-    let port = match open_quiet(port_path) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return 2;
+    // One tool, two kinds of port. Everything below `drive` is written
+    // against `ModemControlLines` alone, so the local and the remote paths
+    // cannot drift apart in behaviour -- which is the whole point of being
+    // able to rehearse against the emulator.
+    if endpoint::is_network(port_path) {
+        match open_remote(port_path) {
+            Ok(port) => drive(&port, action),
+            Err(e) => {
+                eprintln!("error: {e}");
+                2
+            }
         }
-    };
+    } else {
+        match open_quiet(port_path) {
+            Ok(port) => drive(&port, action),
+            Err(e) => {
+                eprintln!("error: {e}");
+                2
+            }
+        }
+    }
+}
 
+fn drive<P: ModemControlLines>(port: &P, action: Action) -> i32 {
     let result = match action {
         Action::Status => {
-            print_status(&port);
+            print_status(port);
             Ok(())
         }
-        Action::Pulse(line, ms) => set_line(&port, line, true).and_then(|()| {
+        Action::Pulse(line, ms) => set_line(port, line, true).and_then(|()| {
             println!("{} asserted for {ms} ms", line.name());
             std::thread::sleep(std::time::Duration::from_millis(ms));
             // `.map` not `.inspect`: Result::inspect is 1.76+, MSRV is 1.75.
-            set_line(&port, line, false).map(|()| println!("{} released", line.name()))
+            set_line(port, line, false).map(|()| println!("{} released", line.name()))
         }),
-        Action::Hold(line) => set_line(&port, line, true).and_then(|()| {
+        Action::Hold(line) => set_line(port, line, true).and_then(|()| {
             println!("{} asserted -- press Enter to release", line.name());
-            print_status(&port);
+            print_status(port);
             let mut buf = String::new();
             let _ = std::io::stdin().read_line(&mut buf);
             // `.map` not `.inspect`: Result::inspect is 1.76+, MSRV is 1.75.
-            set_line(&port, line, false).map(|()| println!("{} released", line.name()))
+            set_line(port, line, false).map(|()| println!("{} released", line.name()))
         }),
     };
 

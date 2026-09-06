@@ -20,7 +20,13 @@ rust-version = "1.75"
 
 [workspace.dependencies]
 # Async runtime (io_uring-based, Linux-only)
-monoio = { version = "0.2.3" }
+# `sync` is required, not optional. `cat-transport-rfc2217`'s reader thread
+# wakes the task suspended in `Transport::read` from a different OS thread,
+# and monoio's waker panics on a cross-thread wake unless this is enabled:
+#   "waker can only be sent across threads when `sync` feature enabled"
+# Nothing catches this in a test — `futures::executor::block_on`'s waker is
+# thread-safe, so only the real app under `#[monoio::main]` hits it.
+monoio = { version = "0.2.3", features = ["sync"] }
 local-sync = "0.1.1"
 
 # Async trait support (compatible with !Send futures for monoio)
@@ -74,18 +80,53 @@ mockall = "0.12.1"
 # of the shared library.
 cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 cat-native = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+# How a radio's console is arranged. A path dependency for the same reason
+# as the others in this block: not in a tagged release yet.
+cat-layout = { path = "../radio-cat-rs/cat-layout" }
 cat-ui-egui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 cat-signal = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 cat-signal-rtlsdr = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+# The ACC2 receive-audio client (radio-cat-rs ADR 0017). New alongside
+# cat-transport-rfc2217 and covered by the same temporary [patch].
+cat-signal-audio = { path = "../radio-cat-rs/cat-signal-audio" }
 cat-ui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 cat-ui-ratatui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+# RFC 2217: a serial port WITH its modem control lines, over TCP. New in
+# radio-cat-rs and not yet in a release, so it is a path dependency and the
+# [patch] below points every other radio-cat-rs crate at the same local
+# checkout -- otherwise two copies of cat-transport-core would exist and
+# `impl Transport for Rfc2217Port` would not satisfy `SerialCatSession`.
+# TEMPORARY: revert to a tagged git dependency once radio-cat-rs cuts the
+# release containing this crate.
+cat-transport-rfc2217 = { path = "../radio-cat-rs/cat-transport-rfc2217" }
 cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+
+# TEMPORARY local patch -- see cat-transport-rfc2217 above. Every
+# radio-cat-rs crate is redirected to the sibling checkout so exactly one
+# copy of each is linked. Remove this whole section, and restore
+# cat-transport-rfc2217 to a `git`/`tag` dependency, when the library is
+# released.
+[patch."https://github.com/kf0uwv/radio-cat-rs"]
+cat-framework = { path = "../radio-cat-rs/cat-framework" }
+cat-native = { path = "../radio-cat-rs/cat-native" }
+cat-ui-egui = { path = "../radio-cat-rs/cat-ui-egui" }
+cat-signal = { path = "../radio-cat-rs/cat-signal" }
+cat-signal-rtlsdr = { path = "../radio-cat-rs/cat-signal-rtlsdr" }
+cat-ui = { path = "../radio-cat-rs/cat-ui" }
+cat-ui-ratatui = { path = "../radio-cat-rs/cat-ui-ratatui" }
+cat-client = { path = "../radio-cat-rs/cat-client" }
+cat-transport-core = { path = "../radio-cat-rs/cat-transport-core" }
+cat-transport-serial = { path = "../radio-cat-rs/cat-transport-serial" }
+cat-transport-tcp = { path = "../radio-cat-rs/cat-transport-tcp" }
+cat-transport-udp = { path = "../radio-cat-rs/cat-transport-udp" }
+cat-server = { path = "../radio-cat-rs/cat-server" }
+cat-rigctl = { path = "../radio-cat-rs/cat-rigctl" }
 
 [package]
 name = "ts570d"
@@ -125,6 +166,19 @@ async-trait = { workspace = true }
 cat-transport-serial = { workspace = true }
 cat-transport-tcp = { workspace = true }
 cat-transport-core = { workspace = true }
+# `--rfc2217`: a serial port on a device server, with its modem control
+# lines. Named here because main.rs is the only place a concrete transport
+# is chosen (Rule 5).
+cat-transport-rfc2217 = { workspace = true }
+# The radio's other two interfaces: the CN4 IF tap over `rtl_tcp`, and the
+# ACC2 receive-audio pair. Named here because main.rs is the only place a
+# concrete source is chosen (Rule 5).
+cat-signal = { workspace = true }
+cat-signal-rtlsdr = { workspace = true }
+cat-signal-audio = { workspace = true }
+# The console protocol, for `--server`. Also a transport choice, and so
+# also this layer's to make (Rule 5).
+cat-native = { workspace = true }
 
 # Local workspace crates
 radio = { path = "radio" }
@@ -134,9 +188,35 @@ server = { path = "server" }
 [dev-dependencies]
 radio    = { path = "radio" }
 cat-transport-serial = { workspace = true }
+# tests/rfc2217_under_monoio.rs -- the guard for the monoio `sync` feature.
+cat-transport-rfc2217 = { workspace = true }
 
 [features]
 default = []
+
+# Open a local RTL-SDR directly, rather than reaching one over `rtl_tcp`.
+#
+# Off by default for the reason radio-cat-rs ADR 0014 gives for its own
+# `device` feature: building it wants librtlsdr, and making everyone who
+# compiles this program acquire a C toolchain for hardware they may not own
+# is a poor trade. Without it, `--if-out rtl:<n>` reports what to do
+# instead rather than silently doing nothing.
+sdr-device = ["cat-signal-rtlsdr/device"]
+
+# Capture the ACC2 receive audio from a local sound card. Off by default for
+# the same reason: it wants the platform's sound headers (ALSA on Linux).
+# Without it, `--acc2-audio audio:<name>` reports what to do instead, and
+# the SOURCE tab says why its audio list is empty rather than implying this
+# machine has no sound cards.
+# `server/audio-device` too: this is one program, and an operator who
+# built it for sound cards means the whole of it -- a `ts570d server` that
+# could not open the card `ts570d` just opened would be a baffling way to
+# spend an evening.
+audio-device = [
+    "cat-signal-audio/device",
+    "ui/audio-device",
+    "server/audio-device",
+]
 
 # Platform-specific configuration
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -149,6 +229,10 @@ monoio = { workspace = true }
 # tests/integration.rs exercises the io_uring serial driver directly and is
 # itself gated `#![cfg(target_os = "linux")]`.
 monoio = { workspace = true }
+# tests/ptt_line.rs drives the emulator's RFC 2217 COM port, which is a
+# socket and a reader thread rather than an io_uring registration, so there
+# is no monoio runtime in that test to await the one CAT query it makes.
+futures = { workspace = true }
 # The emulator is fundamentally Unix-only (pseudo-terminals via
 # serialport::TTYPort, std::os::unix::io::AsRawFd) — not a monoio/io_uring
 # limitation, so it is not part of this repo's Windows port at all (see

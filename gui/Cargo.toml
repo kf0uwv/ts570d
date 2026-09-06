@@ -26,6 +26,10 @@ eframe = { workspace = true }
 egui = { workspace = true }
 
 [dev-dependencies]
+radio = { path = "../radio" }
+# The still renderer draws a radio in its own colours, which means naming
+# the radio. Only the example does; the binary stays protocol-only, which
+# is the boundary ADR 0008 §3 draws.
 # The offscreen renderer in examples/render.rs. Not shipped: it exists so
 # a change to the console can be LOOKED at on a machine with no display,
 # which is the thing whose absence let this crate ship not resembling the

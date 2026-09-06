@@ -51,10 +51,29 @@ use cat_signal::synthetic::{Band, Emission, Emitter};
 
 use crate::emulator::SharedRadio;
 
-/// What the dongle reports at 96 kHz.
-pub const SAMPLE_RATE_HZ: u32 = 96_000;
+/// What the dongle runs at.
+///
+/// **240 kHz, not 96 kHz, and the difference is a bug this emulator was
+/// hiding.** An RTL2832U's clock divider gives it two settable bands,
+/// 225001-300000 Hz and 900001-3200000 Hz, with nothing between or below
+/// them. This tap served 96 kHz happily for months because `rtl_tcp` is a
+/// socket and a socket carries any rate you ask for -- so the emulator was
+/// impersonating a device that cannot be built, and every test agreed with
+/// it. The first time a real Blog V4 was asked for 96 kHz it answered
+/// `Invalid sample rate`.
+///
+/// 240 kHz is the bottom of the lower band: the closest thing to the
+/// original intent that hardware can actually do.
+///
+/// Kept as a literal rather than read from
+/// `cat_signal_rtlsdr::IfSourceConfig::DEFAULT_SAMPLE_RATE_HZ`, because
+/// that crate is a *dev*-dependency here and taking it as a real one would
+/// drag an FFT library into the emulator for one number. The equality is
+/// asserted by a test instead, which is where the dev-dependency is
+/// available and where a divergence would need to be caught anyway.
+pub const SAMPLE_RATE_HZ: u32 = 240_000;
 
-/// Samples per write. About 21 ms at 96 kHz — small enough that retuning
+/// Samples per write. About 8.5 ms at 240 kHz — small enough that retuning
 /// shows up promptly, large enough not to syscall per sample.
 const BLOCK: usize = 2048;
 
@@ -104,12 +123,30 @@ pub fn populate(min_hz: u64, max_hz: u64, seed: u64) -> Band {
     band
 }
 
-/// Serve the tap. Spawns a thread and returns the bound address.
+/// The band this radio can hear, for `seed`.
+///
+/// Built once and handed to everything that renders it, because the tap and
+/// the ACC2 receive-audio pin must describe the *same* radio: a console
+/// whose waterfall and whose AF display disagreed about what is on the air
+/// would be worse than one with only the waterfall.
+pub fn band_for(seed: u64) -> Band {
+    let coverage = radio::capabilities::TS570D.rx_range;
+    populate(coverage.min_hz, coverage.max_hz, seed)
+}
+
+/// Serve the tap, generating the band from `seed`.
 pub fn serve(radio: SharedRadio, addr: &str, seed: u64) -> std::io::Result<std::net::SocketAddr> {
+    serve_band(radio, addr, band_for(seed))
+}
+
+/// Serve the tap over a band the caller already holds.
+pub fn serve_band(
+    radio: SharedRadio,
+    addr: &str,
+    band: Band,
+) -> std::io::Result<std::net::SocketAddr> {
     let listener = TcpListener::bind(addr)?;
     let bound = listener.local_addr()?;
-    let coverage = radio::capabilities::TS570D.rx_range;
-    let band = populate(coverage.min_hz, coverage.max_hz, seed);
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -144,6 +181,7 @@ fn serve_one(mut stream: TcpStream, radio: SharedRadio, band: Band) -> std::io::
         // Centred on the dial, because that is what an IF tap does.
         let dial_hz = radio.lock().expect("radio lock").radio().state().vfo_a_hz;
         let t = started.elapsed().as_secs_f64();
+
         // Mirrored: this is what comes off CN4.
         let bytes = band.iq_bytes(dial_hz, SAMPLE_RATE_HZ, BLOCK, t, true);
         stream.write_all(&bytes)?;
@@ -158,5 +196,41 @@ fn serve_one(mut stream: TcpStream, radio: SharedRadio, band: Band) -> std::io::
         if let Some(sleep) = due.checked_sub(started.elapsed()) {
             std::thread::sleep(sleep);
         }
+    }
+}
+
+#[cfg(test)]
+mod hardware_plausibility_tests {
+    use super::*;
+
+    #[test]
+    fn the_tap_serves_a_rate_a_real_dongle_could_produce() {
+        // The guard that was missing. This tap pretends to be an RTL-SDR,
+        // and a fixture that impersonates a device which cannot be built is
+        // worse than no fixture: it makes every test agree with a mistake.
+        //
+        // 96 kHz passed everything here for months and was refused by the
+        // first real dongle it met, because `rtl_tcp` is a socket and a
+        // socket will carry any rate you ask for. The hardware's settable
+        // bands are a fact `cat-signal-rtlsdr` publishes without needing the
+        // driver, exactly so this check can exist.
+        assert!(
+            cat_signal_rtlsdr::is_valid_sample_rate(SAMPLE_RATE_HZ),
+            "the tap serves {SAMPLE_RATE_HZ} Hz, which no RTL2832U can be set to; \
+             it accepts {:?}",
+            cat_signal_rtlsdr::SAMPLE_RATE_BANDS
+        );
+    }
+
+    #[test]
+    fn the_tap_serves_the_rate_a_console_will_actually_ask_a_dongle_for() {
+        // Stronger than "is it legal": a fixture running at a legal rate
+        // the console never selects would still be testing something the
+        // station does not do.
+        assert_eq!(
+            SAMPLE_RATE_HZ,
+            cat_signal_rtlsdr::IfSourceConfig::DEFAULT_SAMPLE_RATE_HZ,
+            "the tap and the library's default have drifted apart"
+        );
     }
 }

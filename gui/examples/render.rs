@@ -42,9 +42,19 @@ fn main() {
 
     // Drive the real console for one frame.
     let ctx = egui::Context::default();
-    gui::theme::install(&ctx);
+
     let mut console = gui::app::Console::new("shack.local:4532".to_string());
-    console.demo_capabilities(gui::demo::ts570d());
+    // The radio's own palette, exactly as its server publishes it.
+    cat_ui_egui::theme::install_with(
+        &ctx,
+        cat_ui_egui::theme::Palette::from_theme(&radio::console_layout::theme()),
+    );
+    console.demo_capabilities({
+        let mut c = gui::demo::ts570d();
+        c.theme = Some(radio::console_layout::theme());
+        c.layout = Some(radio::console_layout::layout());
+        c
+    });
     console.demo_state();
     // A real band, from the same generator the emulator serves, so the
     // still shows the waterfall under something like live conditions.
@@ -53,6 +63,17 @@ fn main() {
         .map(|i| band.frame(14_074_000, 48_000, 1024, f64::from(i) * 0.08, i as u64))
         .collect();
     console.demo_spectrum(&frames);
+    // A voice-shaped audio block: a few hundred hertz of energy inside the
+    // passband, so the still shows the filter marks against something
+    // rather than against an empty grid.
+    // `NO_AUDIO=1` renders the other half of the AF panels' story. The
+    // empty state is not a lesser version of the live one -- it has to
+    // read as an instrument with nothing in it, keep its size so the rail
+    // does not jump, and still show where the filter sits. That is worth
+    // being able to look at.
+    if std::env::var("NO_AUDIO").is_err() {
+        console.demo_audio(demo_audio_frame());
+    }
 
     let raw = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
@@ -191,4 +212,42 @@ fn main() {
     }
     image::save_buffer(&out, &pixels, WIDTH, HEIGHT, image::ColorType::Rgba8).expect("write png");
     eprintln!("wrote {out}");
+}
+
+/// One block of plausible receive audio.
+///
+/// Shaped rather than random: a tone at 800 Hz on a sloped noise floor, so
+/// the FFT has a peak inside the passband and the scope has a wave in it.
+/// Noise alone would look the same whether or not the panels worked.
+fn demo_audio_frame() -> cat_signal::AudioFrame {
+    let rate = 48_000.0f32;
+    let samples: Vec<f32> = (0..512)
+        .map(|i| {
+            let t = i as f32 / rate;
+            0.55 * (std::f32::consts::TAU * 800.0 * t).sin()
+                + 0.12 * (std::f32::consts::TAU * 1_900.0 * t).sin()
+        })
+        .collect();
+    let bins: Vec<f32> = (0..96)
+        .map(|i| {
+            let hz = i as f32 * (4_000.0 / 96.0);
+            let floor = -96.0 + hz / 400.0;
+            let tone = -40.0 - ((hz - 800.0) / 90.0).powi(2);
+            let second = -62.0 - ((hz - 1_900.0) / 120.0).powi(2);
+            floor.max(tone).max(second)
+        })
+        .collect();
+    cat_signal::AudioFrame {
+        scope: cat_signal::AudioScopeFrame {
+            sample_rate_hz: rate as u32,
+            samples,
+            sequence: 1,
+        },
+        spectrum: cat_signal::AudioSpectrumFrame {
+            start_hz: 0,
+            span_hz: 4_000,
+            bins,
+            sequence: 1,
+        },
+    }
 }

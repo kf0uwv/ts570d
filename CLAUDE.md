@@ -112,10 +112,19 @@ radio  (depends on: cat-framework, cat-client, cat-transport-core — never seri
   └── defines: Ts570d<S: CatSession>, wrapping CatClient<Ts570dCommandId, S> internally
   └── Ts570d is generic over S: CatSession — never imports cat-transport-serial directly
 
-ui  (depends on: radio only — no direct cat-framework/cat-transport-* imports today)
+ui  (depends on: radio, cat-ui, cat-ui-ratatui, cat-native, cat-signal*)
   └── uses: radio::Radio trait abstraction (ui::run<R: Radio>(radio: &mut R))
   └── uses: radio domain types (Frequency, Mode, ...) for display
+  └── the console itself lives in cat-ui-ratatui and is shared with every
+      other radio; this crate supplies wiring, not painting
   └── NEVER imports a concrete transport crate
+
+gui (depends on: cat-ui, cat-ui-egui, cat-native — and NEVER radio,
+     cat-framework or any cat-transport-* crate; ADR 0008 §3)
+  └── the GPU console, likewise shared; it reaches the radio only over the
+      native protocol, so it cannot see a TS-570D type even by accident
+  └── `radio` is a dev-dependency solely so examples/render.rs can draw this
+      radio's own layout offscreen
 
 emulator  (depends on: cat-framework, radio)
   └── runs CatFramework<Ts570dRadio>; owns PTY hosting, logging, TUI display
@@ -155,25 +164,33 @@ shared `cat-ui` base widgets for **both** renderers, a new `gui` crate,
 `x86_64-pc-windows-msvc` as the only Windows target, and capability parity
 between the TUI and the GUI.
 
-**Read this carefully: Rules 1-7 above still describe the code as it stands
-today, and still govern it.** None of the migration has been written. What
-acceptance changes is direction, not the current shape of the tree:
+**Status as of 2026-09-05: this migration has landed.** Rules 1-7 above
+still govern, and the block above now reflects the tree as it stands. What
+changed:
 
-- **No new code may entrench the superseded framing.** Do not add to
-  `server/src/rigctl_radio.rs`, do not add a hand-written widget that
-  `cat-ui` will own, and do not add a TS-570D wire type where the normalized
-  type is coming.
-- The "`server` and `ui` are contractually TS-570D-shaped, not radio-generic"
-  framing (see `server/Cargo.toml`'s header comment) is replaced **on
-  migration** by: they are radio-specific in **layout and features** while
-  delegating protocol, capability discovery, signal correction and base
-  widgets to `radio-cat-rs`.
-- `server/src/rigctl_radio.rs` is deleted on migration; `cat-rigctl` is
-  reimplemented once over `RadioCapabilities`.
-- A new dependency rule for `gui` applies the moment that crate exists
-  (ADR 0008 §3): it depends on `cat-ui`, `cat-ui-egui`, and the protocol
-  client, and never on `radio`, `cat-framework`, or any `cat-transport-*`
-  crate.
+- `server` and `ui` are radio-specific in **layout and features** while
+  delegating protocol, capability discovery, signal correction and the
+  console itself to `radio-cat-rs`. The older "contractually TS-570D-shaped"
+  framing in `server/Cargo.toml`'s header comment is superseded.
+- **The server authors this radio's console.** `radio/src/console_layout.rs`
+  supplies a `LayoutSpec` and a `Theme`; `server/src/lib.rs` publishes them
+  in the handshake, and both consoles render what they are given. Neither
+  console names a radio. This is the shape to preserve: shared components
+  and one layout manager, per-radio arrangement.
+- `gui` exists and observes ADR 0008 §3 — it depends on `cat-ui`,
+  `cat-ui-egui` and the protocol client, and never on `radio`,
+  `cat-framework`, or any `cat-transport-*` crate. (`radio` is a
+  dev-dependency for the offscreen render example only.)
+- **`server/src/rigctl_radio.rs` survives, and that is now the design.**
+  ADR 0008 said it would be deleted outright. What was built instead:
+  `cat-rigctl` was reimplemented over `RadioCapabilities` and owns the
+  protocol, while a thin per-radio impl of its `RigctlRadio` trait remains
+  (~170 lines here, and a sibling in each of `ft991a` and `ic7100`).
+  It stays because **Hamlib mode naming is irreducibly per-radio** — the
+  IC-7100 has `DV`, which Hamlib cannot name, and a `WFM` it will not
+  transmit in; a shared mode table would have to be wrong for one radio to
+  be right for another. Treat this file as the seam it is, not as debt:
+  keep it thin, and put anything capability-shaped in `cat-rigctl`.
 - **`ui` is permanent and holds capability parity with `gui`**
   (`radio-cat-rs` ADR 0013). A feature landing in one renderer without a
   counterpart in the other needs a row in `docs/renderer-parity.md` naming
@@ -205,7 +222,8 @@ TS-570D-specific features (keyer, voice synthesizer, antenna tuner, menu access)
 
 ## Architecture
 - radio/: TS-570D command table, CatRadio impl, controller client (Ts570d<S: CatSession>), Radio trait + domain types
-- ui/: Ratatui terminal interface (depends on radio only). `win_sched.rs`: Windows-only two-future cooperative scheduler replacing `monoio::spawn`. The `[D]` diagnostics screen genuinely keys the transmitter — it is gated behind a `ControlState::DiagWarning` acknowledgment screen and a callsign prompt (`InputAction::DiagCallsign`) that identifies the CW keying test (blank callsign → that one step is recorded as skipped, not sent bare). See `docs/adr/0007-diagnostics-tx-safety-gate.md`.
+- ui/: Ratatui terminal wiring around the shared `cat-ui-ratatui` console. `win_sched.rs`: Windows-only two-future cooperative scheduler replacing `monoio::spawn`. The `[D]` diagnostics screen genuinely keys the transmitter — it is gated behind a `ControlState::DiagWarning` acknowledgment screen and a callsign prompt (`InputAction::DiagCallsign`) that identifies the CW keying test (blank callsign → that one step is recorded as skipped, not sent bare). See `docs/adr/0007-diagnostics-tx-safety-gate.md`.
+- gui/: egui/wgpu console — wiring around the shared `cat-ui-egui` console. Renders the layout and theme the server publishes; never links a radio crate (ADR 0008 §3).
 - server/: Headless network server mode (`ts570d server ...`) — thin wiring over `radio-cat-rs`'s `cat-rigctl`/`cat-server` crates. Cross-platform: `--raw-tcp-port`/`--raw-udp-port`/`--rigctl-port` all work on Windows too (see "Windows support").
 - emulator/: Virtual TTY + radio emulator, runs CatFramework<Ts570dRadio>. Linux/Unix-only (pseudo-terminals).
 - `pin-test` diagnostic binary: no longer local to this repo — it's a shared `[[bin]]` in `radio-cat-rs`'s `cat-transport-serial` crate (`cargo run -p cat-transport-serial --bin pin-test`, or `make pintest`).

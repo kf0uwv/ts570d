@@ -13,6 +13,9 @@ Decisions are recorded as [ADRs](https://cognitect.com/blog/2011/11/15/documenti
 | [0006](0006-windows-concurrency-model.md) | Windows entry point and concurrency model for `ui::run`'s two-task design | Accepted |
 | [0007](0007-diagnostics-tx-safety-gate.md) | Diagnostics TX safety gate: operator acknowledgment + callsign-gated CW test | Accepted |
 | [0008](0008-gpu-gui-crate-on-shared-building-blocks.md) | A GPU-rendered `gui` crate on egui/wgpu, as a network client, on shared building blocks | Accepted |
+| [0009](0009-acc2-if-virtual-hardware.md) | ACC2-IF virtual hardware in the emulator: an RFC 2217 COM port, the ACC2 connector, and a paced audio pair | Accepted |
+| [0010](0010-ptt-line-capability.md) | Keying from the port's DTR/RTS line: an optional `PttLine` capability, and DTR low at open | Accepted |
+| [0011](0011-console-speaks-the-console-protocol.md) | `--server` speaks the native console protocol, not raw CAT — capabilities, waterfall and the radio host's device list on one connection; `--server-raw` keeps the old path | Accepted |
 
 ## Refactor status (branch `refactor/generic-cat-framework`)
 

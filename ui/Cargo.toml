@@ -24,13 +24,32 @@ crossterm = { workspace = true }
 # moves out is anything with one correct answer per input. The acceptance
 # bar for the migration is that the operator sees no change.
 cat-ui = { workspace = true }
+# Frame types (SpectrumFrame, AudioScopeFrame, AudioSpectrumFrame) and the
+# capability document the console's structure is derived from. Data and
+# protocol-model crates, not transports -- rule 4 forbids the latter and
+# this console still names none.
+cat-signal = { workspace = true }
+cat-native = { workspace = true }
+# The ACC2 receive-audio client. A signal source, not a transport.
+cat-signal-audio = { workspace = true }
+# `block_on`, to drive `SpectrumSource::next_frame` -- which blocks inside
+# its own `async fn` -- on the feed's thread rather than on the console's
+# single-threaded runtime. See `feeds`.
+futures = { workspace = true }
 cat-ui-ratatui = { workspace = true }
 cat-framework = { workspace = true }
 
 [dev-dependencies]
+# `examples/screen.rs` can attach live sources, so it names the concrete
+# ones. An example is the wiring layer for itself.
+cat-signal-rtlsdr = { workspace = true }
 
 [features]
 default = []
+# Capture the ACC2 audio from a local sound card, not only from a PCM
+# server. Off by default, matching the crate that provides it: building it
+# wants the platform's sound headers.
+audio-device = ["cat-signal-audio/device"]
 
 # Platform-specific configuration
 [target.'cfg(target_os = "linux")'.dependencies]

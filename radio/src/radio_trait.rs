@@ -53,8 +53,29 @@ pub enum RadioError {
     Transport(#[from] TransportError),
     #[error("Not implemented")]
     NotImplemented,
+    /// The link to the radio said something is wrong, in its own words.
+    ///
+    /// For a `Radio` that reaches its radio over a network protocol rather
+    /// than a CAT session: a server that has not heard from the radio yet,
+    /// a connection that dropped, a reply that does not fit this radio.
+    /// None of those are CAT-level conditions, and forcing them into
+    /// `InvalidProtocolString` would label a dead socket a parsing bug.
+    ///
+    /// The message is shown to an operator verbatim, so it should be the
+    /// remote end's own words wherever there are any.
+    #[error("{0}")]
+    Link(String),
     #[error("Operation not supported")]
     Unsupported,
+    /// The session is checked out by an in-flight CAT command.
+    ///
+    /// Only [`crate::ptt_line::PttLine`] can produce this: it is the one
+    /// capability whose methods take `&self` and therefore run while the
+    /// radio task may be holding the session across an `.await`. The caller's
+    /// remedy is to try again in a few milliseconds, not to give up — see
+    /// `radio/src/ptt_line.rs`.
+    #[error("Radio session busy")]
+    Busy,
 }
 
 /// Convenience [`Result`] alias for radio operations.
@@ -1085,5 +1106,100 @@ mod tests {
         assert!(info.rit_enabled);
         assert!(!info.xit_enabled);
         assert_eq!(info.rit_xit_offset, -500);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audio passband
+// ---------------------------------------------------------------------------
+
+/// The receive audio passband for `mode`, as offsets from the dial in Hz.
+///
+/// Signed, so the **sideband is part of the answer**: USB hears what is
+/// above the dial, LSB what is below, and a console that got that backwards
+/// would draw an AF display that is confidently wrong.
+///
+/// Lives here, in the radio crate, because it is a fact about a TS-570D and
+/// two very different things need it: the emulator, to decide which signals
+/// reach ACC2 pin 3, and the console, to mark the passband edges on its AF
+/// FFT. Those two must agree — an operator looking at a tone outside the
+/// marked edges and hearing it anyway is being told a lie by one of them —
+/// and the only way to guarantee they agree is for there to be one of these.
+///
+/// `cw_pitch` is the menu index, not a frequency: the TS-570D offers
+/// 400-1000 Hz in 100 Hz steps, so index 0 is 400 Hz.
+pub fn audio_passband_hz(mode: Mode, cw_pitch: u8) -> (f32, f32) {
+    /// The low edge of a voice passband. Below this is rumble, and the
+    /// radio does not pass it.
+    const AF_LOW: f32 = 300.0;
+    const AF_HIGH: f32 = 2_700.0;
+
+    let pitch = 400.0 + f32::from(cw_pitch) * 100.0;
+    match mode {
+        Mode::Lsb | Mode::FskReverse => (-AF_HIGH, -AF_LOW),
+        Mode::Usb | Mode::Fsk => (AF_LOW, AF_HIGH),
+        // A narrow window placed at the sidetone pitch, on the side the
+        // mode listens to.
+        Mode::Cw => (pitch - 250.0, pitch + 250.0),
+        Mode::CwReverse => (-pitch - 250.0, -pitch + 250.0),
+        // Double-sideband, and both carry audio through zero beat.
+        Mode::Am => (-4_500.0, 4_500.0),
+        Mode::Fm => (-5_000.0, 5_000.0),
+    }
+}
+
+#[cfg(test)]
+mod passband_tests {
+    use super::*;
+
+    #[test]
+    fn usb_listens_above_the_dial_and_lsb_below() {
+        // The one that matters. Getting the sideband backwards makes an AF
+        // display wrong in a way that looks fine.
+        let (lo, hi) = audio_passband_hz(Mode::Usb, 0);
+        assert!(lo > 0.0 && hi > lo);
+        let (lo, hi) = audio_passband_hz(Mode::Lsb, 0);
+        assert!(hi < 0.0 && lo < hi);
+    }
+
+    #[test]
+    fn cw_listens_at_the_sidetone_pitch_and_moves_with_it() {
+        let (lo, hi) = audio_passband_hz(Mode::Cw, 3); // index 3 -> 700 Hz
+        assert!(lo < 700.0 && hi > 700.0);
+        let (lo2, _) = audio_passband_hz(Mode::Cw, 0); // 400 Hz
+        assert!(lo2 < lo, "a lower pitch moves the window down");
+    }
+
+    #[test]
+    fn cw_reverse_is_the_same_window_on_the_other_side() {
+        let (lo, hi) = audio_passband_hz(Mode::Cw, 3);
+        let (rlo, rhi) = audio_passband_hz(Mode::CwReverse, 3);
+        assert!((rlo + hi).abs() < f32::EPSILON);
+        assert!((rhi + lo).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_double_sideband_modes_pass_through_zero_beat() {
+        for mode in [Mode::Am, Mode::Fm] {
+            let (lo, hi) = audio_passband_hz(mode, 0);
+            assert!(lo < 0.0 && hi > 0.0, "{mode} must span zero");
+        }
+    }
+
+    #[test]
+    fn every_mode_has_a_passband_and_none_is_inverted() {
+        for mode in [
+            Mode::Lsb,
+            Mode::Usb,
+            Mode::Cw,
+            Mode::Fm,
+            Mode::Am,
+            Mode::Fsk,
+            Mode::CwReverse,
+            Mode::FskReverse,
+        ] {
+            let (lo, hi) = audio_passband_hz(mode, 0);
+            assert!(lo < hi, "{mode}: {lo} .. {hi} is inverted");
+        }
     }
 }

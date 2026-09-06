@@ -19,7 +19,7 @@
 //! `ts570d server` locally, which is the same shape people already run for
 //! WSJT-X.
 
-use gui::app::Console;
+use gui::{app::Console, Window};
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:4532";
 
@@ -48,7 +48,7 @@ fn main() -> eframe::Result<()> {
             // and making the operator click "connect" every time would be
             // ceremony.
             console.connect();
-            Ok(Box::new(console))
+            Ok(Box::new(Window(console)))
         }),
     )
 }

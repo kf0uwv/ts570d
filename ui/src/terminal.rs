@@ -23,16 +23,13 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use radio::{Frequency, MemoryChannelEntry, Mode, Radio};
+use radio::{Frequency, MemoryChannelEntry, Mode, PttLine, PttLineKind, Radio, RadioError};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::{
-    control::{handle_key, ControlState, ExecuteAction, KeyResult},
+    control::{handle_key, ControlState, ExecuteAction, KeyResult, PttLineAction},
     diag::{DiagResult, DiagState, DIAG_ROUNDS},
-    layout::{
-        draw_control_panel, draw_diag_panel, draw_disconnected, draw_errors, draw_header, draw_ui,
-        split_areas,
-    },
+    layout::{draw_control_panel, draw_diag_panel, draw_disconnected},
     RadioDisplay, UiError, UiResult,
 };
 
@@ -98,6 +95,94 @@ enum RadioUpdate {
     DiagDone,
 }
 
+// ---------------------------------------------------------------------------
+// PTT line
+// ---------------------------------------------------------------------------
+
+/// The `radio::PttLine` a console gets when its port has no handshake lines
+/// (`--server`, a TCP client). Every method keeps the trait's default, which
+/// reports the capability absent, so the `[P]` item is never offered.
+// `radio::NoPttLine` -- one definition, so a console and a wiring
+// layer cannot disagree about what "no PTT line" behaves like.
+use radio::NoPttLine;
+
+/// Owns the PTT-line handle and puts the lines back on the way out.
+///
+/// "Back" is DTR deasserted and RTS asserted — `PttLineKind::idle_level`, and
+/// not "both low": the radio's RTS input is receive-enable and it stops
+/// answering CAT while that line is down.
+///
+/// The `Drop` impl is the last resort, for the panic-unwind path. It cannot
+/// retry: this console is single-threaded, so if the radio task is holding
+/// the session at that instant, blocking here would guarantee it never lets
+/// go. Every path an operator can take — Esc, `[Q]` — releases the line
+/// through [`restore_ptt_idle`] first, which does retry. See
+/// `docs/adr/0010` for what remains uncovered.
+struct PttLineGuard {
+    ptt: Box<dyn PttLine>,
+    /// Whether a line was ever moved. Nothing to restore if not, and asking
+    /// a port with no lines to restore them just produces errors to discard.
+    touched: bool,
+}
+
+impl PttLineGuard {
+    fn new(ptt: Box<dyn PttLine>) -> Self {
+        Self {
+            ptt,
+            touched: false,
+        }
+    }
+}
+
+impl Drop for PttLineGuard {
+    fn drop(&mut self) {
+        if !self.touched {
+            return;
+        }
+        for line in [PttLineKind::Dtr, PttLineKind::Rts] {
+            let _ = self.ptt.set_ptt_line(line, line.idle_level());
+        }
+    }
+}
+
+/// How long to keep asking for a line while the radio task holds the session.
+///
+/// One CAT command at 9600 Bd is tens of milliseconds; a whole poll cycle is
+/// under a second. A second of patience therefore covers the worst case
+/// several times over, and still ends rather than hanging the console.
+const PTT_BUSY_RETRIES: usize = 200;
+const PTT_BUSY_WAIT: Duration = Duration::from_millis(5);
+
+/// Move one line, waiting out any CAT command that is holding the session.
+///
+/// `RadioError::Busy` is not a failure — it means "the radio task has the
+/// session right now". Reporting it to the operator as an error would train
+/// them to press the key twice, which on a keying control is the wrong habit.
+async fn apply_ptt_line(
+    guard: &mut PttLineGuard,
+    line: PttLineKind,
+    asserted: bool,
+) -> Result<(), RadioError> {
+    guard.touched = true;
+    for _ in 0..PTT_BUSY_RETRIES {
+        match guard.ptt.set_ptt_line(line, asserted) {
+            Err(RadioError::Busy) => yield_sleep(PTT_BUSY_WAIT).await,
+            other => return other,
+        }
+    }
+    Err(RadioError::Busy)
+}
+
+/// Put both lines back where an idle console leaves them.
+async fn restore_ptt_idle(guard: &mut PttLineGuard) {
+    if !guard.touched {
+        return;
+    }
+    for line in [PttLineKind::Dtr, PttLineKind::Rts] {
+        let _ = apply_ptt_line(guard, line, line.idle_level()).await;
+    }
+}
+
 /// Initialize the terminal: enable raw mode and enter the alternate screen.
 pub(crate) fn init_terminal() -> UiResult<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
@@ -116,24 +201,135 @@ pub(crate) fn cleanup_terminal() -> UiResult<()> {
     Ok(())
 }
 
+/// Turn a command-line action into something the radio task can do.
+///
+/// Only the commands that have a counterpart in this console's own action
+/// vocabulary are executed; the rest report why rather than failing
+/// silently. `cat_native::Command` is the *native protocol's* vocabulary and
+/// this console speaks CAT directly, so the two overlap without being the
+/// same set — mapping the remainder is a larger job than the command line
+/// itself and is deliberately not faked here.
+fn apply_console_action(
+    action: cat_ui::command::Action,
+    view: &mut crate::console::ConsoleView,
+    cmd_tx: &Chan<RadioCmd>,
+) {
+    use cat_native::Command;
+    use cat_ui::command::Action;
+
+    match action {
+        Action::Quit => ch_send(cmd_tx, RadioCmd::Quit),
+        // Handled inside `console::handle_key`; it never reaches here.
+        Action::SelectTab(_) => {}
+        Action::Radio(command) => match command {
+            // The pending grammar: the confirmed value stays on screen and
+            // the requested one follows it until a poll confirms.
+            Command::SetFrequency { hz, .. } | Command::Retune { hz } => {
+                view.pending_vfo_hz = Some(hz);
+                ch_send(cmd_tx, RadioCmd::Execute(ExecuteAction::SetVfoA(hz)));
+            }
+            Command::SetMode { mode } => match native_mode_to_ts570d(mode) {
+                Some(m) => ch_send(cmd_tx, RadioCmd::Execute(ExecuteAction::SetMode(m))),
+                None => view.message = Some(format!("this radio has no {mode:?} mode")),
+            },
+            Command::SetSplit { enabled } => {
+                // Split on this radio is which VFO transmits, not a flag.
+                let tx_vfo = u8::from(enabled);
+                ch_send(cmd_tx, RadioCmd::Execute(ExecuteAction::SetTxVfo(tx_vfo)));
+            }
+            Command::SetMemoryChannel { channel } => match u8::try_from(channel) {
+                Ok(n) => ch_send(
+                    cmd_tx,
+                    RadioCmd::Execute(ExecuteAction::SelectMemoryChannel(n)),
+                ),
+                Err(_) => view.message = Some(format!("no memory channel {channel}")),
+            },
+            Command::SetIfShift { hz } => {
+                // This radio takes a direction and a magnitude, not a
+                // signed offset: `IS` carries ' ', '+' or '-' and then four
+                // digits.
+                let dir = match hz.signum() {
+                    1 => '+',
+                    -1 => '-',
+                    _ => ' ',
+                };
+                match u16::try_from(hz.unsigned_abs()) {
+                    Ok(magnitude) => ch_send(
+                        cmd_tx,
+                        RadioCmd::Execute(ExecuteAction::SetIfShift(dir, magnitude)),
+                    ),
+                    Err(_) => {
+                        view.message = Some(format!("{hz} Hz is beyond this radio's IF shift"))
+                    }
+                }
+            }
+            // The remaining variants are reads and a filter width. The
+            // parser cannot produce any of them today, so this arm is
+            // unreachable in practice and still has to say something true
+            // if that changes.
+            //
+            // The two reads would add nothing an operator could see: this
+            // console already polls the dial, the mode and the S-meter
+            // every cycle and draws them, so a one-shot read has nowhere
+            // to put its answer. Filter width has no counterpart in this
+            // console's own action set -- the TS-570D sets it through the
+            // `SH`/`SL` cut pair, which the `[M]` menu reaches and a single
+            // width value does not describe.
+            Command::ReadMeter { .. } | Command::ReadState => {
+                view.message =
+                    Some("this console already polls the radio; there is nothing to read".into());
+            }
+            other => {
+                view.message = Some(format!("{other:?} has no counterpart on this radio"));
+            }
+        },
+    }
+}
+
+/// `cat_native::ModeId` to this radio's own mode byte.
+///
+/// `Mode` is 1-indexed per the CAT protocol, so the byte is the enum's
+/// discriminant rather than a position in a list.
+fn native_mode_to_ts570d(mode: cat_native::ModeId) -> Option<u8> {
+    use cat_native::ModeId;
+    Some(
+        match mode {
+            ModeId::Lsb => radio::Mode::Lsb,
+            ModeId::Usb => radio::Mode::Usb,
+            ModeId::CwUpper => radio::Mode::Cw,
+            ModeId::Fm => radio::Mode::Fm,
+            ModeId::Am => radio::Mode::Am,
+            ModeId::RttyLsb => radio::Mode::Fsk,
+            ModeId::CwLower => radio::Mode::CwReverse,
+            ModeId::RttyUsb => radio::Mode::FskReverse,
+            _ => return None,
+        }
+        .as_u8(),
+    )
+}
+
 /// Draw a single frame using the given radio state and control state.
 pub(crate) fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &RadioDisplay,
     control: &ControlState,
+    view: &crate::console::ConsoleView,
+    caps: &cat_native::CapabilitiesWire,
 ) -> UiResult<()> {
     terminal.draw(|f| {
-        let area = f.size();
-        let (header_area, status_area, errors_area, ctrl_area) = split_areas(area);
-        draw_header(f, header_area);
-        draw_ui(f, status_area, state);
-        draw_errors(f, errors_area, state);
+        // The accepted design is the resting state. Everything the design
+        // did not place -- this radio's own feature menus, and the
+        // TX-gated diagnostics and PTT-line screens -- overlays the tab
+        // body, so the console is what an operator looks at and a menu is
+        // somewhere they are briefly. See `console::draw`.
+        let body = crate::console::draw(f, f.size(), state, view, caps);
+
         if state.initializing || !state.connected {
-            draw_disconnected(f, ctrl_area, &state.poll_errors, state.initializing);
+            draw_disconnected(f, body, &state.poll_errors, state.initializing);
         } else if let ControlState::Diagnostic(diag) = control {
-            draw_diag_panel(f, ctrl_area, diag);
-        } else {
-            draw_control_panel(f, ctrl_area, control);
+            draw_diag_panel(f, body, diag);
+        } else if !matches!(control, ControlState::Menu) {
+            draw_control_panel(f, body, control, state.ptt_line_available);
         }
     })?;
     Ok(())
@@ -146,6 +342,40 @@ pub(crate) fn draw_frame(
 /// responsive regardless of radio latency.
 #[cfg(target_os = "linux")]
 pub async fn run<R: Radio + 'static>(radio: R) -> UiResult<()> {
+    run_with_ptt_line(radio, Box::new(NoPttLine)).await
+}
+
+/// [`run`], for a console whose port has a PTT handshake line.
+///
+/// `ptt` is a `radio::PttLine` handle over the *same* port the radio is
+/// talking through — `radio::Ts570d::ptt_line_handle` makes one. It is passed
+/// separately rather than taken from `radio` because the radio task owns the
+/// radio, and the keystroke that unkeys the transmitter must not have to
+/// queue behind a poll cycle to be obeyed. See `docs/adr/0010`.
+///
+/// The handle can always be handed over: if the port turns out to have no
+/// lines, `ptt_line_available` says so and the `[P]` item is simply not
+/// offered. `run` is the same call with a handle that has none.
+#[cfg(target_os = "linux")]
+pub async fn run_with_ptt_line<R: Radio + 'static>(
+    radio: R,
+    ptt: Box<dyn PttLine>,
+) -> UiResult<()> {
+    run_console(radio, ptt, crate::feeds::ConsoleSources::default()).await
+}
+
+/// [`run_with_ptt_line`], for a console that also has signal sources.
+///
+/// The radio's other two interfaces — the CN4 tap and the ACC2 audio pair —
+/// are separate connections from the CAT link, and a console may have
+/// either, both or neither. They arrive here already opened, because
+/// naming a concrete source type is the wiring layer's job.
+#[cfg(target_os = "linux")]
+pub async fn run_console<R: Radio + 'static>(
+    radio: R,
+    ptt: Box<dyn PttLine>,
+    sources: crate::feeds::ConsoleSources,
+) -> UiResult<()> {
     let terminal = init_terminal()?;
 
     let cmd_ch: Chan<RadioCmd> = make_chan();
@@ -154,13 +384,17 @@ pub async fn run<R: Radio + 'static>(radio: R) -> UiResult<()> {
     let radio_cmd_rx = Rc::clone(&cmd_ch);
     let radio_update_tx = Rc::clone(&update_ch);
 
+    // Asked once, here, before anything else can be holding the session --
+    // see `RadioDisplay::ptt_line_available`.
+    let ptt_available = ptt.ptt_line_available();
+
     // Spawn radio task (runs concurrently on the same thread).
     let radio_handle = monoio::spawn(async move {
         radio_task(radio, radio_cmd_rx, radio_update_tx).await;
     });
 
     // Run UI task in this context.
-    let result = ui_task(terminal, cmd_ch, update_ch).await;
+    let result = ui_task(terminal, cmd_ch, update_ch, ptt, ptt_available, sources).await;
 
     // Drop the radio task handle — this cancels the task without blocking.
     // Awaiting it would block for up to 40s while the radio task is stuck in poll_radio_state.
@@ -182,6 +416,28 @@ pub async fn run<R: Radio + 'static>(radio: R) -> UiResult<()> {
 /// directly.
 #[cfg(target_os = "windows")]
 pub fn run<R: Radio + 'static>(radio: R) -> UiResult<()> {
+    run_with_ptt_line(radio, Box::new(NoPttLine))
+}
+
+/// Windows variant of [`run_with_ptt_line`]. Same contract; see [`run`] for
+/// why this one is synchronous.
+///
+/// The capability itself is cross-platform: `cat-transport-serial`'s Win32
+/// backend drives DTR/RTS through `EscapeCommFunction` and reads the
+/// handshake through `GetCommModemStatus`, so nothing below this is
+/// Linux-specific (radio-cat-rs ADR 0004).
+#[cfg(target_os = "windows")]
+pub fn run_with_ptt_line<R: Radio + 'static>(radio: R, ptt: Box<dyn PttLine>) -> UiResult<()> {
+    run_console(radio, ptt, crate::feeds::ConsoleSources::default())
+}
+
+/// Windows variant of [`run_console`]; see [`run`] for why it is synchronous.
+#[cfg(target_os = "windows")]
+pub fn run_console<R: Radio + 'static>(
+    radio: R,
+    ptt: Box<dyn PttLine>,
+    sources: crate::feeds::ConsoleSources,
+) -> UiResult<()> {
     let terminal = init_terminal()?;
 
     let cmd_ch: Chan<RadioCmd> = make_chan();
@@ -190,9 +446,18 @@ pub fn run<R: Radio + 'static>(radio: R) -> UiResult<()> {
     let radio_cmd_rx = Rc::clone(&cmd_ch);
     let radio_update_tx = Rc::clone(&update_ch);
 
+    let ptt_available = ptt.ptt_line_available();
+
     let radio_fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> =
         Box::pin(radio_task(radio, radio_cmd_rx, radio_update_tx));
-    let ui_fut = Box::pin(ui_task(terminal, cmd_ch, update_ch));
+    let ui_fut = Box::pin(ui_task(
+        terminal,
+        cmd_ch,
+        update_ch,
+        ptt,
+        ptt_available,
+        sources,
+    ));
 
     // Mirrors Linux's `drop(radio_handle)`: block_on_two returns as soon as
     // `ui_fut` resolves, dropping (canceling) `radio_fut` without waiting
@@ -231,6 +496,14 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
         ($label:expr, $expr:expr, $ok:expr) => {
             match $expr.await {
                 Ok(v) => $ok(v),
+                // A field this link cannot reach is not a fault. Over the
+                // native console protocol most of this radio's controls
+                // have no wire representation, and reporting each one as
+                // an error would put a permanent banner over a console
+                // that is working exactly as it can. The field simply
+                // stays at its default, which is what an unread field
+                // should look like.
+                Err(radio::RadioError::NotImplemented) => {}
                 Err(e) => {
                     if state.poll_errors.len() < 20 {
                         state.poll_errors.push(format!("{}: {}", $label, e));
@@ -246,6 +519,11 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
         |info: radio::InformationResponse| {
             state.vfo_a_hz = info.frequency.hz();
             state.mode = info.mode.name().to_string();
+            // Beside the label, not instead of it: the label is what an
+            // operator reads and this is what the passband derives from.
+            // The console used to parse the label back into a mode, which
+            // works for exactly one radio's spelling.
+            state.mode_id = Some(radio::capabilities::from_mode(info.mode));
             state.tx = info.tx_rx;
             state.rit = info.rit_enabled;
             state.xit = info.xit_enabled;
@@ -2290,25 +2568,71 @@ async fn ui_task(
     mut terminal: Terminal<CrosstermBackend<Stdout>>,
     cmd_tx: Chan<RadioCmd>,
     update_rx: Chan<RadioUpdate>,
+    ptt: Box<dyn PttLine>,
+    ptt_available: bool,
+    mut sources: crate::feeds::ConsoleSources,
 ) -> UiResult<()> {
-    let mut state = RadioDisplay::default(); // initializing=true by default
+    let mut ptt = PttLineGuard::new(ptt);
+    // initializing=true by default
+    let mut state = RadioDisplay {
+        ptt_line_available: ptt_available,
+        ..RadioDisplay::default()
+    };
     let mut control = ControlState::Menu;
+    // The capability document this console derives its structure from. The
+    // GUI is handed one over the network; a serial console builds one from
+    // the radio's own static declaration, and both then call the same
+    // `cat_ui::workspace::tabs`.
+    // The server's document if there is a server, because it is the one
+    // carrying the layout that server authored. Otherwise this radio's own
+    // declaration, with the layout this radio's crate asks for -- which is
+    // the same answer a local server would have published.
+    let caps = sources.capabilities.clone().unwrap_or_else(|| {
+        let mut caps = cat_native::CapabilitiesWire::from(&radio::capabilities::TS570D);
+        caps.layout = Some(radio::console_layout::layout());
+        caps
+    });
+    let mut view = crate::console::ConsoleView::for_capabilities(&caps);
+    // What the machine can see, enumerated once by the wiring layer. Copied
+    // rather than re-asked per frame: enumerating sound cards talks to the
+    // sound server, and doing that at the redraw rate would be a steady drip
+    // of syscalls answering a question that only changes when somebody plugs
+    // something in.
+    view.devices = std::mem::take(&mut sources.devices);
+    view.device_selection.select_default(&view.devices);
     let mut if_shift_dir: char = ' ';
     let mut diag_results: Vec<DiagResult> = Vec::new();
 
     // Draw initial connecting frame immediately.
-    draw_frame(&mut terminal, &state, &control)?;
+    draw_frame(&mut terminal, &state, &control, &view, &caps)?;
 
     loop {
         // 1. Drain all pending radio updates.
         for update in ch_recv_all(&update_rx) {
             match update {
-                RadioUpdate::State(s) => state = s,
-                RadioUpdate::ActionFeedback { ok, msg } => {
-                    control = ControlState::Feedback {
-                        message: msg,
-                        is_error: !ok,
+                RadioUpdate::State(s) => {
+                    // The radio task builds each snapshot from
+                    // `RadioDisplay::default()` and knows nothing about the
+                    // port's handshake lines; this is decided once, at
+                    // startup, and restamped here.
+                    state = RadioDisplay {
+                        ptt_line_available: ptt_available,
+                        ..s
                     };
+                }
+                RadioUpdate::ActionFeedback { ok, msg } => {
+                    // The status strip, not a panel over the tab body.
+                    //
+                    // The old console had no strip, so the only place to put
+                    // a result was a screen; option 3 has one, and that is
+                    // what it is for. Leaving this as a `ControlState` had
+                    // two consequences worth naming, because both looked
+                    // like unrelated bugs: the overlay hid whichever tab the
+                    // operator was on, and the console's own keys stopped
+                    // working, since a state that is not `Menu` hands every
+                    // key to the radio's menus -- so after any command the
+                    // tab digits and `q` went dead.
+                    view.message = Some(if ok { msg } else { format!("! {msg}") });
                 }
                 RadioUpdate::DiagProgress {
                     label,
@@ -2342,17 +2666,185 @@ async fn ui_task(
             }
         }
 
-        // 2. Draw frame.
-        draw_frame(&mut terminal, &state, &control)?;
+        // 2. Refresh the handshake inputs, but only while they are on
+        //    screen. `read_handshake` is one ioctl, but it is pointless
+        //    anywhere else, and it can legitimately report `Busy` -- in
+        //    which case the last reading stands rather than blinking off.
+        if let ControlState::PttLine {
+            ref mut cts,
+            ref mut dsr,
+            ..
+        } = control
+        {
+            if let Ok(handshake) = ptt.ptt.read_handshake() {
+                *cts = handshake.cts;
+                *dsr = handshake.dsr;
+            }
+        }
 
-        // 3. Handle key events (non-blocking, 10ms poll window).
+        // 3. Take whatever the signal sources have produced, and tell the
+        //    spectrum source where the dial is now. An IF tap is
+        //    dial-centred by construction, so a console that did not pass
+        //    the frequency on would draw a window that no longer matches
+        //    the number printed above it.
+        if let Some(feed) = sources.spectrum.as_ref() {
+            feed.retune(state.vfo_a_hz);
+            view.spectrum = feed.frames();
+            if let Some(fault) = feed.fault() {
+                view.message = Some(fault);
+            }
+        }
+        if let Some(audio) = sources.audio.as_mut() {
+            audio.poll();
+            view.audio = audio.state();
+            if let Some(frame) = audio.latest() {
+                view.af_scope = Some(frame.scope.clone());
+                view.af_spectrum = Some(frame.spectrum.clone());
+            }
+            if let Some(fault) = audio.fault() {
+                view.message = Some(fault.to_string());
+            }
+        }
+        // Derived from what the radio published for the mode it is in,
+        // rather than from a table keyed on a display label.
+        view.passband = state
+            .mode_id
+            .and_then(|mode| cat_ui::af::passband_for(&caps, mode));
+
+        // 3b. A link that answers questions on its own schedule. The local
+        //     case has neither of these and pays a pointer check.
+        if let Some(feed) = sources.device_feed.as_ref() {
+            if let Ok(devices) = feed.lock() {
+                if *devices != view.devices {
+                    view.devices = devices.clone();
+                    // The cursor was placed against the old list -- which
+                    // may have been empty, because the answer had not
+                    // arrived yet. Re-seating it on the host's default is
+                    // what the local path does at startup.
+                    view.device_selection.select_default(&view.devices);
+                }
+            }
+        }
+        if let Some(notices) = sources.notices.as_ref() {
+            if let Ok(mut queue) = notices.lock() {
+                // Newest wins: the message line holds one, and the most
+                // recent thing the radio's host said is the one an
+                // operator is waiting on.
+                if let Some(last) = queue.pop() {
+                    view.message = Some(last);
+                    queue.clear();
+                }
+            }
+        }
+
+        // 4. Draw frame.
+        draw_frame(&mut terminal, &state, &control, &view, &caps)?;
+
+        // 5. Handle key events (non-blocking, 10ms poll window).
         if event::poll(std::time::Duration::from_millis(10)).map_err(UiError::Io)? {
             if let Event::Key(key) = event::read().map_err(UiError::Io)? {
+                // The console gets first refusal, but only while the radio's
+                // own menus are not in the middle of something: a digit
+                // inside a submenu, or a keystroke inside a text prompt,
+                // belongs to that submenu. `console::handle_key` passes
+                // through everything it does not own, so the feature menus
+                // keep every key they ever had.
+                //
+                // `Feedback` counts as resting, and getting that wrong is
+                // what made the digits stop working the first time this was
+                // wired: any command leaves a feedback message behind, so
+                // gating on `Menu` alone meant the tab keys died the moment
+                // the operator did anything.
+                if matches!(control, ControlState::Menu | ControlState::Feedback { .. }) {
+                    match crate::console::handle_key(key, &mut view, &caps) {
+                        crate::console::ConsoleKey::Consumed
+                        | crate::console::ConsoleKey::Rejected(_) => continue,
+                        crate::console::ConsoleKey::Action(action) => {
+                            apply_console_action(action, &mut view, &cmd_tx);
+                            continue;
+                        }
+                        crate::console::ConsoleKey::Attach(device) => {
+                            // Opening it belongs to the wiring layer; the
+                            // console's part is to show the list and report
+                            // what came back.
+                            match sources.attach.as_ref() {
+                                Some(open) => match open(&device) {
+                                    Ok(attached) => {
+                                        // A local attach has already
+                                        // happened by the time this
+                                        // returns. A remote one has only
+                                        // been asked for, and the answer
+                                        // arrives later as a notice --
+                                        // saying "attached" here would
+                                        // claim something not yet true,
+                                        // and would still say it after
+                                        // the host refused.
+                                        let remote =
+                                            matches!(attached, crate::feeds::Attached::Remote);
+                                        sources.accept(attached);
+                                        view.message = Some(if remote {
+                                            format!("asked the radio's host for {}", device.spec)
+                                        } else {
+                                            format!("attached {}", device.spec)
+                                        });
+                                    }
+                                    Err(e) => view.message = Some(e),
+                                },
+                                None => {
+                                    view.message =
+                                        Some("this console cannot attach devices".to_string())
+                                }
+                            }
+                            continue;
+                        }
+                        crate::console::ConsoleKey::RefreshDevices => {
+                            match sources.refresh_devices.as_ref() {
+                                Some(refresh) => {
+                                    refresh();
+                                    view.message = Some("asked again for devices".to_string());
+                                }
+                                None => {
+                                    view.message =
+                                        Some("this console cannot re-enumerate devices".to_string())
+                                }
+                            }
+                            continue;
+                        }
+                        crate::console::ConsoleKey::Passthrough => {}
+                    }
+                }
                 match handle_key(key, &mut control, &state) {
                     KeyResult::Quit => {
+                        // Before anything else: a console that exits with the
+                        // transmitter keyed is the failure this whole feature
+                        // exists to avoid.
+                        restore_ptt_idle(&mut ptt).await;
                         ch_send(&cmd_tx, RadioCmd::Quit);
                         return Ok(());
                     }
+                    KeyResult::PttLine(action) => match action {
+                        PttLineAction::Set { line, asserted } => {
+                            match apply_ptt_line(&mut ptt, line, asserted).await {
+                                Ok(()) => {
+                                    if let ControlState::PttLine {
+                                        asserted: ref mut shown,
+                                        ref mut error,
+                                        ..
+                                    } = control
+                                    {
+                                        *shown = asserted;
+                                        *error = None;
+                                    }
+                                }
+                                Err(e) => {
+                                    if let ControlState::PttLine { ref mut error, .. } = control {
+                                        *error = Some(e.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        PttLineAction::Idle => restore_ptt_idle(&mut ptt).await,
+                    },
                     KeyResult::Continue => {}
                     KeyResult::StartDiag(callsign) => {
                         diag_results.clear();
@@ -2390,7 +2882,7 @@ async fn ui_task(
             }
         }
 
-        // 4. Yield briefly so the radio task can run.
+        // 5. Yield briefly so the radio task can run.
         yield_sleep(std::time::Duration::from_millis(5)).await;
     }
 }
@@ -2632,5 +3124,115 @@ async fn execute_action<R: Radio>(
         VoiceRecall(v) => ("Voice recall", ok_unit(radio.voice_recall(v).await)),
         ResetPartial => ("Reset partial", ok_unit(radio.reset(false).await)),
         ResetFull => ("Reset full", ok_unit(radio.reset(true).await)),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod console_action_tests {
+    use super::*;
+
+    /// Every verb the shared parser advertises, run through the console's
+    /// own action mapping.
+    ///
+    /// The bar is not "most of them work": a command line that parses a
+    /// verb and then silently does nothing is worse than one that refuses
+    /// it, because the operator believes the radio moved. So this walks
+    /// `cat_ui::command::VERBS` — the list the hint line is generated from
+    /// — and asserts each one reaches the radio task.
+    #[test]
+    fn every_verb_the_command_line_advertises_actually_reaches_the_radio() {
+        let caps = cat_native::CapabilitiesWire::from(&radio::capabilities::TS570D);
+
+        // One concrete line per advertised verb. Kept beside the list so a
+        // new verb fails here rather than quietly doing nothing.
+        let lines = [
+            ("f 14.074", true),
+            ("t 14074000", true),
+            ("m usb", true),
+            ("mem 12", true),
+            ("shift 400", true),
+            ("split", true),
+            ("split off", true),
+        ];
+        assert_eq!(
+            lines.len() - 1,
+            cat_ui::command::VERBS.len() - 2,
+            "a verb was added or removed; add a line for it here \
+             (VERBS also carries the bare-digit tab verb and quit)"
+        );
+
+        for (line, should_reach_radio) in lines {
+            let action = cat_ui::command::parse(line, &caps)
+                .unwrap_or_else(|e| panic!("{line:?} did not parse: {e:?}"));
+
+            let cmd_ch: Chan<RadioCmd> = make_chan();
+            let mut view = crate::console::ConsoleView::for_capabilities(&caps);
+            apply_console_action(action, &mut view, &cmd_ch);
+
+            let sent = ch_recv_all(&cmd_ch).len();
+            if should_reach_radio {
+                assert_eq!(
+                    sent, 1,
+                    "{line:?} parsed but sent nothing to the radio; message was {:?}",
+                    view.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_retune_shows_as_pending_until_the_radio_confirms() {
+        // The design's pending grammar. Without this the readout would jump
+        // to a frequency the radio has not acknowledged.
+        let caps = cat_native::CapabilitiesWire::from(&radio::capabilities::TS570D);
+        let action = cat_ui::command::parse("t 14200000", &caps).expect("parse");
+        let cmd_ch: Chan<RadioCmd> = make_chan();
+        let mut view = crate::console::ConsoleView::for_capabilities(&caps);
+
+        apply_console_action(action, &mut view, &cmd_ch);
+        assert_eq!(view.pending_vfo_hz, Some(14_200_000));
+    }
+
+    #[test]
+    fn a_mode_this_radio_lacks_is_refused_with_a_reason() {
+        // `native_mode_to_ts570d` returns None for the modes a TS-570D does
+        // not have. That must reach the operator, not vanish.
+        let cmd_ch: Chan<RadioCmd> = make_chan();
+        let caps = cat_native::CapabilitiesWire::from(&radio::capabilities::TS570D);
+        let mut view = crate::console::ConsoleView::for_capabilities(&caps);
+
+        apply_console_action(
+            cat_ui::command::Action::Radio(cat_native::Command::SetMode {
+                mode: cat_native::ModeId::DataFm,
+            }),
+            &mut view,
+            &cmd_ch,
+        );
+        assert!(ch_recv_all(&cmd_ch).is_empty(), "nothing was sent");
+        assert!(view.message.is_some(), "and the operator was told why");
+    }
+
+    #[test]
+    fn an_if_shift_carries_its_direction_separately_from_its_magnitude() {
+        // `IS` takes ' ', '+' or '-' and four digits, not a signed number.
+        let caps = cat_native::CapabilitiesWire::from(&radio::capabilities::TS570D);
+        for (hz, want_dir) in [(400i32, '+'), (-400, '-'), (0, ' ')] {
+            let cmd_ch: Chan<RadioCmd> = make_chan();
+            let mut view = crate::console::ConsoleView::for_capabilities(&caps);
+            apply_console_action(
+                cat_ui::command::Action::Radio(cat_native::Command::SetIfShift { hz }),
+                &mut view,
+                &cmd_ch,
+            );
+            let sent = ch_recv_all(&cmd_ch);
+            assert_eq!(sent.len(), 1, "{hz} Hz sent nothing");
+            match &sent[0] {
+                RadioCmd::Execute(ExecuteAction::SetIfShift(dir, magnitude)) => {
+                    assert_eq!(*dir, want_dir, "{hz} Hz got the wrong direction");
+                    assert_eq!(*magnitude, hz.unsigned_abs() as u16);
+                }
+                _ => panic!("{hz} Hz produced the wrong action"),
+            }
+        }
     }
 }

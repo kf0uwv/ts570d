@@ -385,6 +385,22 @@ impl Ts570dRadio {
         &self.state
     }
 
+    /// Set what the S-meter reads.
+    ///
+    /// For the emulator, whose meter has to agree with the band it is
+    /// transmitting: a console showing a carrier filling its waterfall
+    /// while the needle sits at S5 would make the emulator useless for the
+    /// one thing a console most needs tested, which is that its
+    /// instruments agree with each other.
+    ///
+    /// Named for the one field rather than exposing the state, because
+    /// everything else here is the radio's own business and a caller that
+    /// could rewrite the dial from outside would be a caller that
+    /// eventually did.
+    pub fn set_smeter(&mut self, raw: u16) {
+        self.state.smeter = raw;
+    }
+
     fn handle_raw(&mut self, cmd: &str) -> (String, Vec<Ts570dEvent>) {
         crate::ts570d_radio_handlers::handle(cmd, &mut self.state)
     }

@@ -14,9 +14,24 @@
 
 //! TS-570D Radio Control Application
 //!
-//! Main entry point: parse `--port <path>` (local serial) or `--server
-//! <host:port>` (remote `ts570d server` instance) from argv, open the
-//! chosen transport, create a typed Ts570d client, and run the ratatui UI.
+//! Main entry point: parse `--cat-only <port>`, `--cat-dtr <port>` or
+//! `--server <host:port>` from argv, open the chosen transport, create a
+//! typed Ts570d client, and run the ratatui UI.
+//!
+//! # The flag names the wiring, the argument names the endpoint
+//!
+//! `--cat-only` and `--cat-dtr` are the same transport choice and a
+//! different **station**: whether this radio's PTT is keyed from the serial
+//! DTR line. That is not something software can detect — a port has a DTR
+//! pin either way, and whether anything is wired to it is a fact about the
+//! shack — so the operator says which, once, on the command line.
+//!
+//! Either flag takes a local device (`/dev/ttyUSB0`, `COM3`) **or** a
+//! `host:port` on an RFC 2217 device server (`ser2net`, a Moxa box, this
+//! repo's emulator run with `--com`). The transport follows from the shape
+//! of the argument — see [`endpoint`] — so the same flag reaches a radio on
+//! the desk and a radio on the network, and the console above it cannot
+//! tell the difference.
 //!
 //! The emulator (if needed) runs as a **separate process**:
 //!   cargo run --bin emulator
@@ -32,90 +47,430 @@
 #[cfg(target_os = "windows")]
 mod win_runtime;
 
+#[path = "endpoint.rs"]
+mod endpoint;
+
+/// The console, speaking the native protocol to a `ts570d server`.
+#[cfg(target_os = "linux")]
+mod native_console;
+
 use tracing::info;
 
+use cat_signal::IfTapConfig;
+use cat_signal_audio::{AudioPipelineConfig, AudioStream};
 use cat_transport_core::{CatSession, ResponseDisposition, TransportError};
+use cat_transport_rfc2217::{Rfc2217Config, Rfc2217Port};
 use cat_transport_serial::{SerialCatSession, SerialConfig, SerialPort};
 use cat_transport_tcp::{TcpCatSession, TcpSessionError};
 use radio::Ts570d;
+use ui::feeds::{Attached, AudioFeed, ConsoleSources, SpectrumFeed};
 
 /// Which transport to open for the local TUI (`--port` or `--server`,
 /// mutually exclusive — see [`parse_args`]).
 enum Transport {
-    /// `--port <path>`: open a local serial port directly.
+    /// `--cat-only <port>` or `--cat-dtr <port>`: own a serial port, local
+    /// or on a device server. `keys_ptt` is the difference between the two
+    /// flags, and it is a statement about the shack rather than about the
+    /// hardware.
     Serial {
         port: String,
         baud: u32,
         stop_bits: u8,
+        keys_ptt: bool,
     },
-    /// `--server <host:port>`: connect to a remote `ts570d server`
-    /// instance's raw TCP listener instead of opening a local serial port.
+    /// `--server <host:port>`: attach to a remote `ts570d server` over the
+    /// **native console protocol** — its `--console-port`.
+    ///
+    /// The protocol a console should speak. It carries the radio's
+    /// capabilities, its whole state in one round trip, spectrum frames,
+    /// and the question "what does your machine have attached?" — none of
+    /// which raw CAT can express.
     Server { addr: String },
+    /// `--server-raw <host:port>`: the same idea over raw CAT, against a
+    /// server's `--raw-tcp-port`.
+    ///
+    /// Kept because it is the only way to reach a raw listener, and
+    /// removing it would break setups that point at one. It is not the
+    /// better choice for a console: over a Kenwood byte pipe there are no
+    /// capabilities to read, no spectrum, and no way to ask what the
+    /// radio's host has attached.
+    ServerRaw { addr: String },
 }
 
 /// Parsed command-line arguments for the local TUI.
 struct Args {
     transport: Transport,
+    /// `--if-out <endpoint>`: the radio's IF output -- on a TS-570D, the
+    /// CN4 header. Either an `rtl_tcp` server (`host:port`) or a local
+    /// dongle (`rtl:<index>`).
+    if_out: Option<String>,
+    /// `--acc2-audio <endpoint>`: the ACC2 receive-audio pair. Either a
+    /// PCM server (`host:port`) or a local sound device.
+    acc2_audio: Option<String>,
 }
 
-/// Command-line arguments specific to `ts570d server ...`: headless network
-/// server mode, one process owning the serial port and exposing it over the
-/// network to WSJT-X (via the rigctld-compatible listener) and/or other
-/// `radio-cat-rs`-aware clients (via the raw `cat-server` TCP/UDP
-/// listeners), instead of running the local TUI.
-struct ServerArgs {
-    port: String,
-    baud: u32,
-    stop_bits: u8,
-    raw_tcp_port: Option<u16>,
-    raw_udp_port: Option<u16>,
-    rigctl_port: Option<u16>,
-    /// The typed console protocol, for `ts570d-gui`.
-    console_port: Option<u16>,
-    /// An RTL-SDR on the CN4 IF tap, as `host:port` speaking rtl_tcp.
-    /// Either the emulator's `--cn4` or a real dongle behind `rtl_tcp`.
-    cn4: Option<String>,
+/// The TS-570D's first IF, and what its IF output needs corrected.
+///
+/// **The whole of this program's contribution to opening an SDR.** Sample
+/// rate, bin count, how a dongle is named, how the pieces assemble --
+/// `cat-signal-rtlsdr` owns all of it, because all of it is a fact about
+/// the dongle. What only this program knows is the number below: a
+/// TS-570D's first IF is 73.05 MHz, its LO1 is high-side so the tapped
+/// spectrum arrives mirrored, and `trim_hz` is a per-station calibration
+/// against a known carrier, left at zero until somebody measures it.
+///
+/// On this radio the IF output is the **CN4** header; `--if-out` names the
+/// signal rather than the connector, because the designation is a TS-570D
+/// fact and the signal is what every radio with one has.
+const IF_TAP: IfTapConfig = IfTapConfig {
+    if_center_hz: 73_050_000,
+    inverted: true,
+    trim_hz: 0,
+};
+
+/// Where the tap is pointed until the first CAT poll says otherwise.
+///
+/// The spectrum feed is started before the radio has been asked anything,
+/// so it needs a dial to centre on; the very next poll corrects it. The
+/// TS-570D's own power-on frequency is the least surprising guess.
+const INITIAL_DIAL_HZ: u64 = 14_000_000;
+
+/// Open the signal sources the console was asked for.
+///
+/// Failing to open one is reported and **not fatal**: a radio with an
+/// unplugged dongle is still a radio, and a console that refused to start
+/// because its waterfall had no source would be worse than one that starts
+/// and says so.
+fn open_sources(
+    if_out: Option<String>,
+    acc2_audio: Option<String>,
+    dial_hz: u64,
+) -> ConsoleSources {
+    let mut sources = ConsoleSources::default();
+
+    if let Some(spec) = if_out {
+        // One call, and this program's only say in it is `IF_TAP`. The
+        // spec may name a dongle on this machine or an rtl_tcp server; the
+        // library decides which and how, and pins the tuner to the IF.
+        match cat_signal_rtlsdr::open(&spec, IF_TAP, cat_signal_rtlsdr::IfSourceConfig::default()) {
+            Ok(source) => {
+                info!("IF output attached at {spec}");
+                sources.spectrum = Some(SpectrumFeed::start(source, dial_hz));
+            }
+            Err(e) => eprintln!("warning: {e}"),
+        }
+    }
+
+    if let Some(spec) = acc2_audio {
+        match endpoint::classify(&spec) {
+            endpoint::Endpoint::Network(addr) => {
+                match AudioStream::connect(addr.as_str(), AudioPipelineConfig::default()) {
+                    // The transmit half is dropped: this console does not
+                    // send audio, and holding a handle open would keep the
+                    // PKD direction alive for no reason.
+                    Ok((stream, _tx)) => {
+                        info!("ACC2 audio attached at {addr}");
+                        sources.audio = Some(AudioFeed::new(stream));
+                    }
+                    Err(e) => eprintln!("warning: no ACC2 audio at {addr}: {e}"),
+                }
+            }
+            endpoint::Endpoint::Device(dev) => match open_local_audio(&dev) {
+                Ok(Attached::Audio(feed)) => sources.audio = Some(feed),
+                // `open_local_audio` only ever produces audio; the arm
+                // exists because `Attached` is shared with the SDR path.
+                Ok(_) => eprintln!("warning: {dev:?} did not open as audio"),
+                Err(e) => eprintln!("warning: {e}"),
+            },
+        }
+    }
+
+    // What this machine can see, asked once. The picker offers these; the
+    // flags above remain the way to say it up front.
+    sources.devices = enumerate_devices();
+    // The same list, in the shared slot the console re-reads, so that
+    // `r` on the SOURCE tab can replace it. A dongle plugged in after the
+    // console started should not need the console restarted.
+    let feed: ui::feeds::DeviceFeed =
+        std::sync::Arc::new(std::sync::Mutex::new(sources.devices.clone()));
+    sources.device_feed = Some(std::sync::Arc::clone(&feed));
+    sources.refresh_devices = Some(Box::new(move || {
+        if let Ok(mut slot) = feed.lock() {
+            *slot = enumerate_devices();
+        }
+    }));
+    sources.attach = Some(Box::new(move |device| attach(device, dial_hz)));
+
+    sources
+}
+
+/// What this machine can see, in the order a picker should show it.
+///
+/// Each source crate enumerates its own kind, because doing so needs that
+/// kind's driver and nothing else should have to link one. A kind whose
+/// backend is not in this build reports *why* rather than reporting an
+/// empty list -- "nothing plugged in" and "this build cannot look" send an
+/// operator to opposite ends of the shack.
+fn enumerate_devices() -> Vec<cat_signal::DeviceList> {
+    vec![audio_devices(), sdr_devices()]
+}
+
+/// The sound cards this machine can capture from.
+///
+/// Not `cfg`-gated: `cat_signal_audio::input_devices()` exists in every
+/// build and reports *why* it is empty when the backend is absent. A picker
+/// is compiled once and has to be able to explain an empty list.
+fn audio_devices() -> cat_signal::DeviceList {
+    cat_signal_audio::input_devices()
+}
+
+/// Open a local sound card.
+#[cfg(feature = "audio-device")]
+fn open_local_audio(spec: &str) -> Result<Attached, String> {
+    let capture =
+        cat_signal_audio::AudioCapture::open(spec, cat_signal_audio::CaptureConfig::default())
+            .map_err(|e| format!("could not open {spec}: {e}"))?;
+    // The negotiated format, not the requested one: a card that only does
+    // 44.1 kHz is used at 44.1 kHz, and saying so is the difference between
+    // a console that is right and one that puts a 1000 Hz note at 1088.
+    info!(
+        "ACC2 audio attached to {} ({} Hz, {} ch, using ch {})",
+        capture.label(),
+        capture.format().sample_rate_hz,
+        capture.format().channels,
+        capture.format().channel
+    );
+    Ok(Attached::Audio(AudioFeed::new(capture)))
+}
+
+/// The same in a build without the feature: say what to do instead.
+#[cfg(not(feature = "audio-device"))]
+fn open_local_audio(spec: &str) -> Result<Attached, String> {
+    Err(format!(
+        "this build cannot open the sound device {spec:?} -- rebuild with \
+         `--features audio-device` (which needs the platform's sound headers), or \
+         point --acc2-audio at a PCM server instead"
+    ))
+}
+
+#[cfg(feature = "sdr-device")]
+fn sdr_devices() -> cat_signal::DeviceList {
+    cat_signal_rtlsdr::device::devices()
+}
+
+#[cfg(not(feature = "sdr-device"))]
+fn sdr_devices() -> cat_signal::DeviceList {
+    cat_signal::DeviceList::unavailable(
+        cat_signal::DeviceKind::Sdr,
+        "not in this build -- rebuild with --features sdr-device",
+    )
+}
+
+/// What the *radio's* machine can see, offered to consoles elsewhere.
+///
+/// A console is not usually on the radio's machine, so enumerating locally
+/// would offer an operator their own laptop's microphone as the radio's
+/// receive audio -- which looks entirely correct and is wrong. This is the
+/// server's side of asking properly.
+///
+/// It lives here rather than in `server` for the same reason
+/// [`enumerate_devices`] does: looking for a sound card needs that card's
+/// driver, and the server crate should not link one in order to answer
+/// (Rule 5).
+struct ServerDevices {
+    if_source: std::sync::Arc<server::spectrum::IfSelection>,
+    audio_source: std::sync::Arc<server::audio::AudioSelection>,
+}
+
+impl ServerDevices {
+    /// What this bench has wired, as a console should be told it.
+    ///
+    /// Assembled from what was actually opened rather than from the
+    /// flags: a `--if-out` that failed to connect is not a wired source,
+    /// and saying it was would have a console draw a waterfall panel that
+    /// never fills.
+    ///
+    /// `state` is `Configured` throughout, not `Streaming`. Whether frames
+    /// are moving is something a console can see for itself, and claiming
+    /// otherwise from here would be guessing about a thread that may have
+    /// just lost its dongle.
+    fn installation(&self) -> radio::capabilities::Installation {
+        let mut installation =
+            radio::capabilities::Installation::bare(vec![radio::capabilities::EndpointRole::Cat]);
+        if self.if_source.is_set() {
+            if let Some(source) = radio::capabilities::Installation::if_tap_from(
+                &radio::capabilities::TS570D,
+                // The station's crystal trim is measured once against a
+                // known carrier and nobody here has measured this one. A
+                // wrong non-zero default would be worse than none,
+                // because it would look calibrated.
+                0,
+                radio::capabilities::SourceState::Configured,
+                "IF tap on CN4",
+            ) {
+                installation = installation.with_source(source);
+            }
+        }
+        if self.audio_source.is_set() {
+            installation = installation.with_source(
+                radio::capabilities::InstalledSource::new(
+                    radio::capabilities::SignalCapability::AudioDerived {
+                        // The ACC2 pair is a communications-audio pair;
+                        // 4 kHz is what the pipeline reports and what a
+                        // console may draw. Declaring it is what stops a
+                        // consumer rendering audio as a band panorama.
+                        max_bandwidth_hz: 4_000,
+                    },
+                    radio::capabilities::SourceState::Configured,
+                    "ACC2 receive audio",
+                )
+                // Post-DSP: this is what the operator is hearing, so a
+                // console may honestly draw the radio's filter passband
+                // over its FFT.
+                .from_origin(radio::capabilities::AudioOrigin::RadioOutput),
+            );
+        }
+        installation
+    }
+}
+
+impl cat_signal::DeviceDirectory for ServerDevices {
+    fn list(&self) -> Vec<cat_signal::DeviceList> {
+        // The same enumeration the local console does, because it is the
+        // same machine's hardware and an operator should not see two
+        // different answers depending on where they sat down.
+        enumerate_devices()
+    }
+
+    fn attach(&self, kind: cat_signal::DeviceKind, spec: &str) -> Result<(), String> {
+        match kind {
+            cat_signal::DeviceKind::Sdr => {
+                // Opened here, so a busy dongle refuses the attach with
+                // the driver's own words while the operator is still
+                // looking at the picker -- rather than two seconds later
+                // on a background thread with nobody listening.
+                let source = server::spectrum::open_spec(spec)?;
+                self.if_source.select(spec.to_string(), source);
+                info!("console attached the IF source {spec}");
+                Ok(())
+            }
+            cat_signal::DeviceKind::AudioInput => {
+                // Opened here for the same reason as the SDR: a card
+                // another program holds refuses the attach with the
+                // driver's own words while the operator is still looking
+                // at the picker.
+                let source = server::audio::open_spec(spec)?;
+                self.audio_source.select(spec.to_string(), source);
+                info!("console attached the ACC2 audio source {spec}");
+                Ok(())
+            }
+            other => Err(format!("this server cannot attach a {other:?}")),
+        }
+    }
+}
+
+/// Open a device the operator picked.
+///
+/// The console never names a concrete source type; this is the wiring
+/// layer, which is the only place that may (Rule 5).
+fn attach(device: &cat_signal::DeviceInfo, dial_hz: u64) -> Result<Attached, String> {
+    match device.kind {
+        cat_signal::DeviceKind::Sdr => cat_signal_rtlsdr::open(
+            &device.spec,
+            IF_TAP,
+            cat_signal_rtlsdr::IfSourceConfig::default(),
+        )
+        .map(|source| Attached::Spectrum(SpectrumFeed::start(source, dial_hz)))
+        .map_err(|e| e.to_string()),
+        cat_signal::DeviceKind::AudioInput => open_local_audio(&device.spec),
+        // `DeviceKind` is `#[non_exhaustive]`: a kind added upstream should
+        // reach an operator as "this console does not know that yet", not
+        // as a compile error here and not as silence.
+        other => Err(format!("this console cannot attach a {other:?}")),
+    }
 }
 
 /// Print usage and exit with code 1.
 fn usage_exit() -> ! {
     eprintln!(
-        "Usage: ts570d --port <serial-port-path> [--baud <rate>] [--stop-bits <n>]\n\
+        "Usage: ts570d --cat-only <port>  [--baud <rate>] [--stop-bits <n>] [sources]\n       \
+                ts570d --cat-dtr  <port>  [--baud <rate>] [--stop-bits <n>] [sources]\n       \
+                ts570d --server   <host:port>\n       \
+                ts570d --server-raw <host:port>\n\
          \n\
-           --port      Serial port path (required, mutually exclusive with --server)\n\
-                       Examples: /dev/pts/5  /dev/ttyUSB0  COM3\n\
+           --cat-only  CAT only. The station does not key PTT from DTR, so\n\
+                       the console does not offer the PTT-line control.\n\
+           --cat-dtr   CAT, and PTT keyed from the serial DTR line (an ACC2\n\
+                       opto interface, say). Offers the [P] PTT-line item.\n\
+                       Mutually exclusive with --cat-only.\n\
+         \n\
+           <port> is a local device or a host:port on an RFC 2217 device\n\
+           server -- ser2net, a Moxa/Digi box, or this repo's emulator run\n\
+           with --com. Examples:\n\
+                       /dev/ttyUSB0   COM3   127.0.0.1:4001   radio.local:4001\n\
+         \n\
            --baud      Baud rate: 1200, 2400, 4800, 9600  (default: 9600)\n\
            --stop-bits Stop bits: 1 or 2                  (default: 1)\n\
          \n\
-         Usage: ts570d --server <host:port>\n\
+           --server    Attach to a remote `ts570d server` that already owns\n\
+                       a radio and is sharing it, rather than owning a port\n\
+                       of your own. Speaks the console protocol, so point it\n\
+                       at the server's --console-port. Brings capabilities,\n\
+                       the waterfall, and the radio host's device list.\n\
+                       Example: --server 127.0.0.1:7400\n\
+           --server-raw  The same, over raw CAT against --raw-tcp-port. No\n\
+                       capabilities, no spectrum, and no way to ask what the\n\
+                       radio's host has attached. Prefer --server.\n\
          \n\
-           --server    Connect to a remote `ts570d server` instance's raw\n\
-                       TCP listener instead of opening a local serial port\n\
-                       (mutually exclusive with --port/--baud/--stop-bits).\n\
-                       Example: --server 127.0.0.1:7373"
+         Signal sources (optional, either serial mode):\n\
+           --if-out <endpoint>        the radio's IF output: an rtl_tcp\n\
+                                      server (host:port), or a local dongle\n\
+                                      as rtl:0, rtl:1, ...\n\
+           --acc2-audio <endpoint>    the ACC2 receive-audio pair: a PCM\n\
+                                      server (host:port), or a sound device"
     );
     std::process::exit(1);
 }
 
-/// Parse `--port <path>`, `--baud <rate>`, `--stop-bits <n>`, or `--server
-/// <host:port>` from `std::env::args()`. Unknown flags are silently ignored.
-/// Exits with an error message and code 1 for missing/invalid values, or if
-/// `--port`/`--baud`/`--stop-bits` and `--server` are combined.
+/// Parse the local-TUI arguments. Unknown flags are silently ignored.
+///
+/// Exits with an error message and code 1 for missing or invalid values,
+/// and for any two of `--cat-only`/`--cat-dtr`/`--server` together.
 fn parse_args() -> Args {
     let mut args_iter = std::env::args().skip(1);
-    let mut port: Option<String> = None;
+    let mut cat_only: Option<String> = None;
+    let mut cat_dtr: Option<String> = None;
     let mut baud: u32 = 9600;
     let mut stop_bits: u8 = 1;
     let mut server: Option<String> = None;
+    let mut server_raw: Option<String> = None;
+    let mut if_out: Option<String> = None;
+    let mut acc2_audio: Option<String> = None;
 
     loop {
         match args_iter.next().as_deref() {
-            Some("--port") => match args_iter.next() {
-                Some(path) => port = Some(path),
+            Some("--cat-only") => match args_iter.next() {
+                Some(path) => cat_only = Some(path),
+                None => usage_exit(),
+            },
+            Some("--cat-dtr") => match args_iter.next() {
+                Some(path) => cat_dtr = Some(path),
                 None => usage_exit(),
             },
             Some("--server") => match args_iter.next() {
                 Some(addr) => server = Some(addr),
+                None => usage_exit(),
+            },
+            Some("--server-raw") => match args_iter.next() {
+                Some(addr) => server_raw = Some(addr),
+                None => usage_exit(),
+            },
+            Some("--if-out") => match args_iter.next() {
+                Some(addr) => if_out = Some(addr),
+                None => usage_exit(),
+            },
+            Some("--acc2-audio") => match args_iter.next() {
+                Some(addr) => acc2_audio = Some(addr),
                 None => usage_exit(),
             },
             Some("--baud") => match args_iter.next() {
@@ -164,23 +519,71 @@ fn parse_args() -> Args {
         }
     }
 
-    match (port, server) {
-        (Some(_), Some(_)) => {
-            eprintln!("error: --port and --server are mutually exclusive");
-            std::process::exit(1);
-        }
-        (Some(p), None) => Args {
-            transport: Transport::Serial {
-                port: p,
-                baud,
-                stop_bits,
-            },
-        },
-        (None, Some(addr)) => Args {
-            transport: Transport::Server { addr },
-        },
-        (None, None) => usage_exit(),
+    // Three ways to reach a radio, and exactly one of them per run. Named
+    // in the error rather than counted, so somebody who passed two is told
+    // which two.
+    let chosen: Vec<&str> = [
+        cat_only.as_ref().map(|_| "--cat-only"),
+        cat_dtr.as_ref().map(|_| "--cat-dtr"),
+        server.as_ref().map(|_| "--server"),
+        server_raw.as_ref().map(|_| "--server-raw"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if chosen.len() > 1 {
+        eprintln!(
+            "error: {} are mutually exclusive -- pick one",
+            chosen.join(" and ")
+        );
+        std::process::exit(1);
     }
+
+    let transport = match (cat_only, cat_dtr, server, server_raw) {
+        (Some(port), _, _, _) => Transport::Serial {
+            port,
+            baud,
+            stop_bits,
+            keys_ptt: false,
+        },
+        (None, Some(port), _, _) => Transport::Serial {
+            port,
+            baud,
+            stop_bits,
+            keys_ptt: true,
+        },
+        (None, None, Some(addr), _) => Transport::Server { addr },
+        (None, None, None, Some(addr)) => Transport::ServerRaw { addr },
+        (None, None, None, None) => usage_exit(),
+    };
+
+    Args {
+        transport,
+        if_out,
+        acc2_audio,
+    }
+}
+
+/// Command-line arguments specific to `ts570d server ...`: headless network
+/// server mode, one process owning the serial port and exposing it over the
+/// network to WSJT-X (via the rigctld-compatible listener) and/or other
+/// `radio-cat-rs`-aware clients (via the raw `cat-server` TCP/UDP
+/// listeners), instead of running the local TUI.
+struct ServerArgs {
+    port: String,
+    baud: u32,
+    stop_bits: u8,
+    raw_tcp_port: Option<u16>,
+    raw_udp_port: Option<u16>,
+    rigctl_port: Option<u16>,
+    /// The typed console protocol, for `ts570d-gui`.
+    console_port: Option<u16>,
+    /// The radio's IF output, as `host:port` speaking rtl_tcp. Either the
+    /// emulator's `--if-out` or a real dongle behind `rtl_tcp`.
+    if_out: Option<String>,
+    /// The ACC2 receive-audio pair on *this* machine, for a console
+    /// somewhere else: a PCM server (`host:port`) or a sound device.
+    acc2_audio: Option<String>,
 }
 
 /// Print `ts570d server` usage and exit with code 1.
@@ -188,7 +591,8 @@ fn server_usage_exit() -> ! {
     eprintln!(
         "Usage: ts570d server --port <serial-port-path> [--baud <rate>] [--stop-bits <n>]\n\
                      [--raw-tcp-port <port>] [--raw-udp-port <port>] [--rigctl-port <port>]\n\
-                     [--console-port <port>] [--cn4 <host:port>]\n\
+                     [--console-port <port>] [--if-out <endpoint>]\n\
+                     [--acc2-audio <endpoint>]\n\
          \n\
            --port          Serial port path (required)\n\
            --baud          Baud rate: 1200, 2400, 4800, 9600  (default: 9600)\n\
@@ -197,10 +601,15 @@ fn server_usage_exit() -> ! {
            --raw-udp-port  Bind cat-server's raw enveloped UDP protocol\n\
            --rigctl-port   Bind a Hamlib rigctld-compatible TCP listener\n\
                            (for WSJT-X's \"Hamlib NET rigctl\" rig type)\n\
-           --console-port  Bind the typed console protocol, for ts570d-gui\n\
-           --cn4           An RTL-SDR on the CN4 IF tap, speaking rtl_tcp:\n\
-                           the emulator's --cn4, or a real dongle behind\n\
-                           rtl_tcp. Needs --console-port to go anywhere.\n\
+           --console-port  Bind the typed console protocol -- what both\n\
+                           `ts570d --server` and ts570d-gui speak\n\
+           --if-out        The radio's IF output: an rtl_tcp server\n\
+                           (host:port) or a local dongle as rtl:0, rtl:1.\n\
+                           Needs --console-port to go anywhere.\n\
+           --acc2-audio    The radio's ACC2 receive-audio pair, for a\n\
+                           console on another machine: a PCM server\n\
+                           (host:port) or a sound device. Needs\n\
+                           --console-port to go anywhere.\n\
            At least one of --raw-tcp-port/--raw-udp-port/--rigctl-port/--console-port\n\
            is required."
     );
@@ -219,7 +628,8 @@ fn parse_server_args() -> ServerArgs {
     let mut raw_udp_port: Option<u16> = None;
     let mut rigctl_port: Option<u16> = None;
     let mut console_port: Option<u16> = None;
-    let mut cn4: Option<String> = None;
+    let mut if_out: Option<String> = None;
+    let mut acc2_audio: Option<String> = None;
 
     fn parse_port_number(val: Option<String>, flag: &str) -> u16 {
         match val.and_then(|v| v.parse::<u16>().ok()) {
@@ -290,7 +700,8 @@ fn parse_server_args() -> ServerArgs {
             Some("--console-port") => {
                 console_port = Some(parse_port_number(args_iter.next(), "--console-port"))
             }
-            Some("--cn4") => cn4 = args_iter.next(),
+            Some("--if-out") => if_out = args_iter.next(),
+            Some("--acc2-audio") => acc2_audio = args_iter.next(),
             Some(_) => {}
             None => break,
         }
@@ -310,8 +721,15 @@ fn parse_server_args() -> ServerArgs {
     // A tap with nothing to serve it to is a thread reading a socket for
     // no reason, and much more likely a mistyped invocation than an
     // intention.
-    if cn4.is_some() && console_port.is_none() {
-        eprintln!("error: --cn4 needs --console-port; nothing else consumes the spectrum");
+    if if_out.is_some() && console_port.is_none() {
+        eprintln!("error: --if-out needs --console-port; nothing else consumes the spectrum");
+        std::process::exit(1);
+    }
+    // Same reasoning: only the console protocol carries audio, so
+    // capturing it with nothing to send it to is a sound card held open
+    // for nobody.
+    if acc2_audio.is_some() && console_port.is_none() {
+        eprintln!("error: --acc2-audio needs --console-port; nothing else consumes the audio");
         std::process::exit(1);
     }
 
@@ -324,10 +742,22 @@ fn parse_server_args() -> ServerArgs {
             raw_udp_port,
             rigctl_port,
             console_port,
-            cn4,
+            if_out,
+            acc2_audio,
         },
         None => server_usage_exit(),
     }
+}
+
+/// Which kind of serial port the one serial arm actually opened.
+///
+/// An enum rather than a boxed `CatSession`, because `Ts570d<S>` is generic
+/// over `S` and boxing it would mean a `dyn CatSession` that the `?Send`
+/// async-trait shape makes awkward. Two short arms are cheaper than that,
+/// and this is the wiring layer, which is where concrete types belong.
+enum Session {
+    Local(SerialCatSession<SerialPort>),
+    Remote(SerialCatSession<Rfc2217Port>),
 }
 
 /// Adapts `cat_transport_tcp::TcpCatSession` (`CatSession<Error =
@@ -413,12 +843,44 @@ async fn run_server_mode() {
     );
 
     let session = SerialCatSession::new(port);
+    // Built here, not inside the server: a source named by `--if-out` and
+    // one a console picks later must be opened by the same code, and this
+    // is the layer allowed to name it (Rule 5).
+    let if_source = server::spectrum::IfSelection::new(args.if_out.clone());
+    // The audio pair, opened up front if one was named. Opening here
+    // rather than inside the server means a mistyped device fails while
+    // the operator is still looking at the terminal, not two seconds
+    // later on a background thread.
+    let audio_source = server::audio::AudioSelection::new();
+    if let Some(spec) = args.acc2_audio.clone() {
+        match server::audio::open_spec(&spec) {
+            Ok(source) => {
+                info!("ACC2 audio attached at {spec}");
+                audio_source.select(spec, source);
+            }
+            // Not fatal, for the same reason a missing dongle is not: a
+            // radio with nothing on its audio pair is still a radio.
+            Err(e) => eprintln!("warning: {e}"),
+        }
+    }
+    let devices = std::sync::Arc::new(ServerDevices {
+        if_source: std::sync::Arc::clone(&if_source),
+        audio_source: std::sync::Arc::clone(&audio_source),
+    });
     let config = server::ServerConfig {
         raw_tcp_port: args.raw_tcp_port,
         raw_udp_port: args.raw_udp_port,
         rigctl_port: args.rigctl_port,
         console_port: args.console_port,
-        cn4: args.cn4.clone(),
+        if_source: Some(std::sync::Arc::clone(&if_source)),
+        audio_source: Some(std::sync::Arc::clone(&audio_source)),
+        // What *this* machine can see. A console on another one has no
+        // way to know, and its own sound cards are not this radio's.
+        devices: Some(devices.clone() as std::sync::Arc<dyn cat_signal::DeviceDirectory>),
+        installation: Some({
+            let devices = std::sync::Arc::clone(&devices);
+            std::sync::Arc::new(move || devices.installation())
+        }),
     };
 
     // `server::run` is `async fn` on Linux and a plain blocking `fn` on
@@ -467,45 +929,127 @@ async fn run_app() {
             port,
             baud,
             stop_bits,
+            keys_ptt,
         } => {
-            // SerialPort::open must be called inside an active monoio
-            // runtime on Linux because it registers the fd with io_uring;
-            // on Windows it is a plain synchronous call (see
-            // radio-cat-rs's docs/adr/0004-windows-serial-backend.md).
-            let serial = SerialPort::open(
-                &port,
-                SerialConfig {
-                    baud_rate: baud,
-                    stop_bits,
-                    // Never assert DTR at open: on stations keying PTT from
-                    // the DTR line (e.g. an ACC2 opto interface), the default
-                    // `initial_dtr: true` keys the transmitter the moment the
-                    // port opens. CAT itself needs no DTR. (planning/ptt-line)
-                    initial_dtr: false,
-                    ..SerialConfig::default()
-                },
-            )
-            .expect("serial open failed");
+            // One flag pair, two transports, chosen by the shape of the
+            // argument rather than by a third flag. A device path opens a
+            // local port; a `host:port` opens the same port on an RFC 2217
+            // device server. Everything above this line is identical.
+            let session = if endpoint::is_network(&port) {
+                let remote = Rfc2217Port::connect(
+                    port.as_str(),
+                    Rfc2217Config {
+                        baud_rate: baud,
+                        stop_bits,
+                        // Never assert DTR at open. On a --cat-dtr station
+                        // that is key-down the moment the program starts
+                        // (SN-5 of the ACC2-IF datasheet); on a --cat-only
+                        // station CAT does not need it either way.
+                        initial_dtr: false,
+                        // RTS must be asserted: the TS-570D's RTS input is
+                        // receive-enable and it withholds CAT responses
+                        // while the line is low (manual p. 70).
+                        initial_rts: true,
+                        ..Rfc2217Config::default()
+                    },
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("error: could not open the remote serial port at {port}: {e}");
+                    std::process::exit(1);
+                });
+                info!(
+                    "Remote serial port opened: {} @ {} baud {} stop bit(s) (RFC 2217)",
+                    port, baud, stop_bits
+                );
+                Session::Remote(SerialCatSession::new(remote))
+            } else {
+                // SerialPort::open must be called inside an active monoio
+                // runtime on Linux because it registers the fd with
+                // io_uring; on Windows it is a plain synchronous call (see
+                // radio-cat-rs's docs/adr/0004-windows-serial-backend.md).
+                let local = SerialPort::open(
+                    &port,
+                    SerialConfig {
+                        baud_rate: baud,
+                        stop_bits,
+                        initial_dtr: false,
+                        ..SerialConfig::default()
+                    },
+                )
+                .expect("serial open failed");
+                info!(
+                    "Serial port opened: {} @ {} baud {} stop bit(s)",
+                    port, baud, stop_bits
+                );
+                Session::Local(SerialCatSession::new(local))
+            };
 
+            let sources = open_sources(args.if_out, args.acc2_audio, INITIAL_DIAL_HZ);
+
+            // `--cat-only` says this station does not key from DTR, so the
+            // console is handed a line it will report as absent and the
+            // `[P]` item does not appear. The port still has the pin; the
+            // shack does not use it, and that is not something software can
+            // detect for itself.
+            match session {
+                Session::Local(s) => {
+                    let radio = Ts570d::new(s);
+                    let ptt: Box<dyn radio::PttLine> = if keys_ptt {
+                        radio.ptt_line_handle()
+                    } else {
+                        Box::new(radio::NoPttLine)
+                    };
+                    #[cfg(target_os = "linux")]
+                    let ui_result = ui::run_console(radio, ptt, sources).await;
+                    #[cfg(target_os = "windows")]
+                    let ui_result = ui::run_console(radio, ptt, sources);
+                    ui_result
+                }
+                Session::Remote(s) => {
+                    let radio = Ts570d::new(s);
+                    let ptt: Box<dyn radio::PttLine> = if keys_ptt {
+                        radio.ptt_line_handle()
+                    } else {
+                        Box::new(radio::NoPttLine)
+                    };
+                    #[cfg(target_os = "linux")]
+                    let ui_result = ui::run_console(radio, ptt, sources).await;
+                    #[cfg(target_os = "windows")]
+                    let ui_result = ui::run_console(radio, ptt, sources);
+                    ui_result
+                }
+            }
+        }
+        Transport::Server { addr } => {
+            let mut radio =
+                native_console::NativeConsoleRadio::connect(&addr).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    eprintln!(
+                        "hint: --server wants a `ts570d server --console-port`. For a raw CAT \
+                     listener (--raw-tcp-port), use --server-raw."
+                    );
+                    std::process::exit(1);
+                });
             info!(
-                "Serial port opened: {} @ {} baud {} stop bit(s)",
-                port, baud, stop_bits
+                "Attached to {} over the console protocol at {addr}",
+                radio.capabilities().model
             );
 
-            let radio = Ts570d::new(SerialCatSession::new(serial));
+            // The waterfall is fed by the same connection, on its own
+            // thread: an FFT redraw must not be able to stall the radio
+            // poll, and the two run at different rates on purpose.
+            let sources = native_console::sources(&mut radio);
 
-            // `ui::run` is `async fn` on Linux (driven by `#[monoio::main]`)
-            // but a plain synchronous `fn` on Windows (its own internal
-            // two-task scheduler already blocks the calling thread to
-            // completion — see docs/adr/0006-windows-concurrency-model.md).
+            // No PTT line, and none is possible: a socket has no DTR pin,
+            // so the `[P]` item correctly does not appear.
             #[cfg(target_os = "linux")]
-            let ui_result = ui::run(radio).await;
+            let ui_result = ui::run_console(radio, Box::new(radio::NoPttLine), sources).await;
             #[cfg(target_os = "windows")]
-            let ui_result = ui::run(radio);
+            let ui_result = ui::run_console(radio, Box::new(radio::NoPttLine), sources);
 
             ui_result
         }
-        Transport::Server { addr } => {
+        Transport::ServerRaw { addr } => {
             let tcp_session = TcpCatSession::connect(&addr).await.unwrap_or_else(|e| {
                 eprintln!("error: could not connect to {addr}: {e}");
                 std::process::exit(1);
@@ -513,12 +1057,20 @@ async fn run_app() {
 
             info!("Connected to remote ts570d server at {}", addr);
 
+            // No `ptt_line_handle()` here, and none is possible:
+            // `TcpClientSession` has no modem control lines at all, so the
+            // `[P]` item correctly does not appear in this mode.
             let radio = Ts570d::new(TcpClientSession::new(tcp_session));
 
+            // `remote()`, not `default()`: this console does not own the
+            // radio, so this machine's devices are not the radio's and must
+            // not be offered as if they were. See `ConsoleSources::remote`.
             #[cfg(target_os = "linux")]
-            let ui_result = ui::run(radio).await;
+            let ui_result =
+                ui::run_console(radio, Box::new(radio::NoPttLine), ConsoleSources::remote()).await;
             #[cfg(target_os = "windows")]
-            let ui_result = ui::run(radio);
+            let ui_result =
+                ui::run_console(radio, Box::new(radio::NoPttLine), ConsoleSources::remote());
 
             ui_result
         }

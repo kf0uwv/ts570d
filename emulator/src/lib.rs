@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod acc2;
+pub mod acc2_audio;
+pub mod com;
 pub mod emulator;
 pub mod io;
 pub mod logger;
+pub mod meter;
 pub mod port;
 pub mod pty;
 pub mod tap;
