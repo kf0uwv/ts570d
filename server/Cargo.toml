@@ -66,7 +66,16 @@ default = []
 # a console somewhere else. Off by default for the same reason as the
 # binary's: it wants the platform's sound headers, and a server pointed at
 # a PCM server needs none of it.
-audio-device = ["cat-signal-audio/device"]
+audio-device = ["cat-signal-audio/device", "dep:alsa"]
+
+# The ACC2 sound card's mixer, which the server owns: every USB
+# re-enumeration reverts capture gain, playback level and AGC, and nothing
+# else notices (bench record item 33). Linux-only and optional, because a
+# mixer is an ALSA concept and this is the same trade `audio-device`
+# already makes for the PCM side.
+[target.'cfg(target_os = "linux")'.dependencies.alsa]
+version = "0.9"
+optional = true
 
 # Platform-specific configuration
 [target.'cfg(target_os = "linux")'.dependencies]

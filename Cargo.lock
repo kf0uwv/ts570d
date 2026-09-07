@@ -3070,6 +3070,7 @@ dependencies = [
 name = "server"
 version = "0.3.0"
 dependencies = [
+ "alsa",
  "async-trait",
  "cat-framework",
  "cat-native",

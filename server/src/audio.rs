@@ -62,14 +62,76 @@ pub struct AudioSelection {
     /// that goes away has usually been unplugged, and silently grabbing
     /// it again later is not obviously right.
     label: Mutex<Option<String>>,
+    /// The device an operator ASKED for, whether or not its PCM opened.
+    ///
+    /// Distinct from `label`, which is only set once a source is actually
+    /// streaming. The mixer has to be asserted even when the PCM could not
+    /// be opened — PipeWire or WSJT-X holding the stream is the ordinary
+    /// case, and the card's gain is still this server's to own. Gating the
+    /// mixer on a successful capture would skip it in exactly the
+    /// situation it matters most.
+    requested: Mutex<Option<String>>,
     generation: AtomicU64,
+    /// The mixer values this station wants asserted on the card.
+    ///
+    /// Held here for the same reason the IF trim rides on `IfSelection`:
+    /// the flag, a console's attach, and this thread's own reconnect are
+    /// three callers that must all apply the same settings, and somewhere
+    /// common to all three is the only place they cannot drift.
+    #[cfg(all(target_os = "linux", feature = "audio-device"))]
+    mixer: crate::mixer::MixerSettings,
 }
 
 impl AudioSelection {
+    #[cfg(all(target_os = "linux", feature = "audio-device"))]
+    pub fn new() -> Arc<Self> {
+        Self::with_mixer(Default::default())
+    }
+
+    /// Start with the mixer values `--acc2-capture` / `--acc2-playback` named.
+    #[cfg(all(target_os = "linux", feature = "audio-device"))]
+    pub fn with_mixer(mixer: crate::mixer::MixerSettings) -> Arc<Self> {
+        Arc::new(Self {
+            pending: Mutex::new(None),
+            label: Mutex::new(None),
+            requested: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            mixer,
+        })
+    }
+
+    /// Note the device named on the command line, before any open is tried.
+    pub fn set_requested(&self, spec: &str) {
+        if let Ok(mut slot) = self.requested.lock() {
+            *slot = Some(spec.to_string());
+        }
+    }
+
+    /// The device to assert mixer state against, if any.
+    ///
+    /// Prefers what is actually streaming, falls back to what was asked
+    /// for -- the two differ precisely when something else holds the PCM.
+    pub fn mixer_target(&self) -> Option<String> {
+        self.label
+            .lock()
+            .ok()
+            .and_then(|l| l.clone())
+            .or_else(|| self.requested.lock().ok().and_then(|r| r.clone()))
+    }
+
+    /// The mixer values to assert on the card.
+    #[cfg(all(target_os = "linux", feature = "audio-device"))]
+    pub fn mixer_settings(&self) -> crate::mixer::MixerSettings {
+        self.mixer
+    }
+
+    /// Where there is no ALSA mixer to own, this is the only constructor.
+    #[cfg(not(all(target_os = "linux", feature = "audio-device")))]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             pending: Mutex::new(None),
             label: Mutex::new(None),
+            requested: Mutex::new(None),
             generation: AtomicU64::new(0),
         })
     }
@@ -109,27 +171,86 @@ impl AudioSelection {
 
 /// Read the selected source forever, publishing frames into `shared`.
 pub fn spawn(shared: Arc<NativeShared>, selection: Arc<AudioSelection>) {
-    std::thread::spawn(move || loop {
-        let generation = selection.generation();
-        match selection.take_pending() {
-            Some(mut source) => {
-                info!("ACC2 audio: reading {}", selection.label());
-                if let Err(e) = read_frames(&shared, &selection, generation, &mut source) {
-                    warn!("ACC2 audio: {e}");
+    std::thread::spawn(move || {
+        let mut mixer = MixerKeeper::new();
+        loop {
+            let generation = selection.generation();
+            // Asserted before the source is touched, and again on every
+            // pass. A re-enumeration is precisely when the card's mixer
+            // state has been silently reverted, and this loop is what runs
+            // when one has happened. Mixer access is not PCM access, so
+            // this works while PipeWire or WSJT-X holds the stream.
+            mixer.tick(&selection);
+            match selection.take_pending() {
+                Some(mut source) => {
+                    info!("ACC2 audio: reading {}", selection.label());
+                    if let Err(e) = read_frames(&shared, &selection, generation, &mut source) {
+                        warn!("ACC2 audio: {e}");
+                    }
+                }
+                None => {
+                    // Nothing selected. Normal for a server started without
+                    // `--acc2-audio` and never given a source.
+                    std::thread::sleep(Duration::from_millis(250));
+                    continue;
                 }
             }
-            None => {
-                // Nothing selected. Normal for a server started without
-                // `--acc2-audio` and never given a source.
-                std::thread::sleep(Duration::from_millis(250));
-                continue;
+            // A replacement is already open and waiting, so it does not wait.
+            if selection.generation() == generation {
+                std::thread::sleep(Duration::from_secs(2));
             }
         }
-        // A replacement is already open and waiting, so it does not wait.
-        if selection.generation() == generation {
-            std::thread::sleep(Duration::from_secs(2));
-        }
     });
+}
+
+/// Keeps the sound card's mixer as configured, across re-enumerations.
+///
+/// A type rather than a `cfg`-gated block inside the loop so the capture
+/// thread reads the same on every platform, and so neither build produces
+/// an unused-variable warning about the other's state.
+#[cfg(all(target_os = "linux", feature = "audio-device"))]
+struct MixerKeeper {
+    last: std::time::Instant,
+    first: bool,
+}
+
+#[cfg(all(target_os = "linux", feature = "audio-device"))]
+impl MixerKeeper {
+    fn new() -> Self {
+        Self {
+            // Far enough in the past that the first pass asserts.
+            last: std::time::Instant::now() - Duration::from_secs(60),
+            first: true,
+        }
+    }
+
+    /// Assert the mixer, at most every two seconds.
+    ///
+    /// The no-source branch of the capture loop spins every 250 ms, and
+    /// opening the ALSA mixer that often is pointless work. Two seconds is
+    /// well inside the time a re-enumeration takes to settle.
+    fn tick(&mut self, selection: &AudioSelection) {
+        if self.last.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        if let Some(target) = selection.mixer_target() {
+            crate::mixer::assert_and_log(&target, &selection.mixer_settings(), self.first);
+            self.first = false;
+            self.last = std::time::Instant::now();
+        }
+    }
+}
+
+/// The same, where there is no ALSA mixer to own.
+#[cfg(not(all(target_os = "linux", feature = "audio-device")))]
+struct MixerKeeper;
+
+#[cfg(not(all(target_os = "linux", feature = "audio-device")))]
+impl MixerKeeper {
+    fn new() -> Self {
+        Self
+    }
+    fn tick(&mut self, _selection: &AudioSelection) {}
 }
 
 fn read_frames(

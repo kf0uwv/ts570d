@@ -40,6 +40,27 @@ use radio::calibration::{
 };
 use radio::Ts570d;
 
+/// Where a calibration snapshot lives unless told otherwise.
+///
+/// Beside `asound.state`, the sound card's mixer snapshot, because they
+/// are the same kind of thing: per-station bench state that no amount of
+/// querying the hardware can reconstruct.
+///
+/// Returns `None` only when there is no home directory to put it in, in
+/// which case the server reports itself uncalibrated rather than guessing
+/// at a path.
+pub fn default_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .or_else(|| std::env::var_os("APPDATA"))?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("ts570d")
+            .join("calibration.json"),
+    )
+}
+
 /// What the operator asked for.
 pub enum Mode {
     Capture { out: String },

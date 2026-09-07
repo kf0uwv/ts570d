@@ -467,9 +467,14 @@ fn usage_exit() -> ! {
            --acc2-audio <endpoint>    the ACC2 receive-audio pair: a PCM\n\
                                       server (host:port), or a sound device\n\
            --calibration <file>       a snapshot from `ts570d calibrate`,\n\
-                                      checked once at startup. Without one,\n\
-                                      this radio's 52 menu settings are\n\
-                                      unknown and CAT cannot read them.\n\
+                                      checked once at startup. Defaults to\n\
+                                      ~/.config/ts570d/calibration.json.\n\
+           --acc2-capture <n>         sound card capture gain, raw mixer\n\
+                                      units. Asserted on open and re-asserted\n\
+                                      after every USB re-enumeration, which\n\
+                                      silently reverts it.\n\
+           --acc2-playback <n>        sound card playback level (TX drive),\n\
+                                      same treatment.\n\
            --if-trim <hz>             this station's IF calibration, signed\n\
                                       Hz (default 0). Park the radio on a\n\
                                       known-exact carrier such as WWV, see\n\
@@ -635,6 +640,11 @@ struct ServerArgs {
     /// once at startup. `None` is itself reported — a radio whose menus
     /// nobody has recorded is worth one line.
     calibration: Option<String>,
+    /// `--acc2-capture <n>` / `--acc2-playback <n>`: the sound card mixer
+    /// values this server asserts and re-asserts. Station-specific, so
+    /// flags rather than constants.
+    acc2_capture: Option<i64>,
+    acc2_playback: Option<i64>,
     baud: u32,
     stop_bits: u8,
     raw_tcp_port: Option<u16>,
@@ -690,6 +700,8 @@ fn parse_server_args() -> ServerArgs {
     let mut stop_bits: u8 = 1;
     let mut if_trim: i32 = 0;
     let mut calibration: Option<String> = None;
+    let mut acc2_capture: Option<i64> = None;
+    let mut acc2_playback: Option<i64> = None;
     let mut raw_tcp_port: Option<u16> = None;
     let mut raw_udp_port: Option<u16> = None;
     let mut rigctl_port: Option<u16> = None;
@@ -769,6 +781,12 @@ fn parse_server_args() -> ServerArgs {
             Some("--if-out") => if_out = args_iter.next(),
             Some("--acc2-audio") => acc2_audio = args_iter.next(),
             Some("--calibration") => calibration = args_iter.next(),
+            Some("--acc2-capture") => {
+                acc2_capture = Some(parse_mixer_level(args_iter.next(), "--acc2-capture"))
+            }
+            Some("--acc2-playback") => {
+                acc2_playback = Some(parse_mixer_level(args_iter.next(), "--acc2-playback"))
+            }
             Some("--if-trim") => match args_iter.next() {
                 Some(val) => {
                     if_trim = parse_trim_hz(&val).unwrap_or_else(|e| {
@@ -822,6 +840,8 @@ fn parse_server_args() -> ServerArgs {
             acc2_audio,
             if_trim,
             calibration,
+            acc2_capture,
+            acc2_playback,
         },
         None => server_usage_exit(),
     }
@@ -925,7 +945,17 @@ async fn run_server_mode() {
     // straight back: a serial port opens once, and `server::run` needs it.
     let session = {
         let mut probe = radio::Ts570d::new(SerialCatSession::new(port));
-        let status = radio::calibration::check(&mut probe, args.calibration.as_deref()).await;
+        // The flag wins; otherwise the default location, but only if a
+        // file is actually there. A default path that does not exist is
+        // "no snapshot", not "a snapshot that will not read" — the second
+        // reads like a fault and this is just a station that has never
+        // captured one.
+        let default = calibrate::default_path().filter(|p| p.exists());
+        let path = args
+            .calibration
+            .clone()
+            .or_else(|| default.map(|p| p.display().to_string()));
+        let status = radio::calibration::check(&mut probe, path.as_deref()).await;
         report_calibration(&status);
         probe.into_session()
     };
@@ -937,8 +967,20 @@ async fn run_server_mode() {
     // rather than inside the server means a mistyped device fails while
     // the operator is still looking at the terminal, not two seconds
     // later on a background thread.
+    // Built with the mixer values up front, so the flag, a console's
+    // attach and the capture thread's own reconnect all assert the same
+    // thing. See `server::mixer` for why the server owns this at all.
+    #[cfg(all(target_os = "linux", feature = "audio-device"))]
+    let audio_source = server::audio::AudioSelection::with_mixer(server::mixer::MixerSettings {
+        capture: args.acc2_capture,
+        playback: args.acc2_playback,
+    });
+    #[cfg(not(all(target_os = "linux", feature = "audio-device")))]
     let audio_source = server::audio::AudioSelection::new();
     if let Some(spec) = args.acc2_audio.clone() {
+        // Recorded before the open is attempted, so the mixer is still
+        // asserted when the PCM belongs to PipeWire or WSJT-X.
+        audio_source.set_requested(&spec);
         match server::audio::open_spec(&spec) {
             Ok(source) => {
                 info!("ACC2 audio attached at {spec}");
@@ -1268,6 +1310,29 @@ async fn run_calibrate_mode() {
         (None, None) => {
             eprintln!("error: one of --port or --server is required");
             calibrate_usage_exit();
+        }
+    }
+}
+
+/// Parse an `--acc2-capture` / `--acc2-playback` value.
+///
+/// Raw mixer units, not dB: they are what `amixer` prints and what a bench
+/// note records. Range-checking is left to the card, which knows its own
+/// limits and clamps; this only insists on a number.
+fn parse_mixer_level(value: Option<String>, flag: &str) -> i64 {
+    match value.as_deref().map(str::parse::<i64>) {
+        Some(Ok(n)) if n >= 0 => n,
+        Some(Ok(n)) => {
+            eprintln!("error: {flag} must not be negative, got {n}");
+            std::process::exit(1);
+        }
+        Some(Err(_)) => {
+            eprintln!("error: {flag} wants a whole number of mixer units");
+            std::process::exit(1);
+        }
+        None => {
+            eprintln!("error: {flag} requires a value");
+            std::process::exit(1);
         }
     }
 }

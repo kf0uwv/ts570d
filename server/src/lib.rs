@@ -27,6 +27,13 @@
 
 pub mod audio;
 
+/// The ACC2 sound card's mixer, which this server owns.
+///
+/// Linux-only and behind `audio-device`: a mixer is an ALSA concept, and
+/// this is the same trade the PCM side already makes.
+#[cfg(all(target_os = "linux", feature = "audio-device"))]
+pub mod mixer;
+
 use cat_framework::installation::Installation;
 mod console;
 mod rigctl_radio;
