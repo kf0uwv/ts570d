@@ -1130,10 +1130,22 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 // Read: a bare `EX;`, per the instruction manual's COMPUTER
                 // CONTROL COMMAND TABLES (the Read row is `E X ;` with no
                 // parameters). There is no way to name the menu you want —
-                // the answer reports whichever menu is currently selected,
-                // which a Set selects as a side effect. Verified against the
-                // physical radio 2026-09-06: after `EX0340009;`, `EX;`
-                // answers `EX0340009;`.
+                // the answer reports whichever menu the FRONT PANEL has
+                // selected, and CAT can neither read that selection nor
+                // change it.
+                //
+                // An earlier version of this claimed a Set selects the menu
+                // it wrote, "verified against the physical radio
+                // 2026-09-06". That verification was a coincidence: the
+                // panel already happened to be sitting on menu 34, and the
+                // test wrote menu 34, so reading 34 back proved nothing.
+                //
+                // Disproved on the physical radio 2026-09-07. With the
+                // panel on menu 34, `EX0200008;` (menu 20, the CW RX
+                // pitch) left `EX;` still answering `EX0340009;` — while
+                // `PT;` moved from `PT04;` to `PT08;`, proving the write
+                // itself landed. So the write takes effect and the
+                // selection does not follow it.
                 let n = state.menu_number as usize;
                 if n <= 51 {
                     query!(format!("EX{:03}{:04};", n, state.menu_values[n]))
@@ -1145,9 +1157,9 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let (Ok(n), Ok(v)) = (params[..3].parse::<usize>(), params[3..].parse::<u16>()) {
                     if n <= 51 {
                         state.menu_values[n] = v;
-                        // A Set also selects that menu, so a following bare
-                        // `EX;` reports it — matching the real radio.
-                        state.menu_number = n as u8;
+                        // `menu_number` is deliberately NOT touched: on the
+                        // real radio it follows the front panel, and a Set
+                        // over CAT does not move it. See the read arm.
                         set_ok!("menu_values", n)
                     } else {
                         query!("?;".to_string())
@@ -1328,17 +1340,50 @@ mod tests {
     }
 
     #[test]
-    fn test_ex_set_then_bare_query_round_trips() {
-        // The behaviour actually observed on hardware: a Set selects that
-        // menu, so the following read reports it without being told which.
+    fn test_ex_set_does_not_move_the_selected_menu() {
+        // Disproved on the physical radio 2026-09-07. With the panel on
+        // menu 34, writing menu 20 left `EX;` still answering for 34,
+        // while `PT;` confirmed the write to 20 had landed.
+        //
+        // The menu written here is deliberately NOT the selected one. An
+        // earlier version of this test wrote the same menu the panel was
+        // on, which passes whether or not the claim is true -- that is
+        // exactly how the wrong behaviour got committed.
         let mut s = default_state();
-        let (resp, changes) = handle("EX0340009", &mut s);
+        s.menu_number = 34;
+        s.menu_values[34] = 9;
+
+        let (resp, changes) = handle("EX0200008", &mut s);
         assert_eq!(resp, "", "EX set should be silent");
-        assert_eq!(s.menu_values[34], 9);
-        assert_eq!(s.menu_number, 34, "a Set must select the menu it wrote");
-        assert!(!changes.is_empty());
+        assert!(!changes.is_empty(), "a set that lands must report a change");
+        assert_eq!(s.menu_values[20], 8, "the write must land on menu 20");
+        assert_eq!(
+            s.menu_number, 34,
+            "a Set must NOT select the menu it wrote -- the panel owns that"
+        );
+
         let (resp, _) = handle("EX", &mut s);
-        assert_eq!(resp, "EX0340009;");
+        assert_eq!(
+            resp, "EX0340009;",
+            "a bare EX; reports the panel's menu, not the one just written"
+        );
+    }
+
+    #[test]
+    fn test_ex_set_still_takes_effect_on_the_menu_it_names() {
+        // The other half, and the one that keeps "does not select" from
+        // being implemented as "does nothing": the value must change.
+        let mut s = default_state();
+        s.menu_number = 34;
+        let (_, changes) = handle("EX0200008", &mut s);
+        assert!(!changes.is_empty(), "a set that lands must report a change");
+        assert_eq!(s.menu_values[20], 8);
+
+        // And reading it back requires selecting it, which only the panel
+        // can do -- modelled here by moving `menu_number` directly.
+        s.menu_number = 20;
+        let (resp, _) = handle("EX", &mut s);
+        assert_eq!(resp, "EX0200008;");
     }
 
     #[test]
