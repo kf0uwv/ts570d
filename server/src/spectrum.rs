@@ -49,7 +49,7 @@ use tracing::{info, warn};
 ///
 /// Read out of the radio's own declaration rather than restated, so the
 /// pipeline and the capability set cannot disagree about the tap.
-fn tap_config() -> IfTapConfig {
+fn tap_config(trim_hz: i32) -> IfTapConfig {
     match radio::capabilities::TS570D.signal {
         cat_framework::capabilities::SignalSupport::IfTapPoint {
             if_center_hz,
@@ -57,10 +57,13 @@ fn tap_config() -> IfTapConfig {
         } => IfTapConfig {
             if_center_hz,
             inverted,
-            // Calibrated per station against WWV. Zero until somebody
-            // measures theirs -- a wrong non-zero default would be worse
-            // than none, because it would look calibrated.
-            trim_hz: 0,
+            // Calibrated per station against WWV, and passed in rather
+            // than baked in: it is a fact about one bench's dongle and
+            // one radio's actual IF, not about the TS-570D. Zero unless
+            // an operator has measured theirs and said so with
+            // `--if-trim` -- a wrong non-zero default would be worse than
+            // none, because it would look calibrated.
+            trim_hz,
         },
         // Unreachable: this radio declares a tap. Kept total rather than
         // panicking, so a change to the declaration degrades to "no
@@ -68,7 +71,7 @@ fn tap_config() -> IfTapConfig {
         _ => IfTapConfig {
             if_center_hz: 73_050_000,
             inverted: true,
-            trim_hz: 0,
+            trim_hz,
         },
     }
 }
@@ -97,16 +100,30 @@ pub struct IfSelection {
     /// source" from "a new one is waiting" without holding a lock per
     /// frame.
     generation: AtomicU64,
+    /// The station's IF calibration, in Hz, from `--if-trim`.
+    ///
+    /// Held here because a source can be opened from three places -- the
+    /// `--if-out` flag, a console's attach, and this thread's own
+    /// reconnect after a dongle drops -- and all three must apply the
+    /// same calibration. Somewhere common to all three is the only place
+    /// it cannot drift.
+    trim_hz: i32,
 }
 
 impl IfSelection {
     /// Start with whatever `--if-out` named, if anything.
-    pub fn new(spec: Option<String>) -> Arc<Self> {
+    pub fn new(spec: Option<String>, trim_hz: i32) -> Arc<Self> {
         Arc::new(Self {
             pending: Mutex::new(None),
             spec: Mutex::new(spec),
             generation: AtomicU64::new(0),
+            trim_hz,
         })
+    }
+
+    /// The station's IF calibration, for a caller opening a source.
+    pub fn trim_hz(&self) -> i32 {
+        self.trim_hz
     }
 
     /// Hand over an already-opened source, replacing whatever is running.
@@ -184,7 +201,7 @@ fn run_once(
             source
         }
         None => match selection.spec() {
-            Some(spec) => open_spec(&spec)?,
+            Some(spec) => open_spec(&spec, selection.trim_hz())?,
             None => {
                 std::thread::sleep(Duration::from_millis(250));
                 return Ok(Ended::Idle);
@@ -199,7 +216,7 @@ fn run_once(
 /// Public because the attach path opens through it too: an operator's
 /// choice and a `--if-out` flag must produce the same thing, and two call
 /// sites building it separately is how they drift apart.
-pub fn open_spec(spec: &str) -> Result<cat_signal_rtlsdr::IfSource, String> {
+pub fn open_spec(spec: &str, trim_hz: i32) -> Result<cat_signal_rtlsdr::IfSource, String> {
     // One call, and this crate's whole contribution is `tap_config()`.
     // The rate, the bin count, and whether `addr` names a socket or a
     // local dongle are the library's to decide -- it is the only place
@@ -209,7 +226,7 @@ pub fn open_spec(spec: &str) -> Result<cat_signal_rtlsdr::IfSource, String> {
     // and a socket will serve any number you ask it for.
     let source = cat_signal_rtlsdr::open(
         spec,
-        tap_config(),
+        tap_config(trim_hz),
         cat_signal_rtlsdr::IfSourceConfig::default(),
     )
     .map_err(|e| e.to_string())?;
@@ -243,5 +260,60 @@ fn read_frames(
             Ok(frame) => shared.publish_spectrum(frame),
             Err(e) => return Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tap_config_reports_the_radios_own_if_and_inversion() {
+        // Not restated here: read out of the radio's declaration, so a
+        // change to that declaration cannot leave the tap behind.
+        let config = tap_config(0);
+        assert_eq!(config.if_center_hz, 73_050_000);
+        assert!(
+            config.inverted,
+            "the TS-570D injects LO1 high-side, so its tapped IF is mirrored"
+        );
+    }
+
+    #[test]
+    fn tap_config_defaults_to_no_calibration() {
+        // A station that has not measured its own offset gets zero, which
+        // is honest. A plausible-looking non-zero default would render a
+        // waterfall that is wrong and looks calibrated.
+        assert_eq!(tap_config(0).trim_hz, 0);
+    }
+
+    #[test]
+    fn tap_config_carries_the_measured_trim() {
+        // -115 Hz is this bench's measured figure (WWV, six dial offsets
+        // across +/-3 kHz, residual constant to 1.3 Hz). Any i32 must
+        // arrive intact, including the negative case, which is the one a
+        // sign error would silently invert.
+        assert_eq!(tap_config(-115).trim_hz, -115);
+        assert_eq!(tap_config(250).trim_hz, 250);
+    }
+
+    #[test]
+    fn a_selection_hands_its_trim_to_every_opener() {
+        // The reason the trim lives on the selection at all: the flag,
+        // the console's attach, and the reconnect after a dropped dongle
+        // are three different callers of `open_spec`, and a waterfall
+        // that was calibrated until the dongle was replugged would be a
+        // miserable bug to chase.
+        let selection = IfSelection::new(Some("rtl:0".to_string()), -115);
+        assert_eq!(selection.trim_hz(), -115);
+    }
+
+    #[test]
+    fn a_selection_with_no_source_still_carries_a_trim() {
+        // `--if-trim` without `--if-out` is legal: a console may attach a
+        // dongle later, and it must land calibrated.
+        let selection = IfSelection::new(None, -115);
+        assert!(!selection.is_set());
+        assert_eq!(selection.trim_hz(), -115);
     }
 }

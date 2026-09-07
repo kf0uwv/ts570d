@@ -97,6 +97,32 @@ enum Transport {
     ServerRaw { addr: String },
 }
 
+/// Parse an `--if-trim` value: signed Hz, calibrated against a known
+/// carrier.
+///
+/// Its own function because it is the one CLI value with a sign that
+/// matters and no natural bound. A trim is a small correction -- this
+/// bench measures -115 Hz -- so a figure in the tens of kHz is a typo or
+/// a units mix-up, and half a band away is not a calibration.
+fn parse_trim_hz(value: &str) -> Result<i32, String> {
+    let hz: i32 = value
+        .parse()
+        .map_err(|_| format!("--if-trim wants a whole number of Hz, got {value:?}"))?;
+    if hz.abs() > MAX_TRIM_HZ {
+        return Err(format!(
+            "--if-trim {hz} Hz is beyond +/-{MAX_TRIM_HZ}; that is not a calibration"
+        ));
+    }
+    Ok(hz)
+}
+
+/// As far from the IF as a station calibration can plausibly be.
+///
+/// The correction absorbs a dongle's crystal error and the radio's own
+/// deviation from a nominal 73.05 MHz. Both are small. A wider bound
+/// would accept a typo that silently mis-labels the whole waterfall.
+const MAX_TRIM_HZ: i32 = 50_000;
+
 /// Parsed command-line arguments for the local TUI.
 struct Args {
     transport: Transport,
@@ -107,6 +133,9 @@ struct Args {
     /// `--acc2-audio <endpoint>`: the ACC2 receive-audio pair. Either a
     /// PCM server (`host:port`) or a local sound device.
     acc2_audio: Option<String>,
+    /// `--if-trim <hz>`: this station's IF calibration. See
+    /// [`parse_trim_hz`].
+    if_trim: i32,
 }
 
 /// The TS-570D's first IF, and what its IF output needs corrected.
@@ -122,11 +151,13 @@ struct Args {
 /// On this radio the IF output is the **CN4** header; `--if-out` names the
 /// signal rather than the connector, because the designation is a TS-570D
 /// fact and the signal is what every radio with one has.
-const IF_TAP: IfTapConfig = IfTapConfig {
-    if_center_hz: 73_050_000,
-    inverted: true,
-    trim_hz: 0,
-};
+fn if_tap(trim_hz: i32) -> IfTapConfig {
+    IfTapConfig {
+        if_center_hz: 73_050_000,
+        inverted: true,
+        trim_hz,
+    }
+}
 
 /// Where the tap is pointed until the first CAT poll says otherwise.
 ///
@@ -145,6 +176,7 @@ fn open_sources(
     if_out: Option<String>,
     acc2_audio: Option<String>,
     dial_hz: u64,
+    trim_hz: i32,
 ) -> ConsoleSources {
     let mut sources = ConsoleSources::default();
 
@@ -152,7 +184,11 @@ fn open_sources(
         // One call, and this program's only say in it is `IF_TAP`. The
         // spec may name a dongle on this machine or an rtl_tcp server; the
         // library decides which and how, and pins the tuner to the IF.
-        match cat_signal_rtlsdr::open(&spec, IF_TAP, cat_signal_rtlsdr::IfSourceConfig::default()) {
+        match cat_signal_rtlsdr::open(
+            &spec,
+            if_tap(trim_hz),
+            cat_signal_rtlsdr::IfSourceConfig::default(),
+        ) {
             Ok(source) => {
                 info!("IF output attached at {spec}");
                 sources.spectrum = Some(SpectrumFeed::start(source, dial_hz));
@@ -199,7 +235,7 @@ fn open_sources(
             *slot = enumerate_devices();
         }
     }));
-    sources.attach = Some(Box::new(move |device| attach(device, dial_hz)));
+    sources.attach = Some(Box::new(move |device| attach(device, dial_hz, trim_hz)));
 
     sources
 }
@@ -349,7 +385,7 @@ impl cat_signal::DeviceDirectory for ServerDevices {
                 // the driver's own words while the operator is still
                 // looking at the picker -- rather than two seconds later
                 // on a background thread with nobody listening.
-                let source = server::spectrum::open_spec(spec)?;
+                let source = server::spectrum::open_spec(spec, self.if_source.trim_hz())?;
                 self.if_source.select(spec.to_string(), source);
                 info!("console attached the IF source {spec}");
                 Ok(())
@@ -373,11 +409,11 @@ impl cat_signal::DeviceDirectory for ServerDevices {
 ///
 /// The console never names a concrete source type; this is the wiring
 /// layer, which is the only place that may (Rule 5).
-fn attach(device: &cat_signal::DeviceInfo, dial_hz: u64) -> Result<Attached, String> {
+fn attach(device: &cat_signal::DeviceInfo, dial_hz: u64, trim_hz: i32) -> Result<Attached, String> {
     match device.kind {
         cat_signal::DeviceKind::Sdr => cat_signal_rtlsdr::open(
             &device.spec,
-            IF_TAP,
+            if_tap(trim_hz),
             cat_signal_rtlsdr::IfSourceConfig::default(),
         )
         .map(|source| Attached::Spectrum(SpectrumFeed::start(source, dial_hz)))
@@ -427,7 +463,12 @@ fn usage_exit() -> ! {
                                       server (host:port), or a local dongle\n\
                                       as rtl:0, rtl:1, ...\n\
            --acc2-audio <endpoint>    the ACC2 receive-audio pair: a PCM\n\
-                                      server (host:port), or a sound device"
+                                      server (host:port), or a sound device\n\
+           --if-trim <hz>             this station's IF calibration, signed\n\
+                                      Hz (default 0). Park the radio on a\n\
+                                      known-exact carrier such as WWV, see\n\
+                                      how far the trace lands off, and pass\n\
+                                      the negative of that."
     );
     std::process::exit(1);
 }
@@ -446,9 +487,19 @@ fn parse_args() -> Args {
     let mut server_raw: Option<String> = None;
     let mut if_out: Option<String> = None;
     let mut acc2_audio: Option<String> = None;
+    let mut if_trim: i32 = 0;
 
     loop {
         match args_iter.next().as_deref() {
+            Some("--if-trim") => match args_iter.next() {
+                Some(val) => {
+                    if_trim = parse_trim_hz(&val).unwrap_or_else(|e| {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    })
+                }
+                None => usage_exit(),
+            },
             Some("--cat-only") => match args_iter.next() {
                 Some(path) => cat_only = Some(path),
                 None => usage_exit(),
@@ -561,6 +612,7 @@ fn parse_args() -> Args {
         transport,
         if_out,
         acc2_audio,
+        if_trim,
     }
 }
 
@@ -571,6 +623,8 @@ fn parse_args() -> Args {
 /// listeners), instead of running the local TUI.
 struct ServerArgs {
     port: String,
+    /// This station's IF calibration in Hz, from `--if-trim`.
+    if_trim: i32,
     baud: u32,
     stop_bits: u8,
     raw_tcp_port: Option<u16>,
@@ -624,6 +678,7 @@ fn parse_server_args() -> ServerArgs {
     let mut port: Option<String> = None;
     let mut baud: u32 = 9600;
     let mut stop_bits: u8 = 1;
+    let mut if_trim: i32 = 0;
     let mut raw_tcp_port: Option<u16> = None;
     let mut raw_udp_port: Option<u16> = None;
     let mut rigctl_port: Option<u16> = None;
@@ -702,6 +757,15 @@ fn parse_server_args() -> ServerArgs {
             }
             Some("--if-out") => if_out = args_iter.next(),
             Some("--acc2-audio") => acc2_audio = args_iter.next(),
+            Some("--if-trim") => match args_iter.next() {
+                Some(val) => {
+                    if_trim = parse_trim_hz(&val).unwrap_or_else(|e| {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    })
+                }
+                None => server_usage_exit(),
+            },
             Some(_) => {}
             None => break,
         }
@@ -744,6 +808,7 @@ fn parse_server_args() -> ServerArgs {
             console_port,
             if_out,
             acc2_audio,
+            if_trim,
         },
         None => server_usage_exit(),
     }
@@ -846,7 +911,7 @@ async fn run_server_mode() {
     // Built here, not inside the server: a source named by `--if-out` and
     // one a console picks later must be opened by the same code, and this
     // is the layer allowed to name it (Rule 5).
-    let if_source = server::spectrum::IfSelection::new(args.if_out.clone());
+    let if_source = server::spectrum::IfSelection::new(args.if_out.clone(), args.if_trim);
     // The audio pair, opened up front if one was named. Opening here
     // rather than inside the server means a mistyped device fails while
     // the operator is still looking at the terminal, not two seconds
@@ -984,7 +1049,7 @@ async fn run_app() {
                 Session::Local(SerialCatSession::new(local))
             };
 
-            let sources = open_sources(args.if_out, args.acc2_audio, INITIAL_DIAL_HZ);
+            let sources = open_sources(args.if_out, args.acc2_audio, INITIAL_DIAL_HZ, args.if_trim);
 
             // `--cat-only` says this station does not key from DTR, so the
             // console is handed a line it will report as absent and the
@@ -1099,4 +1164,61 @@ async fn main() {
 #[cfg(target_os = "windows")]
 fn main() {
     win_runtime::block_on(run_app());
+}
+
+#[cfg(test)]
+mod trim_tests {
+    use super::{parse_trim_hz, MAX_TRIM_HZ};
+
+    #[test]
+    fn a_measured_negative_trim_parses() {
+        // The sign is the whole point. This bench measured its carrier
+        // rendering +115 Hz high, so the correction is -115, and a parser
+        // that dropped the sign would move the waterfall the wrong way by
+        // twice the error.
+        assert_eq!(parse_trim_hz("-115"), Ok(-115));
+    }
+
+    #[test]
+    fn a_positive_trim_parses_with_or_without_its_sign() {
+        assert_eq!(parse_trim_hz("115"), Ok(115));
+        assert_eq!(parse_trim_hz("+115"), Ok(115));
+    }
+
+    #[test]
+    fn no_calibration_is_zero_and_is_legal() {
+        // An uncalibrated station is a real state, not an error.
+        assert_eq!(parse_trim_hz("0"), Ok(0));
+    }
+
+    #[test]
+    fn the_bounds_are_inclusive() {
+        assert_eq!(parse_trim_hz(&MAX_TRIM_HZ.to_string()), Ok(MAX_TRIM_HZ));
+        assert_eq!(parse_trim_hz(&(-MAX_TRIM_HZ).to_string()), Ok(-MAX_TRIM_HZ));
+    }
+
+    #[test]
+    fn an_absurd_trim_is_refused_rather_than_silently_mislabelling() {
+        // Half a band of "calibration" is a typo or a units mix-up. Taking
+        // it would render a waterfall that is wrong everywhere and looks
+        // authoritative, which is worse than refusing to start.
+        for value in ["50001", "-50001", "14285690"] {
+            let err = parse_trim_hz(value).expect_err("should refuse");
+            assert!(
+                err.contains("not a calibration"),
+                "unhelpful message for {value:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_number_is_refused_and_says_what_it_wanted() {
+        for value in ["", "115hz", "1e3", "-115.5", " 115"] {
+            let err = parse_trim_hz(value).expect_err("should refuse");
+            assert!(
+                err.contains("whole number of Hz"),
+                "unhelpful message for {value:?}: {err}"
+            );
+        }
+    }
 }
