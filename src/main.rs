@@ -48,6 +48,7 @@
 mod win_runtime;
 
 mod calibrate;
+mod port_guard;
 
 #[path = "endpoint.rs"]
 mod endpoint;
@@ -475,6 +476,11 @@ fn usage_exit() -> ! {
                                       silently reverts it.\n\
            --acc2-playback <n>        sound card playback level (TX drive),\n\
                                       same treatment.\n\
+           --force                    open the serial port even if another\n\
+                                      process holds it. Refused by default:\n\
+                                      the CAT port is also the PTT line, so\n\
+                                      taking it from a running WSJT-X keys\n\
+                                      or unkeys the radio under it.\n\
            --if-trim <hz>             this station's IF calibration, signed\n\
                                       Hz (default 0). Park the radio on a\n\
                                       known-exact carrier such as WWV, see\n\
@@ -634,6 +640,12 @@ fn parse_args() -> Args {
 /// listeners), instead of running the local TUI.
 struct ServerArgs {
     port: String,
+    /// `--force`: open the port even if another process holds it.
+    ///
+    /// An escape hatch, not a default. The check reads `/proc`, and a
+    /// wrong refusal must not be the end of the road — but on this radio
+    /// the CAT port is the PTT line, so the default has to be to refuse.
+    force: bool,
     /// This station's IF calibration in Hz, from `--if-trim`.
     if_trim: i32,
     /// `--calibration <file>`: a snapshot from `ts570d calibrate`, checked
@@ -700,6 +712,7 @@ fn parse_server_args() -> ServerArgs {
     let mut stop_bits: u8 = 1;
     let mut if_trim: i32 = 0;
     let mut calibration: Option<String> = None;
+    let mut force = false;
     let mut acc2_capture: Option<i64> = None;
     let mut acc2_playback: Option<i64> = None;
     let mut raw_tcp_port: Option<u16> = None;
@@ -781,6 +794,7 @@ fn parse_server_args() -> ServerArgs {
             Some("--if-out") => if_out = args_iter.next(),
             Some("--acc2-audio") => acc2_audio = args_iter.next(),
             Some("--calibration") => calibration = args_iter.next(),
+            Some("--force") => force = true,
             Some("--acc2-capture") => {
                 acc2_capture = Some(parse_mixer_level(args_iter.next(), "--acc2-capture"))
             }
@@ -840,6 +854,7 @@ fn parse_server_args() -> ServerArgs {
             acc2_audio,
             if_trim,
             calibration,
+            force,
             acc2_capture,
             acc2_playback,
         },
@@ -921,6 +936,16 @@ impl CatSession for TcpClientSession {
 /// running the local TUI.
 async fn run_server_mode() {
     let args = parse_server_args();
+
+    // Checked before the open, because the open itself would succeed:
+    // a serial device permits multiple openers, and the second one to
+    // arrive silently takes the modem-control lines with it.
+    if !args.force {
+        if let Some(holder) = port_guard::holder_of(std::path::Path::new(&args.port)) {
+            eprintln!("error: {}", port_guard::refusal(&args.port, &holder));
+            std::process::exit(1);
+        }
+    }
 
     let port = SerialPort::open(
         &args.port,
@@ -1250,6 +1275,7 @@ async fn run_calibrate_mode() {
     let mut port: Option<String> = None;
     let mut server: Option<String> = None;
     let mut baud: u32 = 9600;
+    let mut force = false;
     let mut mode: Option<calibrate::Mode> = None;
 
     loop {
@@ -1265,6 +1291,7 @@ async fn run_calibrate_mode() {
             Some("--out") => mode = args.next().map(|out| calibrate::Mode::Capture { out }),
             Some("--verify") => mode = args.next().map(|file| calibrate::Mode::Verify { file }),
             Some("--restore") => mode = args.next().map(|file| calibrate::Mode::Restore { file }),
+            Some("--force") => force = true,
             Some(_) => {}
             None => break,
         }
@@ -1284,6 +1311,12 @@ async fn run_calibrate_mode() {
             std::process::exit(1);
         }
         (Some(path), None) => {
+            if !force {
+                if let Some(holder) = port_guard::holder_of(std::path::Path::new(&path)) {
+                    eprintln!("error: {}", port_guard::refusal(&path, &holder));
+                    std::process::exit(1);
+                }
+            }
             let local = SerialPort::open(
                 &path,
                 SerialConfig {
@@ -1356,6 +1389,7 @@ fn calibrate_usage_exit() -> ! {
          \x20 --server <addr>   go through a running `ts570d server`'s raw CAT\n\
          \x20                   port, when it already owns the serial line\n\
          \x20 --baud <rate>     default 9600\n\
+         \x20 --force           take the port even if something else holds it\n\
          \n\
          NOTE: menu values cannot be read back over CAT. Any front-panel menu\n\
          change after a capture makes the file silently wrong, and no software\n\
