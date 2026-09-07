@@ -21,6 +21,33 @@ use crate::radio_state::RadioState;
 /// string including the trailing `;` (ready to write back to the serial port),
 /// and `changes` is a list of `RadioState` field mutations that occurred.
 /// Unknown or malformed commands return `("?;", vec![])`.
+/// Some menus ARE a command, and must not be stored twice.
+///
+/// Menu 20 is the CW RX pitch, which is also what `PT` sets and reads.
+/// Keeping a separate `menu_values[20]` alongside `cw_pitch` means the
+/// radio can be asked the same question two ways and give two answers.
+/// Found on the physical radio 2026-09-07: `EX0200008;` moved `PT;` from
+/// `PT04;` to `PT08;`. The emulator's `PT;` did not move at all.
+///
+/// A pair of functions rather than a match at each call site, so a menu
+/// added to one direction and not the other fails to compile rather than
+/// half-working.
+fn menu_value(state: &RadioState, n: usize) -> u16 {
+    match n {
+        20 => u16::from(state.cw_pitch),
+        _ => state.menu_values[n],
+    }
+}
+
+fn set_menu_value(state: &mut RadioState, n: usize, v: u16) {
+    match n {
+        // Clamped to the menu's own range rather than stored wide: index
+        // 12 is 1000 Hz and there is no 13.
+        20 => state.cw_pitch = v.min(12) as u8,
+        _ => state.menu_values[n] = v,
+    }
+}
+
 pub fn handle(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>) {
     handle_inner(cmd, state)
 }
@@ -63,6 +90,20 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
     macro_rules! query {
         ($resp:expr) => {
             ($resp, vec![])
+        };
+    }
+
+    /// A command the radio accepted and did nothing with: no reply, no
+    /// state change.
+    ///
+    /// Distinct from `query!("?;")`, which is a refusal the caller can
+    /// see, and from `set_ok!`, which reports a change. The TS-570D uses
+    /// this for an out-of-range tone number -- it answers with silence and
+    /// leaves the value alone, so a caller that only watches for `?;` will
+    /// believe the write landed.
+    macro_rules! no_response {
+        () => {
+            (String::new(), vec![])
         };
     }
 
@@ -903,10 +944,14 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                         state.ctcss_tone = v;
                         set_ok!("ctcss_tone", state.ctcss_tone)
                     } else {
-                        query!("?;".to_string())
+                        // Silence, not `?;`, and the value is left alone.
+                        // Verified on the physical radio 2026-09-07:
+                        // `CN00;`, `CN40;` and `CN99;` each answered with
+                        // nothing at all and left the tone unchanged.
+                        no_response!()
                     }
                 } else {
-                    query!("?;".to_string())
+                    no_response!()
                 }
             } else {
                 query!("?;".to_string())
@@ -943,10 +988,14 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                         state.tone_number = v;
                         set_ok!("tone_number", state.tone_number)
                     } else {
-                        query!("?;".to_string())
+                        // Silence, not `?;`, and the value is left alone.
+                        // Verified on the physical radio 2026-09-07:
+                        // `TN00;`, `TN40;` and `TN99;` each answered with
+                        // nothing at all and left the tone unchanged.
+                        no_response!()
                     }
                 } else {
-                    query!("?;".to_string())
+                    no_response!()
                 }
             } else {
                 query!("?;".to_string())
@@ -1007,15 +1056,36 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         // we respond with smeter for any type we don't know.
         // ------------------------------------------------------------------
         "RM" => {
-            // params is the meter type digit(s) — we accept 0 or 1 digit
-            let meter_type = params.parse::<u8>().unwrap_or(0);
-            let value = match meter_type {
-                // Use power_control as a proxy for RF power meter
-                1 | 4 => u16::from(state.power_control),
-                // Default / S-meter proxy
-                _ => state.smeter,
-            };
-            query!(format!("RM{}{:04};", meter_type, value))
+            // `RM<n>;` SELECTS a meter and answers nothing; a bare `RM;`
+            // reports the selected meter and its reading. Verified on the
+            // physical radio 2026-09-07: with `RM;` answering `RM20000;`,
+            // `RM1;` returned an empty response and `RM;` then answered
+            // `RM10000;`.
+            //
+            // This used to answer the set with a reading, which made
+            // `RM1;` look like a query and lost the selection entirely --
+            // so a bare `RM;` always reported meter 0 no matter what had
+            // been asked for.
+            //
+            // Note the asymmetry with every other command here: the query
+            // payload is five characters (`20000`) but the set takes one
+            // (`2`), so the read payload is NOT a valid set payload.
+            if params.is_empty() {
+                let value = match state.meter_selection {
+                    1 | 4 => u16::from(state.power_control),
+                    _ => state.smeter,
+                };
+                query!(format!("RM{}{:04};", state.meter_selection, value))
+            } else if params.len() == 1 {
+                if let Ok(n) = params.parse::<u8>() {
+                    state.meter_selection = n;
+                    set_ok!("meter_selection", n)
+                } else {
+                    no_response!()
+                }
+            } else {
+                query!("?;".to_string())
+            }
         }
 
         // ------------------------------------------------------------------
@@ -1148,7 +1218,7 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 // selection does not follow it.
                 let n = state.menu_number as usize;
                 if n <= 51 {
-                    query!(format!("EX{:03}{:04};", n, state.menu_values[n]))
+                    query!(format!("EX{:03}{:04};", n, menu_value(state, n)))
                 } else {
                     query!("?;".to_string())
                 }
@@ -1156,10 +1226,10 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 // Set: EX<menu:3><value:4>;
                 if let (Ok(n), Ok(v)) = (params[..3].parse::<usize>(), params[3..].parse::<u16>()) {
                     if n <= 51 {
-                        state.menu_values[n] = v;
                         // `menu_number` is deliberately NOT touched: on the
                         // real radio it follows the front panel, and a Set
                         // over CAT does not move it. See the read arm.
+                        set_menu_value(state, n, v);
                         set_ok!("menu_values", n)
                     } else {
                         query!("?;".to_string())
@@ -1330,6 +1400,119 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
+    fn test_menu_20_and_pt_are_one_setting_in_both_directions() {
+        // Found on the physical radio 2026-09-07: `EX0200008;` moved `PT;`
+        // from `PT04;` to `PT08;`. The emulator kept `menu_values[20]` and
+        // `cw_pitch` apart, so the same question answered two ways.
+        let mut s = default_state();
+        s.menu_number = 20;
+
+        handle("EX0200008", &mut s);
+        assert_eq!(handle("PT", &mut s).0, "PT08;", "EX must move PT");
+        assert_eq!(handle("EX", &mut s).0, "EX0200008;");
+
+        // And back the other way, which is the half a one-directional
+        // alias would silently get wrong.
+        handle("PT03", &mut s);
+        assert_eq!(handle("EX", &mut s).0, "EX0200003;", "PT must move menu 20");
+    }
+
+    #[test]
+    fn test_cw_pitch_index_is_fifty_hz_per_step() {
+        // Menu 20 lists thirteen values, 400 through 1000, and CAT format
+        // 52 says "00 (400 Hz min.) ~ 12 (1000 Hz max.)". Only 50 Hz per
+        // step satisfies both; 100 put index 12 at 1600 Hz.
+        use crate::radio_trait::audio_passband_hz;
+        use crate::Mode;
+        let centre = |p| {
+            let (lo, hi) = audio_passband_hz(Mode::Cw, p);
+            (lo + hi) / 2.0
+        };
+        assert_eq!(centre(0), 400.0, "index 0 is the 400 Hz minimum");
+        assert_eq!(centre(12), 1000.0, "index 12 is the 1000 Hz maximum");
+        assert_eq!(centre(6), 700.0, "the midpoint of the thirteen");
+    }
+
+    #[test]
+    fn test_rm_set_is_silent_and_persists() {
+        // Verified on the physical radio 2026-09-07: with `RM;` answering
+        // `RM20000;`, `RM1;` returned an EMPTY response, and `RM;` then
+        // answered `RM10000;`.
+        //
+        // The old handler answered the set with a reading, so `RM1;`
+        // looked like a query and the selection was never stored -- a
+        // bare `RM;` always reported meter 0 whatever had been asked for.
+        let mut s = default_state();
+        s.meter_selection = 2;
+
+        let (resp, changes) = handle("RM1", &mut s);
+        assert_eq!(resp, "", "RM<n>; selects a meter and answers nothing");
+        assert!(!changes.is_empty(), "the selection is a state change");
+        assert_eq!(s.meter_selection, 1);
+
+        let (resp, _) = handle("RM", &mut s);
+        assert!(
+            resp.starts_with("RM1"),
+            "a bare RM; must report the SELECTED meter, got {resp}"
+        );
+    }
+
+    #[test]
+    fn test_rm_query_payload_is_not_a_valid_set_payload() {
+        // The asymmetry that breaks a naive read-modify-restore loop: the
+        // query answers in five characters, the set takes one. Recorded as
+        // a test because it is the kind of thing a future refactor would
+        // "tidy" into symmetry.
+        let mut s = default_state();
+        let (resp, _) = handle("RM", &mut s);
+        assert_eq!(resp.len(), 8, "RM<n><4 digits>; -- got {resp}");
+        let payload = &resp[2..resp.len() - 1];
+        assert_eq!(payload.len(), 5, "query payload is five characters");
+    }
+
+    #[test]
+    fn test_tone_numbers_default_to_a_value_they_will_accept_back() {
+        // 00 is outside the documented 01~39, so a radio powering up there
+        // is sitting on a value it will refuse to restore. Found by a write
+        // pass that could set the tone but never put it back.
+        let s = default_state();
+        assert!(
+            (1..=39).contains(&s.ctcss_tone),
+            "ctcss_tone default {} is out of range",
+            s.ctcss_tone
+        );
+        assert!(
+            (1..=39).contains(&s.tone_number),
+            "tone_number default {} is out of range",
+            s.tone_number
+        );
+    }
+
+    #[test]
+    fn test_out_of_range_tone_is_ignored_in_silence() {
+        // Verified on the physical radio 2026-09-07: `CN00;`, `CN40;` and
+        // `CN99;` each answered with NOTHING and left the tone unchanged.
+        // Not `?;` -- so a caller watching only for `?;` believes the
+        // write landed, which is exactly why this is worth emulating.
+        for (code, get) in [("CN", "CN"), ("TN", "TN")] {
+            let mut s = default_state();
+            let (_, _) = handle(&format!("{code}08"), &mut s);
+            let before = handle(get, &mut s).0;
+
+            for bad in ["00", "40", "99"] {
+                let (resp, changes) = handle(&format!("{code}{bad}"), &mut s);
+                assert_eq!(resp, "", "{code}{bad}; must answer with silence");
+                assert!(changes.is_empty(), "{code}{bad}; must change nothing");
+                assert_eq!(
+                    handle(get, &mut s).0,
+                    before,
+                    "{code}{bad}; must leave the tone alone"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_ex_bare_query_reports_current_menu() {
         let mut s = default_state();
         s.menu_number = 34;
@@ -1356,7 +1539,13 @@ mod tests {
         let (resp, changes) = handle("EX0200008", &mut s);
         assert_eq!(resp, "", "EX set should be silent");
         assert!(!changes.is_empty(), "a set that lands must report a change");
-        assert_eq!(s.menu_values[20], 8, "the write must land on menu 20");
+        // Asserted through `PT;`, which is how it was checked on the
+        // radio: menu 20 IS the CW pitch, so this is the same cell.
+        assert_eq!(
+            handle("PT", &mut s).0,
+            "PT08;",
+            "the write must land on menu 20"
+        );
         assert_eq!(
             s.menu_number, 34,
             "a Set must NOT select the menu it wrote -- the panel owns that"
@@ -1377,7 +1566,7 @@ mod tests {
         s.menu_number = 34;
         let (_, changes) = handle("EX0200008", &mut s);
         assert!(!changes.is_empty(), "a set that lands must report a change");
-        assert_eq!(s.menu_values[20], 8);
+        assert_eq!(handle("PT", &mut s).0, "PT08;");
 
         // And reading it back requires selecting it, which only the panel
         // can do -- modelled here by moving `menu_number` directly.

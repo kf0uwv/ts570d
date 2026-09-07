@@ -1219,10 +1219,16 @@ where
 
     /// Read meter value (1=SWR, 2=COMP, 3=ALC).
     pub async fn get_meter(&mut self, meter: u8) -> RadioResult<u16> {
-        let raw = self
-            .client
-            .query_with_param("RM", &format!("{}", meter))
-            .await?;
+        // Two frames, because `RM` is two commands. `RM<n>;` SELECTS a
+        // meter and answers nothing at all; only a bare `RM;` reports one.
+        // Verified on the physical radio 2026-09-07: with `RM;` answering
+        // `RM20000;`, `RM1;` returned an empty response and `RM;` then
+        // answered `RM10000;`.
+        //
+        // This used to send `RM<n>;` and wait for the reply, which on a
+        // real radio waits forever.
+        self.client.set("RM", format!("{}", meter)).await?;
+        let raw = self.client.query("RM").await?;
         match ResponseParser::parse(&raw)? {
             Response::Meter(_meter_type, value) => Ok(value),
             other => Err(RadioError::InvalidProtocolString(format!(
@@ -2946,8 +2952,15 @@ mod tests {
     async fn test_get_meter_swr_query_sent() {
         let mut radio = make_radio("RM10023;");
         let _ = radio.get_meter(1).await.unwrap();
-        // Must send "RM1;" — the meter type selector belongs in the wire bytes before ';'
-        assert_eq!(radio.session.borrow().transport.written(), b"RM1;");
+        // Two frames, because `RM` is two commands: `RM1;` SELECTS the
+        // meter and answers nothing, then a bare `RM;` reports it.
+        //
+        // Verified on the physical radio 2026-09-07: with `RM;` answering
+        // `RM20000;`, `RM1;` returned an EMPTY response and `RM;` then
+        // answered `RM10000;`. This test used to assert `RM1;` alone, and
+        // the implementation waited for a reply to it -- which on a real
+        // radio waits forever.
+        assert_eq!(radio.session.borrow().transport.written(), b"RM1;RM;");
     }
 
     #[monoio::test(driver = "legacy")]
@@ -2961,14 +2974,14 @@ mod tests {
     async fn test_get_meter_comp_query_sent() {
         let mut radio = make_radio("RM20010;");
         let _ = radio.get_meter(2).await.unwrap();
-        assert_eq!(radio.session.borrow().transport.written(), b"RM2;");
+        assert_eq!(radio.session.borrow().transport.written(), b"RM2;RM;");
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_get_meter_alc_query_sent() {
         let mut radio = make_radio("RM30005;");
         let _ = radio.get_meter(3).await.unwrap();
-        assert_eq!(radio.session.borrow().transport.written(), b"RM3;");
+        assert_eq!(radio.session.borrow().transport.written(), b"RM3;RM;");
     }
 
     #[monoio::test(driver = "legacy")]

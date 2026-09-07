@@ -290,6 +290,9 @@ pub struct Ts570dState {
     pub is_freq: u16,
     pub ctcss_tone: u8,
     pub tone_number: u8,
+    /// Which meter `RM;` reports. Selected by `RM<n>;`, which is a silent
+    /// set on the real radio and persists until changed.
+    pub meter_selection: u8,
     pub beat_cancel_mode: u8,
     pub semi_break_in_delay: u16,
     pub rit_offset: i32,
@@ -354,8 +357,14 @@ impl Default for Ts570dState {
             sl: 0,
             is_direction: ' ',
             is_freq: 0,
-            ctcss_tone: 0,
-            tone_number: 0,
+            // 01, not 00. The documented range for both is 01~39, and a
+            // radio that powers up at 00 is sitting on a value it will
+            // refuse to accept back once you move off it -- which is
+            // exactly how this was found (a write pass could set the tone
+            // but never restore it).
+            ctcss_tone: 1,
+            tone_number: 1,
+            meter_selection: 0,
             beat_cancel_mode: 0,
             semi_break_in_delay: 0,
             rit_offset: 0,
