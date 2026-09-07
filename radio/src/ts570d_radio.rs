@@ -95,7 +95,6 @@ const SET_5: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Set, 5)];
 const SET_7: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Set, 7)];
 const SET_11: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Set, 11)];
 const SET_ANY: &[CommandForm] = &[CommandForm::variable(CommandOperation::Set, 1, 64)];
-const QUERY_SET_3: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Query, 3)];
 const NONE: &[CommandForm] = &[];
 
 macro_rules! definition {
@@ -189,7 +188,13 @@ static DEFINITIONS: &[CommandDefinition<Ts570dCommandId>] = &[
     definition!(Vr, "VR", "Voice Recall", NONE, SET_1, NONE),
     definition!(Sr, "SR", "System Reset", NONE, SET_1, NONE),
     definition!(Fw, "FW", "Filter Width", QUERY, SET_4, NONE),
-    definition!(Ex, "EX", "Extension Menu", QUERY_SET_3, SET_7, NONE),
+    // Read is a bare `EX;` (instruction manual, COMPUTER CONTROL COMMAND
+    // TABLES: Read row is `E X ;` with no parameters); the answer carries
+    // P1 (menu number, 3) + P2 (selection, 4). Set is `EX<P1:3><P2:4>;`.
+    // Previously declared QUERY_SET_3, which made `EX;` "unsupported
+    // operation" and sent `EX034;` to a radio that answers `?;` to it —
+    // i.e. menu read was impossible in both directions.
+    definition!(Ex, "EX", "Extension Menu", QUERY, SET_7, NONE),
     definition!(Lm, "LM", "Load Message", NONE, SET_1, NONE),
     definition!(Pb, "PB", "Playback", QUERY, SET_1, NONE),
     definition!(Mr, "MR", "Memory Read", NONE, SET_ANY, NONE, true, true),

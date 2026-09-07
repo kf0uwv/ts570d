@@ -1126,14 +1126,17 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         // EX — Extension Menu (P1=menu number 000–051, P2=selection value 4 digits)
         // ------------------------------------------------------------------
         "EX" => {
-            if params.len() == 3 {
-                // Read: EX<menu:3>;
-                if let Ok(n) = params.parse::<usize>() {
-                    if n <= 51 {
-                        query!(format!("EX{:03}{:04};", n, state.menu_values[n]))
-                    } else {
-                        query!("?;".to_string())
-                    }
+            if params.is_empty() {
+                // Read: a bare `EX;`, per the instruction manual's COMPUTER
+                // CONTROL COMMAND TABLES (the Read row is `E X ;` with no
+                // parameters). There is no way to name the menu you want —
+                // the answer reports whichever menu is currently selected,
+                // which a Set selects as a side effect. Verified against the
+                // physical radio 2026-09-06: after `EX0340009;`, `EX;`
+                // answers `EX0340009;`.
+                let n = state.menu_number as usize;
+                if n <= 51 {
+                    query!(format!("EX{:03}{:04};", n, state.menu_values[n]))
                 } else {
                     query!("?;".to_string())
                 }
@@ -1142,6 +1145,9 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
                 if let (Ok(n), Ok(v)) = (params[..3].parse::<usize>(), params[3..].parse::<u16>()) {
                     if n <= 51 {
                         state.menu_values[n] = v;
+                        // A Set also selects that menu, so a following bare
+                        // `EX;` reports it — matching the real radio.
+                        state.menu_number = n as u8;
                         set_ok!("menu_values", n)
                     } else {
                         query!("?;".to_string())
@@ -1298,6 +1304,48 @@ mod tests {
 
     fn default_state() -> RadioState {
         RadioState::default()
+    }
+
+    // ------------------------------------------------------------------
+    // EX — Extension Menu. Read is a *bare* `EX;`, not `EX<menu:3>;`.
+    //
+    // The table declared a 3-parameter query form until 2026-09-06, which
+    // made `EX;` "unsupported operation" and sent `EX034;` to a radio that
+    // answers `?;` to it — menu read was impossible in both directions. The
+    // emulator agreed with the table rather than with the radio, so nothing
+    // caught it. Verified against the physical TS-570D: after `EX0340009;`,
+    // a bare `EX;` answers `EX0340009;`.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_ex_bare_query_reports_current_menu() {
+        let mut s = default_state();
+        s.menu_number = 34;
+        s.menu_values[34] = 9;
+        let (resp, changes) = handle("EX", &mut s);
+        assert_eq!(resp, "EX0340009;", "bare EX; must answer for menu 34");
+        assert!(changes.is_empty(), "a read must not change state");
+    }
+
+    #[test]
+    fn test_ex_set_then_bare_query_round_trips() {
+        // The behaviour actually observed on hardware: a Set selects that
+        // menu, so the following read reports it without being told which.
+        let mut s = default_state();
+        let (resp, changes) = handle("EX0340009", &mut s);
+        assert_eq!(resp, "", "EX set should be silent");
+        assert_eq!(s.menu_values[34], 9);
+        assert_eq!(s.menu_number, 34, "a Set must select the menu it wrote");
+        assert!(!changes.is_empty());
+        let (resp, _) = handle("EX", &mut s);
+        assert_eq!(resp, "EX0340009;");
+    }
+
+    #[test]
+    fn test_ex_rejects_out_of_range_menu() {
+        let mut s = default_state();
+        let (resp, _) = handle("EX0520000", &mut s);
+        assert_eq!(resp, "?;", "menu numbers run 000-051");
     }
 
     #[test]
