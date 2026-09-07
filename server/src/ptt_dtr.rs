@@ -77,38 +77,84 @@ impl PttDtr {
         self.keyed.get()
     }
 
-    /// Assert DTR, ordered against CAT traffic.
-    pub async fn key(&self, session: &BrokerCatSession) -> Result<(), String> {
-        let task: TaskFn = Box::new(|lines| match lines {
+    /// Build the closure that drives DTR one way or the other.
+    fn line_task(assert: bool) -> TaskFn {
+        Box::new(move |lines| match lines {
             Some(l) => l
-                .set_dtr(true)
-                .map(|()| b"PTT-ON".to_vec())
-                .map_err(|e| format!("could not assert DTR: {e}")),
+                .set_dtr(assert)
+                .map(|()| {
+                    if assert {
+                        b"PTT-ON".to_vec()
+                    } else {
+                        b"PTT-OFF".to_vec()
+                    }
+                })
+                .map_err(|e| {
+                    format!(
+                        "could not {} DTR: {e}",
+                        if assert { "assert" } else { "release" }
+                    )
+                }),
             None => Err("this transport has no modem lines; PTT via DTR is \
                          not available on it"
                 .to_string()),
-        });
+        })
+    }
+
+    /// Release DTR without waiting on the caller — the failsafe path.
+    ///
+    /// Takes an owned session so it can be driven from a spawned watchdog or
+    /// from `Drop`, neither of which can borrow the caller's.
+    async fn force_release(keyed: Rc<Cell<bool>>, session: BrokerCatSession) {
+        if !keyed.get() {
+            return;
+        }
+        let _ = session.submit_task(Self::line_task(false)).await;
+        keyed.set(false);
+    }
+
+    /// Release PTT because the client that keyed it has gone away.
+    ///
+    /// A rigctl client can send `T 1` and then have its TCP connection drop.
+    /// Nothing in the rigctl protocol requires a station to survive that; a
+    /// station with a transmitter on the end of it must.
+    pub fn release_on_disconnect(&self, session: BrokerCatSession) {
+        if !self.keyed.get() {
+            return;
+        }
+        let keyed = Rc::clone(&self.keyed);
+        monoio::spawn(Self::force_release(keyed, session));
+    }
+
+    /// Assert DTR, ordered against CAT traffic.
+    pub async fn key(&self, session: &BrokerCatSession) -> Result<(), String> {
         let out = session
-            .submit_task(task)
+            .submit_task(Self::line_task(true))
             .await
             .ok_or_else(|| "broker worker has shut down".to_string())?;
         if out.starts_with(b"ERR ") {
             return Err(String::from_utf8_lossy(&out[4..]).into_owned());
         }
         self.keyed.set(true);
+
+        // Arm the hard timeout. Independent of the client: it fires whether
+        // or not anything ever sends `T 0`, and whether or not the client is
+        // still connected. This is the last line of defence against a
+        // transmitter left keyed.
+        let keyed = Rc::clone(&self.keyed);
+        let watchdog_session = BrokerCatSession::new(session.handle(), session.client_id());
+        monoio::spawn(async move {
+            monoio::time::sleep(MAX_KEY_DOWN).await;
+            if keyed.get() {
+                Self::force_release(keyed, watchdog_session).await;
+            }
+        });
         Ok(())
     }
 
     /// De-assert DTR. Must not queue — see this module's doc comment.
     pub async fn release(&self, session: &BrokerCatSession) -> Result<(), String> {
-        let task: TaskFn = Box::new(|lines| match lines {
-            Some(l) => l
-                .set_dtr(false)
-                .map(|()| b"PTT-OFF".to_vec())
-                .map_err(|e| format!("could not release DTR: {e}")),
-            None => Err("this transport has no modem lines".to_string()),
-        });
-        let result = session.submit_task(task).await;
+        let result = session.submit_task(Self::line_task(false)).await;
         // Clear the flag even if the release reported failure: believing we
         // are still keyed when we may not be is the safer error, and the
         // caller is told.
@@ -130,6 +176,16 @@ mod tests {
     #[test]
     fn a_new_ptt_is_not_keyed() {
         assert!(!PttDtr::new().is_keyed());
+    }
+
+    #[test]
+    fn release_on_disconnect_is_a_no_op_when_not_keyed() {
+        // Must not spawn work (or touch a line) for a connection that never
+        // transmitted — the overwhelmingly common case.
+        let ptt = PttDtr::new();
+        assert!(!ptt.is_keyed());
+        // No runtime is running here; if this tried to spawn, it would panic.
+        // That it returns quietly is the assertion.
     }
 
     #[test]

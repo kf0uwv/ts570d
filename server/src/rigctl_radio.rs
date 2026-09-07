@@ -77,6 +77,29 @@ impl<S: CatSession> RigctlTs570d<S> {
     }
 }
 
+impl<S: CatSession> Drop for RigctlTs570d<S> {
+    /// Release PTT if this connection is going away while still keyed.
+    ///
+    /// `cat_rigctl`'s listener builds one `RigctlTs570d` per connection, so a
+    /// client whose TCP session drops mid-transmission drops this value. Left
+    /// alone, the radio would stay keyed indefinitely — nothing in the rigctl
+    /// protocol requires a station to handle that, and a station with a
+    /// transmitter on the end of it has to.
+    ///
+    /// `Drop` cannot be async, so this spawns the release rather than
+    /// awaiting it. The watchdog armed in `PttDtr::key` is the backstop for
+    /// the case where the runtime is going away too and the spawn never runs.
+    fn drop(&mut self) {
+        if let Some((ptt, session)) = &self.ptt {
+            if ptt.is_keyed() {
+                let handoff =
+                    cat_server::BrokerCatSession::new(session.handle(), session.client_id());
+                ptt.release_on_disconnect(handoff);
+            }
+        }
+    }
+}
+
 impl<S: CatSession> Deref for RigctlTs570d<S> {
     type Target = Ts570d<S>;
 
