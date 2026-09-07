@@ -237,6 +237,12 @@ impl DriftReport {
     /// A changed CAT setting means somebody has been at the front panel,
     /// which makes every unreadable menu suspect even though none of them
     /// can be shown to have moved.
+    ///
+    /// Note this is deliberately *not* the same question as
+    /// [`Self::fully_verified`]. A pass that simply did not sweep has
+    /// established less, but it is not evidence that anything moved, and
+    /// reporting it as though a recalibration were needed would make the
+    /// warning fire when nothing has happened.
     pub fn recalibration_advised(&self) -> bool {
         self.drifted() || !self.menus_unchecked.is_empty()
     }

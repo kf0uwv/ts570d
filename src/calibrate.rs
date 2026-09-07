@@ -352,14 +352,19 @@ fn print_drift(drift: &DriftReport) {
 
     if drift.fully_verified() {
         println!("\nVERIFIED: the radio matches the file.");
-    } else if drift.recalibration_advised() {
+    } else if drift.drifted() {
         println!("\nRECALIBRATION ADVISED.");
-        if drift.drifted() {
-            println!(
-                "Something has been changed at the front panel, which makes every\n\
-                 menu this cannot read suspect — not only the ones shown above."
-            );
-        }
+        println!(
+            "Something has been changed at the front panel, which makes every\n\
+             menu this cannot read suspect — not only the ones shown above."
+        );
+    } else {
+        // Declining the sweep is not evidence of a problem. Saying
+        // "recalibration advised" here would conflate "nobody looked" with
+        // "something is wrong", and an alarm that fires when nothing has
+        // happened is one people learn to ignore.
+        println!("\nNOT FULLY VERIFIED, but nothing is known to have changed.");
+        println!("Sweep the MENU knob to confirm the menus above.");
     }
 }
 
