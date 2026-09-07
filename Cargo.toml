@@ -185,6 +185,10 @@ radio = { path = "radio" }
 ui = { path = "ui" }
 server = { path = "server" }
 
+# The calibration snapshot is written and read as JSON here; the type and
+# its meaning live in `radio::calibration`.
+serde_json = { workspace = true }
+
 [dev-dependencies]
 radio    = { path = "radio" }
 cat-transport-serial = { workspace = true }

@@ -26,6 +26,12 @@ async-trait = "0.1"
 # Error handling
 thiserror = { workspace = true }
 
+# The calibration snapshot is a file an operator keeps and reads. JSON so
+# it is legible without a tool, and so a gap in it is visible rather than
+# implied.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 mockall = { workspace = true }

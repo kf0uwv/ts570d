@@ -2807,6 +2807,8 @@ dependencies = [
  "cat-transport-serial",
  "mockall",
  "monoio",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
 ]
@@ -3582,6 +3584,7 @@ dependencies = [
  "futures",
  "monoio",
  "radio",
+ "serde_json",
  "server",
  "thiserror 1.0.69",
  "tracing",

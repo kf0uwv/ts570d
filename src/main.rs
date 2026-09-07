@@ -47,6 +47,8 @@
 #[cfg(target_os = "windows")]
 mod win_runtime;
 
+mod calibrate;
+
 #[path = "endpoint.rs"]
 mod endpoint;
 
@@ -985,6 +987,13 @@ async fn run_app() {
         return;
     }
 
+    // `ts570d calibrate ...` likewise: its own flag set, no TUI, and it
+    // needs a person at the front panel rather than a console.
+    if std::env::args().nth(1).as_deref() == Some("calibrate") {
+        run_calibrate_mode().await;
+        return;
+    }
+
     // 2. Parse CLI arguments.
     let args = parse_args();
 
@@ -1148,6 +1157,106 @@ async fn run_app() {
     }
 
     info!("Application stopped");
+}
+
+/// Parse and run `ts570d calibrate ...`.
+///
+/// Separate from the TUI's argument parsing for the same reason `server`
+/// is: a different flag set, and no console session at all.
+async fn run_calibrate_mode() {
+    let mut args = std::env::args().skip(2);
+    let mut port: Option<String> = None;
+    let mut server: Option<String> = None;
+    let mut baud: u32 = 9600;
+    let mut mode: Option<calibrate::Mode> = None;
+
+    loop {
+        match args.next().as_deref() {
+            Some("--port") => port = args.next(),
+            Some("--server") => server = args.next(),
+            Some("--baud") => {
+                baud = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| calibrate_usage_exit());
+            }
+            Some("--out") => mode = args.next().map(|out| calibrate::Mode::Capture { out }),
+            Some("--verify") => mode = args.next().map(|file| calibrate::Mode::Verify { file }),
+            Some("--restore") => mode = args.next().map(|file| calibrate::Mode::Restore { file }),
+            Some(_) => {}
+            None => break,
+        }
+    }
+
+    let Some(mode) = mode else {
+        eprintln!("error: one of --out, --verify or --restore is required");
+        calibrate_usage_exit();
+    };
+
+    // A serial port can only be owned once, so an operator with a
+    // `ts570d server` already running reaches the radio through it rather
+    // than being told to stop it mid-calibration.
+    match (port, server) {
+        (Some(_), Some(_)) => {
+            eprintln!("error: --port and --server are mutually exclusive");
+            std::process::exit(1);
+        }
+        (Some(path), None) => {
+            let local = SerialPort::open(
+                &path,
+                SerialConfig {
+                    baud_rate: baud,
+                    initial_dtr: false,
+                    ..SerialConfig::default()
+                },
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("error: could not open {path}: {e}");
+                std::process::exit(1);
+            });
+            let mut radio = radio::Ts570d::new(SerialCatSession::new(local));
+            calibrate::run(&mut radio, mode).await;
+        }
+        (None, Some(addr)) => {
+            let tcp = TcpCatSession::connect(&addr).await.unwrap_or_else(|e| {
+                eprintln!("error: could not connect to {addr}: {e}");
+                std::process::exit(1);
+            });
+            let mut radio = radio::Ts570d::new(TcpClientSession::new(tcp));
+            calibrate::run(&mut radio, mode).await;
+        }
+        (None, None) => {
+            eprintln!("error: one of --port or --server is required");
+            calibrate_usage_exit();
+        }
+    }
+}
+
+fn calibrate_usage_exit() -> ! {
+    eprintln!(
+        "Usage: ts570d calibrate (--port <port> | --server <host:port>) <action>\n\
+         \n\
+         Captures every setting this radio has, including the 52 menus. CAT\n\
+         cannot read a menu it is not parked on, so the menu pass needs you at\n\
+         the front panel: you sweep the MENU knob and it records what it sees.\n\
+         \n\
+         Actions:\n\
+         \x20 --out <file>      capture the radio's state to <file>\n\
+         \x20 --verify <file>   compare the radio against <file>\n\
+         \x20 --restore <file>  write <file> back, then sweep to confirm it landed\n\
+         \n\
+         Reaching the radio:\n\
+         \x20 --port <port>     own the serial port directly (a device path, or a\n\
+         \x20                   host:port on an RFC 2217 server)\n\
+         \x20 --server <addr>   go through a running `ts570d server`'s raw CAT\n\
+         \x20                   port, when it already owns the serial line\n\
+         \x20 --baud <rate>     default 9600\n\
+         \n\
+         NOTE: menu values cannot be read back over CAT. Any front-panel menu\n\
+         change after a capture makes the file silently wrong, and no software\n\
+         can detect that. Re-capture after changing settings by hand."
+    );
+    std::process::exit(1);
 }
 
 /// Linux entry point. Uses monoio's io_uring runtime (single-threaded, !Send).
