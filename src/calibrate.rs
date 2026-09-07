@@ -351,7 +351,7 @@ fn report_completeness(snapshot: &Snapshot) {
 fn print_drift(drift: &DriftReport) {
     println!();
     if drift.settings_changed.is_empty() && drift.menus_changed.is_empty() {
-        println!("Nothing that could be checked has changed.");
+        println!("Nothing that could be checked has been reconfigured.");
     } else {
         for c in &drift.settings_changed {
             println!("  changed: {} was {} now {}", c.what, c.was, c.now);
@@ -359,6 +359,10 @@ fn print_drift(drift: &DriftReport) {
         for c in &drift.menus_changed {
             println!("  changed: {} was {} now {}", c.what, c.was, c.now);
         }
+    }
+    // Shown, never alarmed on: a turned AF gain is ordinary operating.
+    for c in &drift.operator_changed {
+        println!("  knob:    {} was {} now {}", c.what, c.was, c.now);
     }
 
     if !drift.menus_unchecked.is_empty() {

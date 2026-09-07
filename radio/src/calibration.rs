@@ -164,14 +164,20 @@ impl Snapshot {
     /// `self` is the stored file, `current` what the radio says now.
     pub fn drift(&self, current: &Snapshot) -> DriftReport {
         let mut settings_changed = Vec::new();
+        let mut operator_changed = Vec::new();
         for (code, was) in &self.settings {
             if let Some(now) = current.settings.get(code) {
                 if now != was {
-                    settings_changed.push(Changed {
+                    let change = Changed {
                         what: code.clone(),
                         was: was.clone(),
                         now: now.clone(),
-                    });
+                    };
+                    if OPERATOR_CONTROLS.contains(&code.as_str()) {
+                        operator_changed.push(change);
+                    } else {
+                        settings_changed.push(change);
+                    }
                 }
             }
         }
@@ -193,6 +199,7 @@ impl Snapshot {
 
         DriftReport {
             settings_changed,
+            operator_changed,
             menus_changed,
             menus_unchecked,
         }
@@ -211,6 +218,11 @@ pub struct Changed {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriftReport {
     pub settings_changed: Vec<Changed>,
+    /// Front-panel knobs that moved: see [`OPERATOR_CONTROLS`].
+    ///
+    /// Reported, never alarmed on. Somebody turning the AF gain is not
+    /// evidence that the radio was reconfigured.
+    pub operator_changed: Vec<Changed>,
     pub menus_changed: Vec<Changed>,
     /// Menus in the stored file that this pass never read.
     ///
@@ -305,6 +317,23 @@ use cat_transport_core::{CatSession, TransportError};
 /// their own section of the snapshot precisely so they are never confused
 /// with this.
 pub const VOLATILE: &[&str] = &["SM", "RM", "BY", "IF", "EX"];
+
+/// Settings that are front-panel knobs, turned in the course of ordinary
+/// operating.
+///
+/// Captured and restored like anything else — they are real state, and an
+/// operator restoring a bench setup wants their gains back. But they are
+/// **not evidence that anything was reconfigured**, and treating them as
+/// such makes the drift warning fire every time somebody adjusts the
+/// volume. The first run of this against the physical radio reported
+/// "recalibrate, every menu is suspect" because the AF gain had moved
+/// from 019 to 035, which is what an AF gain does.
+///
+/// Deliberately just the three continuously-variable controls used during
+/// a QSO. `SH`/`SL` (DSP slope) and `IS` (IF shift) are also front-panel
+/// knobs but are set deliberately for a band or a signal, so a change in
+/// one is worth reporting.
+pub const OPERATOR_CONTROLS: &[&str] = &["AG", "RG", "SQ"];
 
 /// Settings a restore must never write back.
 ///
@@ -606,6 +635,13 @@ pub enum CalibrationStatus {
     Drifted { path: String, report: DriftReport },
     /// Complete, and everything checkable still matches.
     Current { path: String, captured_at: String },
+    /// Only front-panel knobs have moved: see [`OPERATOR_CONTROLS`].
+    ///
+    /// Its own state rather than folded into `Drifted`, because the
+    /// difference is the whole point — somebody turning the AF gain is
+    /// ordinary operating, and warning about it trains people to ignore
+    /// the warning that matters.
+    OnlyKnobsMoved { path: String, report: DriftReport },
     /// The radio could not be asked. Not a calibration problem.
     CouldNotCheck { path: String, reason: String },
 }
@@ -618,7 +654,10 @@ impl CalibrationStatus {
     /// one line at startup: menus 38 and 39 alone can make a working radio
     /// look broken with nothing on the display to say why.
     pub fn is_warning(&self) -> bool {
-        !matches!(self, CalibrationStatus::Current { .. })
+        !matches!(
+            self,
+            CalibrationStatus::Current { .. } | CalibrationStatus::OnlyKnobsMoved { .. }
+        )
     }
 
     /// What to print, most important first.
@@ -662,6 +701,12 @@ impl CalibrationStatus {
                 for c in &report.settings_changed {
                     lines.push(format!("  {} was {} now {}", c.what, c.was, c.now));
                 }
+                for c in &report.operator_changed {
+                    lines.push(format!(
+                        "  {} was {} now {} (a front-panel knob; not counted as drift)",
+                        c.what, c.was, c.now
+                    ));
+                }
                 for c in &report.menus_changed {
                     lines.push(format!("  {} was {} now {}", c.what, c.was, c.now));
                 }
@@ -677,6 +722,16 @@ impl CalibrationStatus {
                 format!("Could not check the radio against {path}: {reason}"),
                 "The snapshot may or may not still be accurate.".to_string(),
             ],
+            CalibrationStatus::OnlyKnobsMoved { path, report } => {
+                let mut lines = vec![format!("Calibration {path} matches.")];
+                for c in &report.operator_changed {
+                    lines.push(format!(
+                        "  {} was {} now {} — a front-panel knob, not a reconfiguration",
+                        c.what, c.was, c.now
+                    ));
+                }
+                lines
+            }
             CalibrationStatus::Current { path, captured_at } => {
                 vec![format!(
                     "Calibration {path} (captured {captured_at}) matches."
@@ -733,6 +788,11 @@ where
     let report = stored.drift(&current);
     if report.drifted() {
         CalibrationStatus::Drifted {
+            path: path.to_string(),
+            report,
+        }
+    } else if !report.operator_changed.is_empty() {
+        CalibrationStatus::OnlyKnobsMoved {
             path: path.to_string(),
             report,
         }
@@ -919,12 +979,12 @@ mod tests {
         // Somebody has had their hands on the front panel. That makes
         // every unreadable menu suspect, whatever the ones we can see say.
         let mut stored = snap();
-        stored.record_setting("AG", "055");
+        stored.record_setting("MD", "2");
         for n in 0..MENU_COUNT {
             stored.record_menu(n, 0, MenuSource::Panel);
         }
         let mut now = stored.clone();
-        now.record_setting("AG", "034");
+        now.record_setting("MD", "3");
 
         let d = stored.drift(&now);
         assert!(d.drifted());
@@ -1116,6 +1176,78 @@ mod tests {
     }
 
     #[test]
+    fn a_turned_knob_is_not_drift() {
+        // The first run of this against the physical radio warned
+        // "recalibrate, every menu is suspect" because the AF gain had
+        // moved from 019 to 035 -- which is what an AF gain does. An
+        // alarm that fires when somebody adjusts the volume is one people
+        // learn to mute.
+        let mut stored = snap();
+        stored.record_setting("AG", "019");
+        stored.record_setting("MD", "2");
+        let mut now = snap();
+        now.record_setting("AG", "035");
+        now.record_setting("MD", "2");
+
+        let d = stored.drift(&now);
+        assert!(!d.drifted(), "a turned knob must not read as drift");
+        assert_eq!(d.operator_changed.len(), 1, "but it must still be reported");
+        assert_eq!(d.operator_changed[0].what, "AG");
+        assert!(d.settings_changed.is_empty());
+    }
+
+    #[test]
+    fn a_changed_mode_is_still_drift_even_beside_a_turned_knob() {
+        let mut stored = snap();
+        stored.record_setting("AG", "019");
+        stored.record_setting("MD", "2");
+        let mut now = snap();
+        now.record_setting("AG", "035");
+        now.record_setting("MD", "3");
+
+        let d = stored.drift(&now);
+        assert!(d.drifted(), "a mode change is a reconfiguration");
+        assert_eq!(d.settings_changed.len(), 1);
+        assert_eq!(d.settings_changed[0].what, "MD");
+        assert_eq!(d.operator_changed.len(), 1);
+    }
+
+    #[test]
+    fn knobs_are_only_the_ones_turned_every_qso() {
+        // Deliberately narrow. SH/SL and IS are front-panel knobs too, but
+        // they are set deliberately for a band or a signal, so a change in
+        // one is worth reporting.
+        assert_eq!(OPERATOR_CONTROLS, &["AG", "RG", "SQ"]);
+        for k in OPERATOR_CONTROLS {
+            assert!(!VOLATILE.contains(k), "{k} is a real setting, just a knob");
+        }
+    }
+
+    #[test]
+    fn a_status_where_only_knobs_moved_does_not_warn() {
+        let status = CalibrationStatus::OnlyKnobsMoved {
+            path: "b.json".into(),
+            report: DriftReport {
+                settings_changed: vec![],
+                operator_changed: vec![Changed {
+                    what: "AG".into(),
+                    was: "019".into(),
+                    now: "035".into(),
+                }],
+                menus_changed: vec![],
+                menus_unchecked: vec![],
+            },
+        };
+        assert!(!status.is_warning());
+        let lines = status.lines().join("\n");
+        assert!(lines.contains("matches"), "{lines}");
+        assert!(
+            lines.contains("AG was 019 now 035"),
+            "still reported: {lines}"
+        );
+    }
+
+    #[test]
     fn only_a_complete_matching_snapshot_is_not_a_warning() {
         let quiet = CalibrationStatus::Current {
             path: "b.json".into(),
@@ -1138,6 +1270,7 @@ mod tests {
                 path: "b.json".into(),
                 report: DriftReport {
                     settings_changed: vec![],
+                    operator_changed: vec![],
                     menus_changed: vec![],
                     menus_unchecked: vec![],
                 },
@@ -1184,17 +1317,18 @@ mod tests {
             path: "b.json".into(),
             report: DriftReport {
                 settings_changed: vec![Changed {
-                    what: "AG".into(),
-                    was: "055".into(),
-                    now: "034".into(),
+                    what: "MD".into(),
+                    was: "2".into(),
+                    now: "3".into(),
                 }],
+                operator_changed: vec![],
                 menus_changed: vec![],
                 menus_unchecked: vec![],
             },
         }
         .lines()
         .join("\n");
-        assert!(lines.contains("AG was 055 now 034"));
+        assert!(lines.contains("MD was 2 now 3"));
         assert!(
             lines.contains("every menu in that file is now suspect")
                 || lines.contains("is now suspect"),
