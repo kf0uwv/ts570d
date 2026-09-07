@@ -39,6 +39,8 @@ pub mod spectrum;
 mod endpoint;
 
 pub use console::ConsoleTs570d;
+pub mod ptt_dtr;
+pub use ptt_dtr::{PttDtr, MAX_KEY_DOWN};
 pub use rigctl_radio::RigctlTs570d;
 
 /// Which network listeners to bring up — re-exported unconditionally from
@@ -182,7 +184,17 @@ where
         session,
         &radio::TS570D_COMMAND_TABLE,
         config.listeners(),
-        |broker_session| RigctlTs570d(radio::Ts570d::new(broker_session)),
+        |broker_session| {
+            // Key on DTR, not CAT `TX;`. On this station PTT is DTR through
+            // an opto onto ACC2 pin 9 (PKS), and the two are not equivalent:
+            // pin 9 mutes the mic while keyed, `TX;` does not. A second
+            // handle onto the same broker carries the keying tasks.
+            let keying = cat_server::BrokerCatSession::new(
+                broker_session.handle(),
+                broker_session.client_id(),
+            );
+            RigctlTs570d::with_dtr_ptt(radio::Ts570d::new(broker_session), keying)
+        },
         |broker_session| ConsoleTs570d(radio::Ts570d::new(broker_session)),
         shared,
     )
@@ -230,7 +242,17 @@ where
         session,
         &radio::TS570D_COMMAND_TABLE,
         config.listeners(),
-        |broker_session| RigctlTs570d(radio::Ts570d::new(broker_session)),
+        |broker_session| {
+            // Key on DTR, not CAT `TX;`. On this station PTT is DTR through
+            // an opto onto ACC2 pin 9 (PKS), and the two are not equivalent:
+            // pin 9 mutes the mic while keyed, `TX;` does not. A second
+            // handle onto the same broker carries the keying tasks.
+            let keying = cat_server::BrokerCatSession::new(
+                broker_session.handle(),
+                broker_session.client_id(),
+            );
+            RigctlTs570d::with_dtr_ptt(radio::Ts570d::new(broker_session), keying)
+        },
         |broker_session| ConsoleTs570d(radio::Ts570d::new(broker_session)),
         shared,
     )

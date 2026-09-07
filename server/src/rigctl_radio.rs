@@ -48,19 +48,46 @@ use radio::{Frequency, Mode, Ts570d};
 
 /// Local newtype around `radio::Ts570d<S>` -- see this module's doc
 /// comment for why it exists (orphan rule).
-pub struct RigctlTs570d<S: CatSession>(pub Ts570d<S>);
+pub struct RigctlTs570d<S: CatSession> {
+    /// The typed radio. Public and named `0`-like for continuity with the
+    /// tuple struct this replaced.
+    pub radio: Ts570d<S>,
+    /// How to key. `Some` when the station keys PTT on the DTR line, which
+    /// is what an ACC2-style opto interface does; `None` falls back to CAT
+    /// `TX;`/`RX;`.
+    ///
+    /// The two are **not** interchangeable: ACC2 pin 9 (PKS) mutes the mic
+    /// while keyed and CAT `TX;` does not, so a digital-mode client gets
+    /// different audio behaviour depending on which path keys the radio.
+    ptt: Option<(crate::PttDtr, cat_server::BrokerCatSession)>,
+}
+
+impl<S: CatSession> RigctlTs570d<S> {
+    /// Key with CAT `TX;`/`RX;` — the original behaviour.
+    pub fn new(radio: Ts570d<S>) -> Self {
+        Self { radio, ptt: None }
+    }
+
+    /// Key by asserting DTR, ordered against CAT traffic by the broker.
+    pub fn with_dtr_ptt(radio: Ts570d<S>, session: cat_server::BrokerCatSession) -> Self {
+        Self {
+            radio,
+            ptt: Some((crate::PttDtr::new(), session)),
+        }
+    }
+}
 
 impl<S: CatSession> Deref for RigctlTs570d<S> {
     type Target = Ts570d<S>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.radio
     }
 }
 
 impl<S: CatSession> DerefMut for RigctlTs570d<S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.radio
     }
 }
 
@@ -73,32 +100,46 @@ where
     type Error = radio::RadioError;
 
     async fn get_vfo_a_hz(&mut self) -> Result<u64, Self::Error> {
-        self.0.get_vfo_a().await.map(Frequency::hz)
+        self.radio.get_vfo_a().await.map(Frequency::hz)
     }
 
     async fn set_vfo_a_hz(&mut self, hz: u64) -> Result<(), Self::Error> {
         let freq = Frequency::new(hz)?;
-        self.0.set_vfo_a(freq).await
+        self.radio.set_vfo_a(freq).await
     }
 
     async fn get_mode(&mut self) -> Result<Self::Mode, Self::Error> {
-        self.0.get_mode().await
+        self.radio.get_mode().await
     }
 
     async fn set_mode(&mut self, mode: Self::Mode) -> Result<(), Self::Error> {
-        self.0.set_mode(mode).await
+        self.radio.set_mode(mode).await
     }
 
     async fn get_transmitting(&mut self) -> Result<bool, Self::Error> {
-        self.0.get_information().await.map(|info| info.tx_rx)
+        self.radio.get_information().await.map(|info| info.tx_rx)
     }
 
     async fn transmit(&mut self) -> Result<(), Self::Error> {
-        self.0.transmit().await
+        match &self.ptt {
+            // DTR, ordered against CAT: keying must not overtake the command
+            // that set the mode or frequency.
+            Some((ptt, session)) => ptt
+                .key(session)
+                .await
+                .map_err(radio::RadioError::InvalidProtocolString),
+            None => self.radio.transmit().await,
+        }
     }
 
     async fn receive(&mut self) -> Result<(), Self::Error> {
-        self.0.receive().await
+        match &self.ptt {
+            Some((ptt, session)) => ptt
+                .release(session)
+                .await
+                .map_err(radio::RadioError::InvalidProtocolString),
+            None => self.radio.receive().await,
+        }
     }
 
     /// Map a [`Mode`] to the Hamlib rig-mode name `m`/`M` exchange on the
@@ -175,7 +216,7 @@ mod tests {
     use cat_transport_core::test_support::{Exchange, ScriptedCatSession};
 
     fn radio_with(session: ScriptedCatSession) -> RigctlTs570d<ScriptedCatSession> {
-        RigctlTs570d(Ts570d::new(session))
+        RigctlTs570d::new(Ts570d::new(session))
     }
 
     #[monoio::test(driver = "legacy")]
