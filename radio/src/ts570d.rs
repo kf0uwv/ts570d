@@ -162,6 +162,18 @@ impl<S: CatSession> Ts570d<S> {
     pub(crate) fn shared_session(&self) -> &SharedSession<S> {
         &self.session
     }
+
+    /// Take the session back out.
+    ///
+    /// For a caller that needs some typed work done and then has to hand
+    /// the raw session somewhere else. `ts570d server` does exactly that:
+    /// it runs a calibration check at startup — which needs the typed
+    /// client — and then gives the session to `server::run`, which owns it
+    /// for the life of the process. A serial port can only be opened once,
+    /// so borrowing it back is the only way to do both.
+    pub fn into_session(self) -> S {
+        self.session.take()
+    }
 }
 
 impl<S> Ts570d<S>

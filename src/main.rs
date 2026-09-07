@@ -466,6 +466,10 @@ fn usage_exit() -> ! {
                                       as rtl:0, rtl:1, ...\n\
            --acc2-audio <endpoint>    the ACC2 receive-audio pair: a PCM\n\
                                       server (host:port), or a sound device\n\
+           --calibration <file>       a snapshot from `ts570d calibrate`,\n\
+                                      checked once at startup. Without one,\n\
+                                      this radio's 52 menu settings are\n\
+                                      unknown and CAT cannot read them.\n\
            --if-trim <hz>             this station's IF calibration, signed\n\
                                       Hz (default 0). Park the radio on a\n\
                                       known-exact carrier such as WWV, see\n\
@@ -627,6 +631,10 @@ struct ServerArgs {
     port: String,
     /// This station's IF calibration in Hz, from `--if-trim`.
     if_trim: i32,
+    /// `--calibration <file>`: a snapshot from `ts570d calibrate`, checked
+    /// once at startup. `None` is itself reported — a radio whose menus
+    /// nobody has recorded is worth one line.
+    calibration: Option<String>,
     baud: u32,
     stop_bits: u8,
     raw_tcp_port: Option<u16>,
@@ -681,6 +689,7 @@ fn parse_server_args() -> ServerArgs {
     let mut baud: u32 = 9600;
     let mut stop_bits: u8 = 1;
     let mut if_trim: i32 = 0;
+    let mut calibration: Option<String> = None;
     let mut raw_tcp_port: Option<u16> = None;
     let mut raw_udp_port: Option<u16> = None;
     let mut rigctl_port: Option<u16> = None;
@@ -759,6 +768,7 @@ fn parse_server_args() -> ServerArgs {
             }
             Some("--if-out") => if_out = args_iter.next(),
             Some("--acc2-audio") => acc2_audio = args_iter.next(),
+            Some("--calibration") => calibration = args_iter.next(),
             Some("--if-trim") => match args_iter.next() {
                 Some(val) => {
                     if_trim = parse_trim_hz(&val).unwrap_or_else(|e| {
@@ -811,6 +821,7 @@ fn parse_server_args() -> ServerArgs {
             if_out,
             acc2_audio,
             if_trim,
+            calibration,
         },
         None => server_usage_exit(),
     }
@@ -909,7 +920,15 @@ async fn run_server_mode() {
         args.port, args.baud, args.stop_bits
     );
 
-    let session = SerialCatSession::new(port);
+    // Checked before the listeners open, while nothing else is talking to
+    // the radio. The session is borrowed through a typed client and handed
+    // straight back: a serial port opens once, and `server::run` needs it.
+    let session = {
+        let mut probe = radio::Ts570d::new(SerialCatSession::new(port));
+        let status = radio::calibration::check(&mut probe, args.calibration.as_deref()).await;
+        report_calibration(&status);
+        probe.into_session()
+    };
     // Built here, not inside the server: a source named by `--if-out` and
     // one a console picks later must be opened by the same code, and this
     // is the layer allowed to name it (Rule 5).
@@ -1157,6 +1176,27 @@ async fn run_app() {
     }
 
     info!("Application stopped");
+}
+
+/// Print what the startup calibration check found.
+///
+/// A warning rather than a refusal to start: a radio with no snapshot is
+/// perfectly usable, and an operator who has never wanted one should not
+/// be blocked. But menus 38 (TX inhibit) and 39 (linear amplifier relay)
+/// can each make a working radio look broken with nothing on the display
+/// to explain it, and CAT cannot read either — so a server that says
+/// nothing about them is hiding the one thing it cannot find out later.
+fn report_calibration(status: &radio::calibration::CalibrationStatus) {
+    let lines = status.lines();
+    if status.is_warning() {
+        for line in lines {
+            tracing::warn!("{line}");
+        }
+    } else {
+        for line in lines {
+            info!("{line}");
+        }
+    }
 }
 
 /// Parse and run `ts570d calibrate ...`.

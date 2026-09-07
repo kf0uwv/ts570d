@@ -579,6 +579,165 @@ where
     report
 }
 
+/// What a startup calibration check found.
+///
+/// A separate type from [`DriftReport`] because the question is different:
+/// drift asks "has this radio moved", and this asks "is there a usable
+/// picture of this radio at all".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CalibrationStatus {
+    /// No snapshot was configured. The menus are simply unknown.
+    NotConfigured,
+    /// A snapshot was named but could not be read.
+    Unreadable { path: String, reason: String },
+    /// A snapshot exists but does not cover every menu.
+    Incomplete {
+        path: String,
+        captured: usize,
+        missing: Vec<u8>,
+    },
+    /// The radio no longer matches the snapshot.
+    Drifted { path: String, report: DriftReport },
+    /// Complete, and everything checkable still matches.
+    Current { path: String, captured_at: String },
+    /// The radio could not be asked. Not a calibration problem.
+    CouldNotCheck { path: String, reason: String },
+}
+
+impl CalibrationStatus {
+    /// Whether the operator should be told.
+    ///
+    /// Everything except a complete, matching snapshot. A radio whose menu
+    /// settings nobody has recorded is the normal case, and still worth
+    /// one line at startup: menus 38 and 39 alone can make a working radio
+    /// look broken with nothing on the display to say why.
+    pub fn is_warning(&self) -> bool {
+        !matches!(self, CalibrationStatus::Current { .. })
+    }
+
+    /// What to print, most important first.
+    pub fn lines(&self) -> Vec<String> {
+        match self {
+            CalibrationStatus::NotConfigured => vec![
+                "No calibration snapshot: this radio's 52 menu settings are unknown.".to_string(),
+                "CAT cannot read them back, so nothing here can tell you what they are."
+                    .to_string(),
+                "Capture one:  ts570d calibrate --port <port> --out <file>".to_string(),
+                "Then start the server with  --calibration <file>".to_string(),
+            ],
+            CalibrationStatus::Unreadable { path, reason } => vec![
+                format!("Calibration snapshot {path} could not be read: {reason}"),
+                "The radio's menu settings are unknown.".to_string(),
+            ],
+            CalibrationStatus::Incomplete {
+                path,
+                captured,
+                missing,
+            } => vec![
+                format!(
+                    "Calibration snapshot {path} is INCOMPLETE: {captured} of {MENU_COUNT} \
+                     menus captured, {} never read.",
+                    missing.len()
+                ),
+                format!(
+                    "Unknown menus: {}",
+                    missing
+                        .iter()
+                        .map(|n| format!("{n:03}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                "Re-run the sweep to finish it:  ts570d calibrate --out <file>".to_string(),
+            ],
+            CalibrationStatus::Drifted { path, report } => {
+                let mut lines = vec![format!(
+                    "The radio no longer matches {path} — somebody has changed settings."
+                )];
+                for c in &report.settings_changed {
+                    lines.push(format!("  {} was {} now {}", c.what, c.was, c.now));
+                }
+                for c in &report.menus_changed {
+                    lines.push(format!("  {} was {} now {}", c.what, c.was, c.now));
+                }
+                lines.push(
+                    "Menu values cannot be read back over CAT, so every menu in that file \
+                     is now suspect — not only the settings listed."
+                        .to_string(),
+                );
+                lines.push("Recalibrate:  ts570d calibrate --out <file>".to_string());
+                lines
+            }
+            CalibrationStatus::CouldNotCheck { path, reason } => vec![
+                format!("Could not check the radio against {path}: {reason}"),
+                "The snapshot may or may not still be accurate.".to_string(),
+            ],
+            CalibrationStatus::Current { path, captured_at } => {
+                vec![format!(
+                    "Calibration {path} (captured {captured_at}) matches."
+                )]
+            }
+        }
+    }
+}
+
+/// Compare a radio against a stored snapshot at startup.
+///
+/// `path` is `None` when no snapshot was configured, which is itself a
+/// reportable state rather than a reason to skip the check.
+pub async fn check<S>(radio: &mut Ts570d<S>, path: Option<&str>) -> CalibrationStatus
+where
+    S: CatSession<Error = TransportError>,
+{
+    let Some(path) = path else {
+        return CalibrationStatus::NotConfigured;
+    };
+    let stored = match std::fs::read_to_string(path)
+        .map_err(|e| e.to_string())
+        .and_then(|text| serde_json::from_str::<Snapshot>(&text).map_err(|e| e.to_string()))
+    {
+        Ok(s) => s,
+        Err(reason) => {
+            return CalibrationStatus::Unreadable {
+                path: path.to_string(),
+                reason,
+            }
+        }
+    };
+
+    // Reported before any radio read: a file that never covered every menu
+    // cannot become accurate by agreeing with the radio about the rest.
+    let missing = stored.missing_menus();
+    if !missing.is_empty() {
+        return CalibrationStatus::Incomplete {
+            path: path.to_string(),
+            captured: stored.menus.len(),
+            missing,
+        };
+    }
+
+    let mut current = Snapshot::new(&stored.radio, String::new());
+    if let Err(e) = capture_settings(radio, &mut current).await {
+        return CalibrationStatus::CouldNotCheck {
+            path: path.to_string(),
+            reason: e.to_string(),
+        };
+    }
+    capture_aliased_menus(radio, &mut current).await;
+
+    let report = stored.drift(&current);
+    if report.drifted() {
+        CalibrationStatus::Drifted {
+            path: path.to_string(),
+            report,
+        }
+    } else {
+        CalibrationStatus::Current {
+            path: path.to_string(),
+            captured_at: stored.captured_at.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -948,6 +1107,103 @@ mod tests {
         assert_eq!(d.menus_changed.len(), 1);
         assert_eq!(d.menus_changed[0].what, "menu 039");
         assert!(!d.fully_verified());
+    }
+
+    #[test]
+    fn only_a_complete_matching_snapshot_is_not_a_warning() {
+        let quiet = CalibrationStatus::Current {
+            path: "b.json".into(),
+            captured_at: "2026-09-07T00:00:00Z".into(),
+        };
+        assert!(!quiet.is_warning());
+
+        for noisy in [
+            CalibrationStatus::NotConfigured,
+            CalibrationStatus::Unreadable {
+                path: "b.json".into(),
+                reason: "no such file".into(),
+            },
+            CalibrationStatus::Incomplete {
+                path: "b.json".into(),
+                captured: 2,
+                missing: vec![1, 2],
+            },
+            CalibrationStatus::Drifted {
+                path: "b.json".into(),
+                report: DriftReport {
+                    settings_changed: vec![],
+                    menus_changed: vec![],
+                    menus_unchecked: vec![],
+                },
+            },
+            CalibrationStatus::CouldNotCheck {
+                path: "b.json".into(),
+                reason: "timed out".into(),
+            },
+        ] {
+            assert!(noisy.is_warning(), "{noisy:?} should warn");
+        }
+    }
+
+    #[test]
+    fn an_uncalibrated_server_is_told_how_to_fix_it() {
+        // A warning that does not say what to do is noise somebody learns
+        // to scroll past.
+        let lines = CalibrationStatus::NotConfigured.lines().join("\n");
+        assert!(lines.contains("unknown"));
+        assert!(lines.contains("ts570d calibrate"), "must name the command");
+        assert!(lines.contains("--calibration"), "and how to use the result");
+    }
+
+    #[test]
+    fn an_incomplete_snapshot_names_the_menus_it_never_read() {
+        let lines = CalibrationStatus::Incomplete {
+            path: "b.json".into(),
+            captured: 50,
+            missing: vec![7, 38],
+        }
+        .lines()
+        .join("\n");
+        assert!(lines.contains("INCOMPLETE"));
+        assert!(lines.contains("007"), "must name the gaps: {lines}");
+        assert!(lines.contains("038"));
+    }
+
+    #[test]
+    fn drift_warns_that_the_unreadable_menus_are_now_suspect_too() {
+        // The point that is easy to miss and expensive to learn: a changed
+        // CAT setting means somebody was at the panel, and the menus
+        // nobody can read are the ones that will bite.
+        let lines = CalibrationStatus::Drifted {
+            path: "b.json".into(),
+            report: DriftReport {
+                settings_changed: vec![Changed {
+                    what: "AG".into(),
+                    was: "055".into(),
+                    now: "034".into(),
+                }],
+                menus_changed: vec![],
+                menus_unchecked: vec![],
+            },
+        }
+        .lines()
+        .join("\n");
+        assert!(lines.contains("AG was 055 now 034"));
+        assert!(
+            lines.contains("every menu in that file is now suspect")
+                || lines.contains("is now suspect"),
+            "must escalate beyond the listed settings: {lines}"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_missing_menus_is_incomplete_before_the_radio_is_asked() {
+        // Ordering matters: a file that never covered every menu cannot be
+        // made accurate by agreeing with the radio about the rest, so
+        // there is no point spending reads to find that out.
+        let mut s = snap();
+        s.record_menu(0, 0, MenuSource::Panel);
+        assert_eq!(s.missing_menus().len(), (MENU_COUNT - 1) as usize);
     }
 
     #[test]
