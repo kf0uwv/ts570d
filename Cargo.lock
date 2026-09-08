@@ -2802,6 +2802,7 @@ dependencies = [
  "cat-client",
  "cat-framework",
  "cat-layout",
+ "cat-native",
  "cat-signal",
  "cat-transport-core",
  "cat-transport-serial",

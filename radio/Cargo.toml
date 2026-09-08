@@ -44,6 +44,10 @@ cat-transport-serial = { workspace = true }
 # it that can drift. This crate never depends on a renderer otherwise --
 # a radio describes its console, it does not draw it.
 cat-ui-ratatui = { workspace = true }
+# Test-only, alongside cat-ui-ratatui above: the density a renderer asks
+# for depends on this radio's declared meters, and the wire form is what a
+# renderer is handed.
+cat-native = { workspace = true }
 
 [features]
 default = []

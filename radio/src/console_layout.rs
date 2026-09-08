@@ -50,13 +50,21 @@ pub fn layout() -> LayoutSpec {
     LayoutSpec::new(Node::rows(vec![
         // The readout is the one thing an operator looks at without
         // meaning to, so it is at the top and it is always there.
-        // Three rows: the tab bar rides with the readout, and the readout
-        // itself is two so the pending value can sit under the confirmed
-        // one.
-        // Five: the tab bar plus the readout's two rows, with room for the
-        // GPU console's taller strip. The two renderers draw the same
-        // panel at different densities, and the layout has to fit the
-        // roomier of them or one clips.
+        //
+        // Five, and `Fixed` rather than `Natural`, because here the two
+        // renderers agree -- which was checked rather than assumed. The
+        // terminal console spends them on the tab bar, three rows of
+        // box-drawing digits, and the mode/VFO/state line. The GPU
+        // console spends them on its header strip, its large frequency,
+        // and the same tab bar. Dropped to four, the terminal console
+        // falls back to small digits and the GPU console loses its tab
+        // bar altogether -- the navigation, silently.
+        //
+        // An older comment here described a two-row readout and warned
+        // about "the GPU console's taller strip". That predates the
+        // box-drawing digits, which made this console the taller of the
+        // two. The number stayed right while the reason for it stopped
+        // being.
         Child::panel(Size::Fixed(5), PanelKind::Readout),
         // Six: BAND, MODE, and the two ribbon rows with their labels. A
         // layout that gave it fewer would clip the ribbon, and a clipped
@@ -153,19 +161,42 @@ mod tests {
     /// [`cat_layout::Size::Natural`] -- the terminal console draws a
     /// meter per row, the GPU console a label row and a bar per meter.
     /// A named density: how much room one renderer needs per panel.
-    type Density = (&'static str, fn(&PanelKind, cat_layout::Direction) -> u16);
+    ///
+    /// Boxed rather than a plain `fn`, because the terminal console's
+    /// answer depends on this radio's capabilities -- how many meters it
+    /// declares -- so the closure has to carry them.
+    type Density = (
+        &'static str,
+        Box<dyn Fn(&PanelKind, cat_layout::Direction) -> u16>,
+    );
 
-    fn densities() -> [Density; 2] {
-        fn terminal(k: &PanelKind, d: cat_layout::Direction) -> u16 {
-            cat_ui_ratatui::console::natural(k, d)
-        }
-        fn gpu(k: &PanelKind, d: cat_layout::Direction) -> u16 {
-            match (k, d) {
-                (PanelKind::MeterRail, cat_layout::Direction::Rows) => 12,
-                _ => cat_layout::default_natural(k, d),
-            }
-        }
-        [("terminal", terminal), ("gpu", gpu)]
+    fn densities() -> Vec<Density> {
+        let caps = cat_native::CapabilitiesWire::from(&crate::capabilities::TS570D);
+        let gpu_caps = caps.clone();
+        vec![
+            (
+                "terminal",
+                Box::new(move |k: &PanelKind, d: cat_layout::Direction| {
+                    cat_ui_ratatui::console::natural(k, d, &caps)
+                }) as Box<dyn Fn(&PanelKind, cat_layout::Direction) -> u16>,
+            ),
+            (
+                // The GPU console's arithmetic, which is not exported:
+                // a pane header plus a label row and a bar per meter.
+                "gpu",
+                Box::new(
+                    move |k: &PanelKind, d: cat_layout::Direction| match (k, d) {
+                        (PanelKind::MeterRail, cat_layout::Direction::Rows) => {
+                            2 + (gpu_caps.meters.len() as u16)
+                                .max(1)
+                                .saturating_mul(5)
+                                .div_ceil(2)
+                        }
+                        _ => cat_layout::default_natural(k, d),
+                    },
+                ),
+            ),
+        ]
     }
 
     /// Every panel this layout places, at the design size.
@@ -260,12 +291,13 @@ mod tests {
             let fft = spec.find_with(area, &PanelKind::AfFft, natural).unwrap();
             scope.height + fft.height
         };
-        let [(_, terminal), (_, gpu)] = densities();
+        let d = densities();
+        let (terminal, gpu) = (&d[0].1, &d[1].1);
         assert!(
-            af(&terminal) > af(&gpu),
+            af(terminal.as_ref()) > af(gpu.as_ref()),
             "the tighter rail leaves more for the AF panels: {} vs {}",
-            af(&terminal),
-            af(&gpu)
+            af(terminal.as_ref()),
+            af(gpu.as_ref())
         );
     }
 
