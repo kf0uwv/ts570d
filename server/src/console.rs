@@ -28,6 +28,21 @@ use cat_rigctl::native_bridge::NativeRadio;
 use cat_transport_core::{CatSession, TransportError};
 use radio::{Frequency, Ts570d};
 
+/// The meter `RM;`'s selector digit names.
+///
+/// From the CAT reference's METER SWITCH parameter: `0` no selection,
+/// `1` SWR, `2` COMP, `3` ALC. Anything else is a radio reporting
+/// something this does not know about, and inventing a meter for it would
+/// put a reading on a row it does not belong to.
+fn meter_switch(selector: u8) -> Option<MeterKind> {
+    match selector {
+        1 => Some(MeterKind::Swr),
+        2 => Some(MeterKind::Comp),
+        3 => Some(MeterKind::Alc),
+        _ => None,
+    }
+}
+
 /// This radio, as the console protocol sees it.
 pub struct ConsoleTs570d<S: CatSession>(pub Ts570d<S>);
 
@@ -72,10 +87,28 @@ where
         } else {
             MeterKind::S
         };
-        let meters = match self.0.get_smeter().await {
+        let mut meters = match self.0.get_smeter().await {
             Ok(raw) => vec![MeterSample { kind, raw }],
             Err(_) => Vec::new(),
         };
+
+        // While keyed, a second meter is answering at the same moment.
+        // `RM;` reports whichever of SWR, compression or ALC the operator
+        // has selected on the front panel, and the ALC reading is the one
+        // that says whether the radio is actually being driven -- the
+        // question a whole evening went into answering by other means
+        // (troubleshooting-plan.md item 36).
+        //
+        // Only while transmitting: all three are transmit meters, they
+        // read zero the rest of the time, and this is a CAT round trip on
+        // a link shared with whatever is keying.
+        if info.tx_rx {
+            if let Ok((selector, raw)) = self.0.get_meter_reading().await {
+                if let Some(kind) = meter_switch(selector) {
+                    meters.push(MeterSample { kind, raw });
+                }
+            }
+        }
 
         Some(RadioState {
             vfo_a_hz: info.frequency.hz(),
@@ -180,6 +213,43 @@ mod tests {
     // What stays here is the question only this seam can ask: whether the
     // modes the capability set *offers a console* are the same ones this
     // adapter can actually apply.
+
+    #[test]
+    fn the_meter_switch_digits_are_the_ones_the_manual_gives() {
+        // CAT reference, METER SWITCH: 0 no selection, 1 SWR, 2 COMP,
+        // 3 ALC. A digit mapped to the wrong meter draws a reading on
+        // the wrong row, which is worse than not drawing it -- an SWR
+        // figure sitting on the ALC row reads as a radio that is being
+        // driven correctly.
+        assert_eq!(meter_switch(1), Some(MeterKind::Swr));
+        assert_eq!(meter_switch(2), Some(MeterKind::Comp));
+        assert_eq!(meter_switch(3), Some(MeterKind::Alc));
+    }
+
+    #[test]
+    fn an_unselected_or_unknown_meter_is_not_invented() {
+        // 0 is "no selection". Anything above 3 is a radio reporting
+        // something this does not know about, and guessing would put a
+        // reading on a row it does not belong to.
+        assert_eq!(meter_switch(0), None);
+        for unknown in [4u8, 5, 9, 255] {
+            assert_eq!(meter_switch(unknown), None, "{unknown}");
+        }
+    }
+
+    #[test]
+    fn every_meter_a_switch_digit_names_is_declared_by_this_radio() {
+        // A label the radio does not declare is a reading with nowhere to
+        // go: the rails draw each reading on the row for its own meter,
+        // so it would simply not appear.
+        for digit in 1..=3u8 {
+            let kind = meter_switch(digit).expect("mapped");
+            assert!(
+                radio::capabilities::TS570D.meters.has(kind),
+                "{kind:?} is a switch target but not declared"
+            );
+        }
+    }
 
     #[test]
     fn this_radio_declares_the_meter_a_transmit_reading_is_labelled_with() {

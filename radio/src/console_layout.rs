@@ -277,7 +277,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name}: no rail"));
             heights.push((name, rail.height));
         }
-        assert_eq!(heights, vec![("terminal", 5), ("gpu", 12)]);
+        // Five meters on this radio -- S, PO, SWR, ALC and COMP -- so the
+        // terminal console wants one row each plus the link line, and the
+        // GPU console a header plus a label row and a bar each.
+        //
+        // These numbers moved when the compression meter was declared,
+        // and nothing in the layout had to change: that is the whole
+        // point of asking the renderer rather than writing a number here.
+        assert_eq!(heights, vec![("terminal", 6), ("gpu", 15)]);
     }
 
     #[test]

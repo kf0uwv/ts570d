@@ -174,6 +174,29 @@ const METERS: &[MeterDescriptor] = &[
         active_on_transmit: true,
         s_units: None,
     },
+    MeterDescriptor {
+        // The radio has one and reports it, and this did not declare it.
+        //
+        // The manual lists it beside the others -- the meter "serves as a
+        // calibrated power meter plus an ALC meter, an SWR meter, or a
+        // Speech Processor compression meter" -- and `RM;` returns it
+        // under selector 2. The bench radio was found *selected to it*:
+        // the first `RM;` ever sent to it answered `RM20000;`.
+        //
+        // An undeclared meter is a reading with nowhere to go. Both rails
+        // draw a reading on the row for its own meter, so a compression
+        // sample would simply not have appeared -- which looks like a
+        // meter that does not work rather than one nobody declared.
+        //
+        // `RM`'s value field is documented `0000~0008` rather than the
+        // `SM` command's range; the range here follows the other transmit
+        // meters until something measures it, and see item 48 on why that
+        // number is not settled for the S meter either.
+        kind: MeterKind::Comp,
+        raw_range: RawRange::new(0, 30),
+        active_on_transmit: true,
+        s_units: None,
+    },
 ];
 
 /// The Kenwood TS-570D.

@@ -281,6 +281,42 @@ where
         }
     }
 
+    /// The selected transmit meter and its reading, from a bare `RM;`.
+    ///
+    /// Distinct from [`Self::get_meter`], which *selects* a meter and then
+    /// reads it -- changing what the operator had chosen on the front
+    /// panel as a side effect of looking. This asks what is already
+    /// selected and what it says, which is what a console polling in the
+    /// background must do.
+    ///
+    /// Returns `(selector, value)` where the selector is
+    /// `0` none, `1` SWR, `2` COMP, `3` ALC, per the CAT reference's
+    /// METER SWITCH parameter, and the value runs `0000~0008`.
+    ///
+    /// This is a different meter from [`Self::get_smeter`]. `SM;` answers
+    /// with signal strength while receiving and, per the manual, "a
+    /// calibrated power meter" while transmitting. `RM;` answers with
+    /// whichever of SWR, compression or ALC the operator has selected --
+    /// and the ALC reading is the one an operator needs to see to know
+    /// whether the radio is being driven properly.
+    ///
+    /// The value is zero while receiving; all three are transmit meters.
+    ///
+    /// Note the asymmetry the emulator's handler documents from the
+    /// physical radio: `RM<n>;` *selects* a meter and answers nothing,
+    /// while a bare `RM;` reports the selection and its reading. The read
+    /// payload is five characters and the set payload is one, so a
+    /// reading is not a valid selection.
+    pub async fn get_meter_reading(&mut self) -> RadioResult<(u8, u16)> {
+        let raw = self.client.query("RM").await?;
+        match ResponseParser::parse(&raw)? {
+            Response::Meter(selector, value) => Ok((selector, value)),
+            other => Err(RadioError::InvalidProtocolString(format!(
+                "expected Meter, got {other:?}"
+            ))),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // PTT
     // -----------------------------------------------------------------------
@@ -1387,6 +1423,10 @@ where
 
     async fn set_mode(&mut self, mode: crate::Mode) -> crate::RadioResult<()> {
         Ts570d::set_mode(self, mode).await
+    }
+
+    async fn get_meter_reading(&mut self) -> crate::RadioResult<(u8, u16)> {
+        Ts570d::get_meter_reading(self).await
     }
 
     async fn get_smeter(&mut self) -> crate::RadioResult<u16> {

@@ -336,6 +336,18 @@ pub trait Radio {
     async fn get_smeter(&mut self) -> RadioResult<u16> {
         Err(RadioError::NotImplemented)
     }
+    /// The selected transmit meter and its reading: `(selector, value)`.
+    ///
+    /// A different meter from [`Self::get_smeter`]. On a TS-570D `SM;`
+    /// answers with signal strength while receiving and, per the manual,
+    /// "a calibrated power meter" while transmitting; `RM;` answers with
+    /// whichever of SWR, compression or ALC the operator has selected.
+    /// The selector is `0` none, `1` SWR, `2` COMP, `3` ALC.
+    ///
+    /// Zero while receiving -- all three are transmit meters.
+    async fn get_meter_reading(&mut self) -> RadioResult<(u8, u16)> {
+        Err(RadioError::NotImplemented)
+    }
     async fn transmit(&mut self) -> RadioResult<()> {
         Err(RadioError::NotImplemented)
     }

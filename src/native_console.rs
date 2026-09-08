@@ -294,6 +294,25 @@ impl Radio for NativeConsoleRadio {
         })
     }
 
+    async fn get_meter_reading(&mut self) -> RadioResult<(u8, u16)> {
+        // Served from the published state rather than asked for: the
+        // server reads `RM;` while the radio is keyed and sends the
+        // sample along with everything else. Reported as the selector the
+        // sample's kind implies, so the console can label the row the
+        // same way whichever end read it.
+        let state = self.state()?;
+        for (selector, kind) in [
+            (1u8, MeterKind::Swr),
+            (2, MeterKind::Comp),
+            (3, MeterKind::Alc),
+        ] {
+            if let Some(raw) = state.meter(kind) {
+                return Ok((selector, raw));
+            }
+        }
+        Err(RadioError::NotImplemented)
+    }
+
     async fn get_smeter(&mut self) -> RadioResult<u16> {
         // Whichever meter `SM;` was answering when the server read it.
         //

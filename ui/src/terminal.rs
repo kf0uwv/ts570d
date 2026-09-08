@@ -488,6 +488,22 @@ async fn yield_sleep(duration: Duration) {
 /// `state.poll_errors` is cleared at the start of each call and re-populated
 /// with any errors from this cycle. Previous values are preserved when a
 /// getter fails.
+/// The meter `RM;`'s selector digit names.
+///
+/// From the CAT reference's METER SWITCH parameter: `0` no selection,
+/// `1` SWR, `2` COMP, `3` ALC. Anything else is a radio reporting
+/// something this does not know about, and inventing a meter for it would
+/// put a reading on a row it does not belong to.
+fn meter_switch(selector: u8) -> Option<cat_framework::capabilities::MeterKind> {
+    use cat_framework::capabilities::MeterKind;
+    match selector {
+        1 => Some(MeterKind::Swr),
+        2 => Some(MeterKind::Comp),
+        3 => Some(MeterKind::Alc),
+        _ => None,
+    }
+}
+
 /// Consecutive cycles without an essential read before the console stops
 /// calling itself linked.
 ///
@@ -576,6 +592,23 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) -> 
     poll!("VFO-B", radio.get_vfo_b(), |freq: radio::Frequency| {
         state.vfo_b_hz = freq.hz();
     });
+    // The second meter, and only while keyed: `RM;` reports whichever of
+    // SWR, compression or ALC the operator selected, all three of which
+    // are transmit meters reading zero the rest of the time. Cleared
+    // first so a reading does not outlive the transmission that produced
+    // it -- an ALC bar left standing after the radio unkeyed would be a
+    // picture of a moment that has passed.
+    state.meters.clear();
+    if state.tx {
+        poll!("RM", radio.get_meter_reading(), |(selector, raw): (
+            u8,
+            u16
+        )| {
+            if let Some(kind) = meter_switch(selector) {
+                state.meters.push(cat_native::MeterSample { kind, raw });
+            }
+        });
+    }
     poll!("SM", radio.get_smeter(), |s: u16| {
         state.smeter = s;
         // `SM;` is two meters. While receiving it is the S-meter; while
