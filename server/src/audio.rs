@@ -193,16 +193,29 @@ pub fn spawn(shared: Arc<NativeShared>, selection: Arc<AudioSelection>) {
         let mut mixer = MixerKeeper::new();
         loop {
             let generation = selection.generation();
-            // Asserted before the source is touched, and again on every
-            // pass. A re-enumeration is precisely when the card's mixer
-            // state has been silently reverted, and this loop is what runs
-            // when one has happened. Mixer access is not PCM access, so
-            // this works while PipeWire or WSJT-X holds the stream.
+            // Asserted before the source is touched, and then from
+            // inside the read loop as well -- see `read_frames`.
+            //
+            // It used to be asserted only here, and the comment claimed
+            // "again on every pass". True, but a pass is one *stream
+            // lifetime*: `read_frames` does not return while the stream is
+            // healthy, so on a working server the mixer was asserted once
+            // at startup and never again. Measured: setting the capture
+            // level externally and waiting thirty seconds, the server
+            // never took it back.
+            //
+            // A re-enumeration is one moment the card's mixer state gets
+            // silently reverted; a desktop volume control or PipeWire
+            // moving it mid-session is another, and that one leaves the
+            // stream up. Mixer access is not PCM access, so this works
+            // while PipeWire or WSJT-X holds the stream.
             mixer.tick(&selection);
             match selection.take_pending() {
                 Some(mut source) => {
                     info!("ACC2 audio: reading {}", selection.label());
-                    if let Err(e) = read_frames(&shared, &selection, generation, &mut source) {
+                    if let Err(e) =
+                        read_frames(&shared, &selection, generation, &mut source, &mut mixer)
+                    {
                         warn!("ACC2 audio: {e}");
                     }
                 }
@@ -276,8 +289,20 @@ fn read_frames(
     selection: &AudioSelection,
     generation: u64,
     source: &mut AudioSource,
+    mixer: &mut MixerKeeper,
 ) -> Result<(), String> {
     loop {
+        // The card's levels are this server's to hold for as long as it is
+        // reading, not only at the moment it opened. `tick` throttles
+        // itself, so this costs one ALSA mixer open every two seconds
+        // against roughly forty-seven audio blocks a second.
+        //
+        // This matters more than it sounds: on this station a capture
+        // level of 16 rather than 0 is the difference between -14.9 dBFS
+        // and a clipped 0.0 dBFS with 23,814 saturated samples in a
+        // ten-second block (troubleshooting-plan.md item 33). Something
+        // else moving it mid-session used to go uncorrected and unsaid.
+        mixer.tick(selection);
         if selection.generation() != generation {
             info!("ACC2 audio: switching to a new source");
             return Ok(());
