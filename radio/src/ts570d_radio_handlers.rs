@@ -308,11 +308,24 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             let vfo_flag: u8 = 0; // 0 = VFO mode
             let scan_flag = u8::from(state.scan);
             let split_flag = u8::from(state.split);
-            let rit_sign = if state.rit_offset >= 0 { '+' } else { '-' };
+            // A **space** for non-negative, not `+`. Measured on the
+            // physical radio 2026-09-08: with RIT off it answers
+            // `IF00014074000      000000 ...`, and nudged positive it
+            // keeps the space, switching to `-` only when the offset goes
+            // negative. The parser accepts either, so this never showed
+            // as a fault -- it showed as an emulator that was not the
+            // radio, which is the thing an emulator has to be.
+            let rit_sign = if state.rit_offset >= 0 { ' ' } else { '-' };
             let rit_abs = state.rit_offset.unsigned_abs() as u16;
             let tone_digit = state.tone_number % 10;
             query!(format!(
-                "IF{freq:011}     {sign}{rit_off:04}{rit}{xit} {mem:02}{tx}{mode}{vfo}{scan}{split}{ctcss:02}{tone:01};",
+                // Note the trailing space before the terminator: the
+                // radio's IF record is 38 characters and this was 37.
+                // Every field lines up either way, because the extra
+                // character is at the end -- but a console that ever
+                // measures the record rather than indexing into it would
+                // find the emulator disagreeing with the radio it models.
+                "IF{freq:011}     {sign}{rit_off:04}{rit}{xit} {mem:02}{tx}{mode}{vfo}{scan}{split}{ctcss:02}{tone:01} ;",
                 freq = state.vfo_a_hz,
                 sign = rit_sign,
                 rit_off = rit_abs,
@@ -1667,8 +1680,30 @@ mod tests {
         assert!(resp.starts_with("IF"), "IF response: {resp}");
         assert!(resp.ends_with(';'));
         assert!(changes.is_empty());
-        // Payload (excluding "IF" and ";") must be exactly 34 chars
+        // Payload (excluding "IF" and ";") must be exactly what the
+        // physical radio sends: 35 characters, the last of them a space.
+        //
+        // Measured 2026-09-08 -- the radio answers a 38-character record
+        // and this modelled 37. Every field lines up either way, since
+        // the extra character is at the end, which is why it went
+        // unnoticed. An emulator that is *nearly* the radio is where the
+        // next off-by-one hides.
         let payload = &resp[2..resp.len() - 1];
-        assert_eq!(payload.len(), 34, "IF payload length: {payload:?}");
+        assert_eq!(payload.len(), 35, "IF payload length: {payload:?}");
+        assert!(payload.ends_with(' '), "IF payload tail: {payload:?}");
+    }
+
+    #[test]
+    fn the_rit_sign_is_a_space_when_it_is_not_negative() {
+        // The radio answers ` 0000` and not `+0000`; it switches to `-`
+        // only when the offset goes negative. Measured on the physical
+        // radio by nudging RIT up and then down through zero.
+        let mut s = default_state();
+        s.rit_offset = 0;
+        assert_eq!(&handle("IF", &mut s).0[18..19], " ");
+        s.rit_offset = 200;
+        assert_eq!(&handle("IF", &mut s).0[18..19], " ");
+        s.rit_offset = -200;
+        assert_eq!(&handle("IF", &mut s).0[18..19], "-");
     }
 }
