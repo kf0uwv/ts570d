@@ -545,56 +545,75 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
     });
     // Cleared, then set by the first level read that actually answers.
     //
-    // Over a serial link every one of these is a real CAT command and they
-    // all succeed. Over the console protocol they are served from the
-    // server's slow-poll block, which is absent until the first slow poll
-    // lands -- and `poll!` leaves a failed read at its struct default, so
-    // claiming the rail is known before one has answered would draw
-    // `AF 200` at a radio reading `AG034`. They share one source, so one
-    // answering means all did. See `RadioDisplay::levels_known`.
-    state.levels_known = false;
+    // `poll!` leaves a failed read at its struct default, which is *not*
+    // what an unread field should look like: it would draw `AF 200` at a
+    // radio reading `AG034`, confidently and indistinguishably from a
+    // reading. `levels_known` is what keeps the rail honest.
+    //
+    // Counted rather than taken from the first one that answers. Over the
+    // console protocol they do share a source -- the server's slow-poll
+    // block, absent until the first slow poll lands -- so one answering
+    // really does mean all did. Over a *serial* link each is its own CAT
+    // command and they fail independently, and there the old shortcut
+    // would have let a single successful `AG` vouch for thirteen struct
+    // defaults. The rail is known when every field behind it is.
+    let mut levels_read = 0usize;
     poll!("AF", radio.get_af_gain(), |v: u8| {
         state.af_gain = v;
-        state.levels_known = true;
+        levels_read += 1;
     });
     poll!("RF", radio.get_rf_gain(), |v: u8| {
         state.rf_gain = v;
+        levels_read += 1;
     });
     poll!("SQ", radio.get_squelch(), |v: u8| {
         state.squelch = v;
+        levels_read += 1;
     });
     poll!("MG", radio.get_mic_gain(), |v: u8| {
         state.mic_gain = v;
+        levels_read += 1;
     });
     poll!("PC", radio.get_power(), |v: u8| {
         state.power_pct = v;
+        levels_read += 1;
     });
     poll!("GT", radio.get_agc(), |v: u8| {
         state.agc = v;
+        levels_read += 1;
     });
     poll!("NB", radio.get_noise_blanker(), |v: bool| {
         state.noise_blanker = v;
+        levels_read += 1;
     });
     poll!("NR", radio.get_noise_reduction(), |v: u8| {
         state.noise_reduction = v;
+        levels_read += 1;
     });
     poll!("PA", radio.get_preamp(), |v: bool| {
         state.preamp = v;
+        levels_read += 1;
     });
     poll!("RA", radio.get_attenuator(), |v: bool| {
         state.attenuator = v;
+        levels_read += 1;
     });
     poll!("PR", radio.get_speech_processor(), |v: bool| {
         state.speech_processor = v;
+        levels_read += 1;
     });
+    // Not a rail field -- the reference rail has no beat-cancel row --
+    // so it is polled but not counted towards `levels_known`.
     poll!("BC", radio.get_beat_cancel(), |v: u8| {
         state.beat_cancel = v;
     });
     poll!("VX", radio.get_vox(), |v: bool| {
         state.vox = v;
+        levels_read += 1;
     });
     poll!("AN", radio.get_antenna(), |v: u8| {
         state.antenna = v;
+        levels_read += 1;
     });
     poll!("FR", radio.get_rx_vfo(), |v: u8| {
         state.rx_vfo = v;
@@ -604,11 +623,25 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
     });
     poll!("LK", radio.get_frequency_lock(), |v: bool| {
         state.freq_lock = v;
+        levels_read += 1;
     });
+    // Every field the reference rail draws has now been asked for. It is
+    // "known" only if all of them answered: one field left at its struct
+    // default and drawn as a reading is the whole failure this guards.
+    state.levels_known = levels_read == REFERENCE_RAIL_FIELDS;
+
     poll!("FS", radio.get_fine_step(), |v: bool| {
         state.fine_step = v;
     });
 }
+
+/// How many fields the reference rail draws, and therefore how many reads
+/// have to answer before it can be called known.
+///
+/// ANT, AF, RF, SQL, MIC, PWR, AGC, NB, NR, PRE, ATT, PROC, VOX, LOCK.
+/// Beat-cancel is polled beside them and is deliberately not among them:
+/// the rail has no row for it.
+const REFERENCE_RAIL_FIELDS: usize = 14;
 
 // ---------------------------------------------------------------------------
 // Diagnostic helpers
