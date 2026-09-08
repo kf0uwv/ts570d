@@ -143,6 +143,23 @@ where
         self.radio.set_mode(mode).await
     }
 
+    fn unsupported() -> Self::Error {
+        radio::RadioError::NotImplemented
+    }
+
+    /// Split, which on this radio *is* which VFO transmits.
+    ///
+    /// There is no separate split flag in the CAT set: `FT0;` puts
+    /// transmit on VFO A and `FT1;` on VFO B, and "split" is the second
+    /// of those. `console.rs` says the same thing on the other seam.
+    async fn get_split(&mut self) -> Result<bool, Self::Error> {
+        self.radio.get_tx_vfo().await.map(|vfo| vfo != 0)
+    }
+
+    async fn set_split(&mut self, on: bool) -> Result<(), Self::Error> {
+        self.radio.set_tx_vfo(u8::from(on)).await
+    }
+
     async fn get_transmitting(&mut self) -> Result<bool, Self::Error> {
         // When this server drives PTT itself, it already knows the answer:
         // it set the line. Reading `IF;` to find out costs 38 bytes back
