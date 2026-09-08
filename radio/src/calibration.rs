@@ -397,6 +397,16 @@ where
     S: CatSession<Error = TransportError>,
 {
     let mut captured = 0;
+    // A command that never answers is not a dead link. This radio has ten
+    // commands the controller catalogue lists and it does not implement;
+    // most answer `?;`, but `MC` simply says nothing and the read times
+    // out. Aborting on the first of those made a capture impossible.
+    //
+    // A dead link is still fatal, and is what a RUN of silences looks
+    // like: three in a row and nothing after can be trusted. That is the
+    // failure this abort was added for -- a stale handle answered every
+    // command with an error and produced a confident five-setting file.
+    let mut consecutive_silence = 0u32;
     for definition in TS570D_COMMAND_TABLE.definitions() {
         let code = definition.code;
         if !definition.readable || VOLATILE.contains(&code) {
@@ -409,15 +419,19 @@ where
         }
         match classify(&radio.client.query(code).await, code) {
             Answer::Value(payload) => {
+                consecutive_silence = 0;
                 snapshot.record_setting(code, &payload);
                 captured += 1;
             }
-            Answer::NotSupported => {}
+            Answer::NotSupported => consecutive_silence = 0,
             Answer::Unintelligible(answer) => {
-                return Err(CaptureError {
-                    code: code.to_string(),
-                    answer,
-                })
+                consecutive_silence += 1;
+                if consecutive_silence >= MAX_CONSECUTIVE_SILENCE {
+                    return Err(CaptureError {
+                        code: code.to_string(),
+                        answer,
+                    });
+                }
             }
         }
     }
@@ -464,6 +478,10 @@ fn classify<E: std::fmt::Display>(result: &Result<String, E>, code: &str) -> Ans
         _ => Answer::Unintelligible(raw.to_string()),
     }
 }
+
+/// Unanswered reads in a row that mean the link has gone, rather than a
+/// command the radio does not implement.
+pub const MAX_CONSECUTIVE_SILENCE: u32 = 3;
 
 /// The link stopped carrying the conversation part-way through a capture.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1096,6 +1114,31 @@ mod tests {
         let r: Result<String, std::io::Error> =
             Err(std::io::Error::other("interrupted system call"));
         assert!(matches!(classify(&r, "FA"), Answer::Unintelligible(_)));
+    }
+
+    #[test]
+    fn one_command_that_never_answers_is_not_a_dead_link() {
+        // This radio does not implement `MC`, and rather than answering
+        // `?;` it says nothing at all -- the read times out. Aborting on
+        // the first such command made a capture impossible:
+        //
+        //   error: the radio answered "...Read timeout" when asked for MC
+        //   No file written.
+        assert!(
+            MAX_CONSECUTIVE_SILENCE > 1,
+            "a single unanswered command must not abort a capture"
+        );
+    }
+
+    #[test]
+    fn a_run_of_silence_is_still_fatal() {
+        // The failure the abort was added for: a stale serial handle
+        // answered every command with an error, and the capture wrote a
+        // confident file with five settings in it.
+        assert!(
+            MAX_CONSECUTIVE_SILENCE <= 5,
+            "a dead link must be caught quickly, not after the whole table"
+        );
     }
 
     #[test]
