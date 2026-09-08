@@ -426,7 +426,7 @@ where
             Answer::NotSupported => consecutive_silence = 0,
             Answer::Unintelligible(answer) => {
                 consecutive_silence += 1;
-                if consecutive_silence >= MAX_CONSECUTIVE_SILENCE {
+                if link_is_dead(consecutive_silence) {
                     return Err(CaptureError {
                         code: code.to_string(),
                         answer,
@@ -482,6 +482,16 @@ fn classify<E: std::fmt::Display>(result: &Result<String, E>, code: &str) -> Ans
 /// Unanswered reads in a row that mean the link has gone, rather than a
 /// command the radio does not implement.
 pub const MAX_CONSECUTIVE_SILENCE: u32 = 3;
+
+/// Whether a run of unanswered reads means the link is gone.
+///
+/// One is a command this radio does not have -- `MC` says nothing at all
+/// where the other nine unimplemented commands answer `?;`. A run is a
+/// stale handle, which once answered every command with an error and
+/// produced a confident file with five settings in it.
+pub fn link_is_dead(consecutive_silences: u32) -> bool {
+    consecutive_silences >= MAX_CONSECUTIVE_SILENCE
+}
 
 /// The link stopped carrying the conversation part-way through a capture.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1124,10 +1134,8 @@ mod tests {
         //
         //   error: the radio answered "...Read timeout" when asked for MC
         //   No file written.
-        assert!(
-            MAX_CONSECUTIVE_SILENCE > 1,
-            "a single unanswered command must not abort a capture"
-        );
+        assert!(!link_is_dead(0));
+        assert!(!link_is_dead(1), "one silence is an unimplemented command");
     }
 
     #[test]
@@ -1135,10 +1143,16 @@ mod tests {
         // The failure the abort was added for: a stale serial handle
         // answered every command with an error, and the capture wrote a
         // confident file with five settings in it.
-        assert!(
-            MAX_CONSECUTIVE_SILENCE <= 5,
-            "a dead link must be caught quickly, not after the whole table"
-        );
+        assert!(link_is_dead(MAX_CONSECUTIVE_SILENCE));
+        assert!(link_is_dead(MAX_CONSECUTIVE_SILENCE + 10));
+    }
+
+    #[test]
+    fn the_run_is_short_enough_to_catch_a_dead_link_early() {
+        // Caught within a few commands, not after the whole table: a
+        // capture that ploughs through sixty timeouts at two seconds each
+        // before giving up is its own kind of broken.
+        assert!((2..=5).contains(&MAX_CONSECUTIVE_SILENCE));
     }
 
     #[test]
