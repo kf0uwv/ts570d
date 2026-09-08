@@ -21,7 +21,13 @@
 
 use gui::{app::Console, Window};
 
-const DEFAULT_ADDRESS: &str = "127.0.0.1:4532";
+/// The server's console port.
+///
+/// NOT 4532: that is where `ts570d server` binds the rigctld-compatible
+/// listener for WSJT-X, and this binary speaks `cat-native` instead. The
+/// two protocols share nothing, so the old default could only ever fail to
+/// connect.
+const DEFAULT_ADDRESS: &str = "127.0.0.1:7400";
 
 fn main() -> eframe::Result<()> {
     let address = std::env::args()
