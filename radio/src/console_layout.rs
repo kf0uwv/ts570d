@@ -68,12 +68,29 @@ pub fn layout() -> LayoutSpec {
                 Child::new(
                     Size::Fixed(RAIL_W),
                     Node::rows(vec![
-                        Child::panel(Size::Min(4), PanelKind::MeterRail),
+                        // Fixed to what the roomier renderer needs. It
+                        // was `Min(4)`, which made it absorb every spare
+                        // row in the column: at 120x40 it took fifteen
+                        // rows to draw five, and the AF panels it is
+                        // supposed to sit directly above started ten
+                        // blank rows further down.
+                        Child::panel(
+                            Size::Fixed(cat_layout::METER_RAIL_ROWS),
+                            PanelKind::MeterRail,
+                        ),
                         // The AF panels under the meters, because both
                         // answer "what is the receiver doing right now"
                         // and an operator reads them together.
-                        Child::panel(Size::Fixed(6), PanelKind::AfScope),
-                        Child::panel(Size::Fixed(6), PanelKind::AfFft),
+                        //
+                        // They take the slack the meters no longer hold.
+                        // Six rows each was the minimum that fits a
+                        // header and a trace; more is not padding, it is
+                        // vertical resolution -- a taller scope resolves
+                        // an envelope a six-row one flattens, and a
+                        // taller FFT separates two tones a six-row one
+                        // merges into one bar.
+                        Child::panel(Size::Fill(1), PanelKind::AfScope),
+                        Child::panel(Size::Fill(1), PanelKind::AfFft),
                     ]),
                 ),
                 Child::new(
@@ -127,6 +144,84 @@ pub fn theme() -> Theme {
 mod tests {
     use super::*;
     use cat_layout::Area;
+
+    /// Every panel this layout places, at the design size.
+    fn placed(w: u16, h: u16) -> Vec<(PanelKind, Area)> {
+        let spec = layout();
+        [
+            PanelKind::Readout,
+            PanelKind::QuickBar,
+            PanelKind::MeterRail,
+            PanelKind::AfScope,
+            PanelKind::AfFft,
+            PanelKind::Spectrum,
+            PanelKind::Workspace,
+            PanelKind::LevelsRail,
+            PanelKind::Status,
+            PanelKind::CommandLine,
+        ]
+        .into_iter()
+        .filter_map(|k| spec.find(Area::new(0, 0, w, h), &k).map(|a| (k, a)))
+        .collect()
+    }
+
+    #[test]
+    fn show_the_layout() {
+        // Not an assertion -- a way to see the arrangement without a
+        // terminal. `cargo test -p radio show_the_layout -- --nocapture`.
+        for (k, a) in placed(120, 40) {
+            println!(
+                "{k:12?} cols {:>3}..{:<3} rows {:>3}..{:<3}  ({}x{})",
+                a.x,
+                a.x + a.width - 1,
+                a.y,
+                a.y + a.height - 1,
+                a.width,
+                a.height
+            );
+        }
+    }
+
+    #[test]
+    fn no_two_panels_overlap() {
+        // A panel drawn over another does not look like a layout bug; it
+        // looks like the panel underneath is broken.
+        let panels = placed(120, 40);
+        for (i, (ka, a)) in panels.iter().enumerate() {
+            for (kb, b) in &panels[i + 1..] {
+                let apart = a.x + a.width <= b.x
+                    || b.x + b.width <= a.x
+                    || a.y + a.height <= b.y
+                    || b.y + b.height <= a.y;
+                assert!(apart, "{ka:?} at {a:?} overlaps {kb:?} at {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_row_and_column_is_claimed_by_something() {
+        // Dead space is a layout that has quietly stopped adding up.
+        let panels = placed(120, 40);
+        let covered = |x: u16, y: u16| {
+            panels
+                .iter()
+                .any(|(_, a)| x >= a.x && x < a.x + a.width && y >= a.y && y < a.y + a.height)
+        };
+        let mut gaps = Vec::new();
+        for y in 0..40u16 {
+            for x in 0..120u16 {
+                if !covered(x, y) {
+                    gaps.push((x, y));
+                }
+            }
+        }
+        assert!(
+            gaps.is_empty(),
+            "{} cells belong to no panel, first at {:?}",
+            gaps.len(),
+            gaps.first()
+        );
+    }
 
     #[test]
     fn this_radios_console_gives_the_band_the_room() {

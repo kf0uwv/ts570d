@@ -56,6 +56,7 @@ fn main() {
         c
     });
     console.demo_state();
+    console.demo_levels();
     // A real band, from the same generator the emulator serves, so the
     // still shows the waterfall under something like live conditions.
     let band = cat_signal::synthetic::Band::populated(14_000_000, 14_350_000, 43, -110.0, 7);
