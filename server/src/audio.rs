@@ -62,6 +62,14 @@ pub struct AudioSelection {
     /// that goes away has usually been unplugged, and silently grabbing
     /// it again later is not obviously right.
     label: Mutex<Option<String>>,
+    /// The ALSA card whose mixer to own, named explicitly.
+    ///
+    /// Outranks both `label` and `requested`, because it answers a
+    /// different question: those say where the audio *stream* comes from,
+    /// and a stream taken through PipeWire does not identify the card
+    /// behind it. Without this, opening `audio:pipewire` set `label` to
+    /// "pipewire" and the mixer went looking for a sound card by that name.
+    mixer_card: Mutex<Option<String>>,
     /// The device an operator ASKED for, whether or not its PCM opened.
     ///
     /// Distinct from `label`, which is only set once a source is actually
@@ -94,10 +102,18 @@ impl AudioSelection {
         Arc::new(Self {
             pending: Mutex::new(None),
             label: Mutex::new(None),
+            mixer_card: Mutex::new(None),
             requested: Mutex::new(None),
             generation: AtomicU64::new(0),
             mixer,
         })
+    }
+
+    /// Name the card whose mixer this server owns.
+    pub fn set_mixer_card(&self, card: &str) {
+        if let Ok(mut slot) = self.mixer_card.lock() {
+            *slot = Some(card.to_string());
+        }
     }
 
     /// Note the device named on the command line, before any open is tried.
@@ -112,10 +128,11 @@ impl AudioSelection {
     /// Prefers what is actually streaming, falls back to what was asked
     /// for -- the two differ precisely when something else holds the PCM.
     pub fn mixer_target(&self) -> Option<String> {
-        self.label
+        self.mixer_card
             .lock()
             .ok()
-            .and_then(|l| l.clone())
+            .and_then(|c| c.clone())
+            .or_else(|| self.label.lock().ok().and_then(|l| l.clone()))
             .or_else(|| self.requested.lock().ok().and_then(|r| r.clone()))
     }
 
@@ -131,6 +148,7 @@ impl AudioSelection {
         Arc::new(Self {
             pending: Mutex::new(None),
             label: Mutex::new(None),
+            mixer_card: Mutex::new(None),
             requested: Mutex::new(None),
             generation: AtomicU64::new(0),
         })

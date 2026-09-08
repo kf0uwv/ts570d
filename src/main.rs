@@ -469,9 +469,11 @@ fn usage_exit() -> ! {
                                       server (host:port), or a sound device.\n\
                                       Opens the capture stream EXCLUSIVELY --\n\
                                       do not use it alongside WSJT-X.\n\
-           --acc2-mixer <device>      own the card's mixer levels without\n\
-                                      opening its PCM. This is what you want\n\
-                                      when WSJT-X owns the audio.\n\
+           --acc2-mixer <card>        which ALSA card's mixer to own. Use it\n\
+                                      alongside --acc2-audio audio:pipewire\n\
+                                      to share the card with WSJT-X and still\n\
+                                      own its levels; alone, it owns the\n\
+                                      levels and opens no PCM.\n\
            --calibration <file>       a snapshot from `ts570d calibrate`,\n\
                                       checked once at startup. Defaults to\n\
                                       ~/.config/ts570d/calibration.json.\n\
@@ -662,14 +664,16 @@ struct ServerArgs {
     /// flags rather than constants.
     acc2_capture: Option<i64>,
     acc2_playback: Option<i64>,
-    /// `--acc2-mixer <device>`: own the card's mixer WITHOUT opening its
-    /// PCM.
+    /// `--acc2-mixer <card>`: which card's mixer this server owns.
     ///
-    /// For the WSJT-X arrangement, where the station's software owns the
-    /// audio and this server owns CAT. `--acc2-audio` opens the capture
-    /// stream exclusively, which would leave WSJT-X with no audio at all;
-    /// but the mixer still needs an owner, because a USB re-enumeration
-    /// reverts capture gain and TX drive and nothing else notices.
+    /// Orthogonal to `--acc2-audio`, which says where the audio *stream*
+    /// comes from. They were briefly mutually exclusive, which was wrong:
+    /// the useful arrangement alongside WSJT-X is a stream taken through
+    /// PipeWire (`--acc2-audio audio:pipewire`, which shares) while the
+    /// mixer is owned on the card itself by name — PipeWire's device names
+    /// do not identify an ALSA card, so the mixer needs telling separately.
+    ///
+    /// On its own it owns the mixer and opens no PCM at all.
     acc2_mixer: Option<String>,
     baud: u32,
     stop_bits: u8,
@@ -852,13 +856,6 @@ fn parse_server_args() -> ServerArgs {
     // Same reasoning: only the console protocol carries audio, so
     // capturing it with nothing to send it to is a sound card held open
     // for nobody.
-    if acc2_audio.is_some() && acc2_mixer.is_some() {
-        eprintln!(
-            "error: --acc2-audio and --acc2-mixer are mutually exclusive; they disagree\n\
-             about who owns the PCM. Use --acc2-mixer when WSJT-X owns the audio."
-        );
-        std::process::exit(1);
-    }
     if acc2_audio.is_some() && console_port.is_none() {
         eprintln!("error: --acc2-audio needs --console-port; nothing else consumes the audio");
         std::process::exit(1);
@@ -1026,12 +1023,13 @@ async fn run_server_mode() {
     });
     #[cfg(not(all(target_os = "linux", feature = "audio-device")))]
     let audio_source = server::audio::AudioSelection::new();
-    // Mixer-only: name the card so its levels are owned, and never touch
-    // the PCM. The capture thread asserts against `requested` whether or
-    // not a stream was ever opened.
-    if let Some(spec) = args.acc2_mixer.clone() {
-        info!("ACC2 mixer owned for {spec} (PCM left to whoever wants it)");
-        audio_source.set_requested(&spec);
+    // Which card's mixer to own. Named explicitly when given, because a
+    // stream taken through PipeWire says nothing about which ALSA card is
+    // behind it. Falls back to the audio spec, which names a card directly
+    // when the server opens one itself.
+    if let Some(card) = args.acc2_mixer.clone() {
+        info!("ACC2 mixer owned on {card}");
+        audio_source.set_mixer_card(&card);
     }
     if let Some(spec) = args.acc2_audio.clone() {
         // Recorded before the open is attempted, so the mixer is still

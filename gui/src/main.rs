@@ -39,6 +39,14 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([900.0, 560.0])
+            // Ask for focus at creation. On Wayland a window cannot raise
+            // itself later -- the compositor decides, and without asking
+            // here the console opens behind whatever had focus and looks
+            // like it failed to start. Requesting it up front is the one
+            // moment the protocol allows.
+            .with_active(true)
+            .with_visible(true)
+            .with_app_id("ts570d")
             .with_title("TS-570D"),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
