@@ -329,11 +329,19 @@ pub const VOLATILE: &[&str] = &["SM", "RM", "BY", "IF", "EX"];
 /// "recalibrate, every menu is suspect" because the AF gain had moved
 /// from 019 to 035, which is what an AF gain does.
 ///
-/// Deliberately just the three continuously-variable controls used during
-/// a QSO. `SH`/`SL` (DSP slope) and `IS` (IF shift) are also front-panel
-/// knobs but are set deliberately for a band or a signal, so a change in
-/// one is worth reporting.
-pub const OPERATOR_CONTROLS: &[&str] = &["AG", "RG", "SQ"];
+/// `FA`/`FB` are here for the same reason and more strongly: the dial is
+/// the most-turned control on any radio, and it moves on every QSO, every
+/// band change and every click of a waterfall. A snapshot still records
+/// where the radio was — that is worth having, and a restore should put
+/// you back — but "the frequency changed" is not evidence that anyone
+/// reconfigured anything. It fired on a 55 Hz difference.
+///
+/// Deliberately not `MD`: a mode change is a deliberate act that says
+/// something about how the station is set up, and it is not continuously
+/// variable. `SH`/`SL` (DSP slope) and `IS` (IF shift) are front-panel
+/// knobs too, but are set for a band or a signal, so a change in one is
+/// worth reporting.
+pub const OPERATOR_CONTROLS: &[&str] = &["AG", "RG", "SQ", "FA", "FB"];
 
 /// Settings a restore must never write back.
 ///
@@ -907,18 +915,20 @@ mod tests {
 
     #[test]
     fn drift_spots_a_changed_cat_setting() {
+        // `PA` (preamp), not `FA`: the dial is an operator control and
+        // moves constantly, so it is reported without being called drift.
         let mut stored = snap();
-        stored.record_setting("FA", "00014074000");
+        stored.record_setting("PA", "1");
         stored.record_setting("MD", "2");
         let mut now = snap();
-        now.record_setting("FA", "00007100000");
+        now.record_setting("PA", "0");
         now.record_setting("MD", "2");
 
         let d = stored.drift(&now);
         assert_eq!(d.settings_changed.len(), 1);
-        assert_eq!(d.settings_changed[0].what, "FA");
-        assert_eq!(d.settings_changed[0].was, "00014074000");
-        assert_eq!(d.settings_changed[0].now, "00007100000");
+        assert_eq!(d.settings_changed[0].what, "PA");
+        assert_eq!(d.settings_changed[0].was, "1");
+        assert_eq!(d.settings_changed[0].now, "0");
         assert!(d.drifted());
     }
 
@@ -1214,13 +1224,49 @@ mod tests {
 
     #[test]
     fn knobs_are_only_the_ones_turned_every_qso() {
-        // Deliberately narrow. SH/SL and IS are front-panel knobs too, but
-        // they are set deliberately for a band or a signal, so a change in
-        // one is worth reporting.
-        assert_eq!(OPERATOR_CONTROLS, &["AG", "RG", "SQ"]);
+        // Deliberately narrow. MD is excluded: a mode change is a
+        // deliberate act about how the station is set up. SH/SL and IS are
+        // front-panel knobs too, but are set for a band or a signal.
+        assert_eq!(OPERATOR_CONTROLS, &["AG", "RG", "SQ", "FA", "FB"]);
+        assert!(!OPERATOR_CONTROLS.contains(&"MD"), "a mode change is real");
         for k in OPERATOR_CONTROLS {
             assert!(!VOLATILE.contains(k), "{k} is a real setting, just a knob");
         }
+    }
+
+    #[test]
+    fn tuning_the_dial_is_not_drift() {
+        // Reported from the bench: "FA was 00014074055 now 00014074000 --
+        // frequency should not be part of the settings". A 55 Hz move
+        // raised "somebody has changed settings, every menu is suspect".
+        let mut stored = snap();
+        stored.record_setting("FA", "00014074055");
+        stored.record_setting("MD", "2");
+        let mut now = snap();
+        now.record_setting("FA", "00014074000");
+        now.record_setting("MD", "2");
+
+        let d = stored.drift(&now);
+        assert!(!d.drifted(), "tuning must not read as a reconfiguration");
+        assert_eq!(d.operator_changed.len(), 1, "but it is still reported");
+        assert_eq!(d.operator_changed[0].what, "FA");
+    }
+
+    #[test]
+    fn the_dial_is_still_captured_and_restorable() {
+        // Not counted as drift is not the same as not recorded: a restore
+        // should put the radio back where it was.
+        let mut s = snap();
+        s.record_setting("FA", "00014074000");
+        assert_eq!(
+            s.settings.get("FA").map(String::as_str),
+            Some("00014074000")
+        );
+        assert!(!VOLATILE.contains(&"FA"), "captured, unlike SM or EX");
+        assert!(
+            !NEVER_RESTORE.contains(&"FA"),
+            "and written back on restore"
+        );
     }
 
     #[test]
