@@ -466,7 +466,12 @@ fn usage_exit() -> ! {
                                       server (host:port), or a local dongle\n\
                                       as rtl:0, rtl:1, ...\n\
            --acc2-audio <endpoint>    the ACC2 receive-audio pair: a PCM\n\
-                                      server (host:port), or a sound device\n\
+                                      server (host:port), or a sound device.\n\
+                                      Opens the capture stream EXCLUSIVELY --\n\
+                                      do not use it alongside WSJT-X.\n\
+           --acc2-mixer <device>      own the card's mixer levels without\n\
+                                      opening its PCM. This is what you want\n\
+                                      when WSJT-X owns the audio.\n\
            --calibration <file>       a snapshot from `ts570d calibrate`,\n\
                                       checked once at startup. Defaults to\n\
                                       ~/.config/ts570d/calibration.json.\n\
@@ -657,6 +662,15 @@ struct ServerArgs {
     /// flags rather than constants.
     acc2_capture: Option<i64>,
     acc2_playback: Option<i64>,
+    /// `--acc2-mixer <device>`: own the card's mixer WITHOUT opening its
+    /// PCM.
+    ///
+    /// For the WSJT-X arrangement, where the station's software owns the
+    /// audio and this server owns CAT. `--acc2-audio` opens the capture
+    /// stream exclusively, which would leave WSJT-X with no audio at all;
+    /// but the mixer still needs an owner, because a USB re-enumeration
+    /// reverts capture gain and TX drive and nothing else notices.
+    acc2_mixer: Option<String>,
     baud: u32,
     stop_bits: u8,
     raw_tcp_port: Option<u16>,
@@ -715,6 +729,7 @@ fn parse_server_args() -> ServerArgs {
     let mut force = false;
     let mut acc2_capture: Option<i64> = None;
     let mut acc2_playback: Option<i64> = None;
+    let mut acc2_mixer: Option<String> = None;
     let mut raw_tcp_port: Option<u16> = None;
     let mut raw_udp_port: Option<u16> = None;
     let mut rigctl_port: Option<u16> = None;
@@ -795,6 +810,7 @@ fn parse_server_args() -> ServerArgs {
             Some("--acc2-audio") => acc2_audio = args_iter.next(),
             Some("--calibration") => calibration = args_iter.next(),
             Some("--force") => force = true,
+            Some("--acc2-mixer") => acc2_mixer = args_iter.next(),
             Some("--acc2-capture") => {
                 acc2_capture = Some(parse_mixer_level(args_iter.next(), "--acc2-capture"))
             }
@@ -836,6 +852,13 @@ fn parse_server_args() -> ServerArgs {
     // Same reasoning: only the console protocol carries audio, so
     // capturing it with nothing to send it to is a sound card held open
     // for nobody.
+    if acc2_audio.is_some() && acc2_mixer.is_some() {
+        eprintln!(
+            "error: --acc2-audio and --acc2-mixer are mutually exclusive; they disagree\n\
+             about who owns the PCM. Use --acc2-mixer when WSJT-X owns the audio."
+        );
+        std::process::exit(1);
+    }
     if acc2_audio.is_some() && console_port.is_none() {
         eprintln!("error: --acc2-audio needs --console-port; nothing else consumes the audio");
         std::process::exit(1);
@@ -857,6 +880,7 @@ fn parse_server_args() -> ServerArgs {
             force,
             acc2_capture,
             acc2_playback,
+            acc2_mixer,
         },
         None => server_usage_exit(),
     }
@@ -1002,6 +1026,13 @@ async fn run_server_mode() {
     });
     #[cfg(not(all(target_os = "linux", feature = "audio-device")))]
     let audio_source = server::audio::AudioSelection::new();
+    // Mixer-only: name the card so its levels are owned, and never touch
+    // the PCM. The capture thread asserts against `requested` whether or
+    // not a stream was ever opened.
+    if let Some(spec) = args.acc2_mixer.clone() {
+        info!("ACC2 mixer owned for {spec} (PCM left to whoever wants it)");
+        audio_source.set_requested(&spec);
+    }
     if let Some(spec) = args.acc2_audio.clone() {
         // Recorded before the open is attempted, so the mixer is still
         // asserted when the PCM belongs to PipeWire or WSJT-X.
