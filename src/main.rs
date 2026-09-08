@@ -319,7 +319,23 @@ fn sdr_devices() -> cat_signal::DeviceList {
 struct ServerDevices {
     if_source: std::sync::Arc<server::spectrum::IfSelection>,
     audio_source: std::sync::Arc<server::audio::AudioSelection>,
+    /// The last device enumeration, and when it was taken.
+    ///
+    /// Enumerating asks ALSA to walk every PCM it knows, including
+    /// plugins this machine has no hardware for -- `oss` fails on a
+    /// missing `/dev/dsp` and libasound prints that to stderr itself,
+    /// which nothing in this program can suppress. A console asking for
+    /// the device list on a timer therefore fills the operator's terminal
+    /// with library noise.
+    ///
+    /// Cached briefly rather than forever: a picker exists to show what
+    /// is plugged in *now*, and an SDR pushed in while it is open should
+    /// appear. `refresh_devices` still forces a re-read.
+    devices: std::sync::Mutex<Option<(std::time::Instant, Vec<cat_signal::DeviceList>)>>,
 }
+
+/// How long a device enumeration stays fresh. See `ServerDevices::devices`.
+const DEVICE_CACHE: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl ServerDevices {
     /// What this bench has wired, as a console should be told it.
@@ -377,7 +393,19 @@ impl cat_signal::DeviceDirectory for ServerDevices {
     fn list(&self) -> Vec<cat_signal::DeviceList> {
         // The same enumeration the local console does, because it is the
         // same machine's hardware and an operator should not see two
-        // different answers depending on where they sat down.
+        // different answers depending on where they sat down -- but
+        // cached, because a console that asks on a timer would otherwise
+        // have libasound print a page of `/dev/dsp` errors per poll.
+        if let Ok(mut slot) = self.devices.lock() {
+            if let Some((taken, cached)) = slot.as_ref() {
+                if taken.elapsed() < DEVICE_CACHE {
+                    return cached.clone();
+                }
+            }
+            let fresh = enumerate_devices();
+            *slot = Some((std::time::Instant::now(), fresh.clone()));
+            return fresh;
+        }
         enumerate_devices()
     }
 
@@ -964,11 +992,11 @@ async fn run_server_mode() {
     if !args.force {
         // Asked first, because it survives the adapter re-enumerating --
         // which is exactly when the device-node check goes blind.
-        if let Some(other) = port_guard::another_server() {
+        if let Some(other) = port_guard::another_server(&args.port) {
             eprintln!("error: {}", port_guard::already_running(&other));
             std::process::exit(1);
         }
-        if let Some(holder) = port_guard::holder_of(std::path::Path::new(&args.port)) {
+        if let Some(holder) = port_guard::contention_on(std::path::Path::new(&args.port)) {
             eprintln!("error: {}", port_guard::refusal(&args.port, &holder));
             std::process::exit(1);
         }
@@ -1054,6 +1082,7 @@ async fn run_server_mode() {
     let devices = std::sync::Arc::new(ServerDevices {
         if_source: std::sync::Arc::clone(&if_source),
         audio_source: std::sync::Arc::clone(&audio_source),
+        devices: std::sync::Mutex::new(None),
     });
     let config = server::ServerConfig {
         raw_tcp_port: args.raw_tcp_port,

@@ -85,6 +85,32 @@ pub fn holder_of(path: &Path) -> Option<PortHolder> {
     None
 }
 
+/// Who would lose their transmitter if this program opened `port`.
+///
+/// [`holder_of`] answers the raw question -- who has this node open. This
+/// answers the one that should decide a refusal, and the two differ on a
+/// pseudo-terminal.
+///
+/// A PTY always has a holder: whoever opened the master, which for the
+/// emulator is the emulator itself. That is the pairing working as
+/// designed, not contention. Nor does the hazard apply -- the reason this
+/// guard exists is that on a real adapter DTR is the PTT line, and a PTY
+/// has no DTR, no PA and no transmitter to unkey. Refusing here would
+/// mean no server could ever be run against the emulator, which is the
+/// only way to test anything without putting the station on the air.
+#[cfg(target_os = "linux")]
+pub fn contention_on(port: &Path) -> Option<PortHolder> {
+    if is_pty(&port.to_string_lossy()) {
+        return None;
+    }
+    holder_of(port)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn contention_on(port: &std::path::Path) -> Option<PortHolder> {
+    holder_of(port)
+}
+
 /// No `/proc` to read; the open itself is the check.
 #[cfg(not(target_os = "linux"))]
 pub fn holder_of(_path: &std::path::Path) -> Option<PortHolder> {
@@ -132,7 +158,7 @@ fn process_name(pid: u32) -> String {
 /// So this asks the other question too: is another one of us already
 /// being a server at all, whatever node it thinks it has.
 #[cfg(target_os = "linux")]
-pub fn another_server() -> Option<PortHolder> {
+pub fn another_server(port: &str) -> Option<PortHolder> {
     let me = std::process::id();
     let exe = running_binary("/proc/self/exe")?;
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
@@ -143,24 +169,77 @@ pub fn another_server() -> Option<PortHolder> {
         if running_binary(entry.path().join("exe")) != Some(exe.clone()) {
             continue;
         }
-        // The first argument after the program name. A TUI or a
-        // `calibrate` run is not a competing server.
         let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
             continue;
         };
-        let mut args = cmdline.split(|b| *b == 0).skip(1);
-        if args.next() == Some(b"server".as_slice()) {
-            return Some(PortHolder {
-                pid,
-                name: process_name(pid),
-            });
+        let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+        // The first argument after the program name. A TUI or a
+        // `calibrate` run is not a competing server.
+        if args.get(1) != Some(&b"server".as_slice()) {
+            continue;
+        }
+        let theirs = port_argument(&args);
+        if !ports_collide(port, theirs.as_deref()) {
+            continue;
+        }
+        return Some(PortHolder {
+            pid,
+            name: process_name(pid),
+        });
+    }
+    None
+}
+
+/// The `--port` a command line asked for.
+#[cfg(target_os = "linux")]
+fn port_argument(args: &[&[u8]]) -> Option<String> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if *arg == b"--port" {
+            return args.next().map(|v| String::from_utf8_lossy(v).into_owned());
+        }
+        if let Some(rest) = arg.strip_prefix(b"--port=".as_slice()) {
+            return Some(String::from_utf8_lossy(rest).into_owned());
         }
     }
     None
 }
 
+/// Whether two servers are contending for one physical link.
+///
+/// The subject of this guard is a single USB adapter whose device *name*
+/// is unstable: when it re-enumerates, the running server keeps a handle
+/// to the old node and a second server starting on the new node sees no
+/// holder at all. So two real device nodes are treated as the same
+/// adapter even when they are spelled differently -- conservative, and
+/// right on a bench with one radio on it.
+///
+/// A pseudo-terminal is the exception, and not a special case bolted on:
+/// a PTY is created by whoever opened its master and cannot be a
+/// re-enumeration of anything. An emulator's PTY is genuinely a different
+/// link from `/dev/ttyUSB0`, and refusing to run a server against the
+/// emulator while the station's real server is up would make it
+/// impossible to test anything without taking the station off the air --
+/// which is the failure this guard exists to prevent, arrived at from the
+/// other direction.
+#[cfg(target_os = "linux")]
+fn ports_collide(mine: &str, theirs: Option<&str>) -> bool {
+    // Nothing on their command line to compare. Assume the worst: this is
+    // the re-enumeration case the guard was written for.
+    let Some(theirs) = theirs else { return true };
+    if mine == theirs {
+        return true;
+    }
+    !(is_pty(mine) || is_pty(theirs))
+}
+
+#[cfg(target_os = "linux")]
+fn is_pty(port: &str) -> bool {
+    port.starts_with("/dev/pts/")
+}
+
 #[cfg(not(target_os = "linux"))]
-pub fn another_server() -> Option<PortHolder> {
+pub fn another_server(_port: &str) -> Option<PortHolder> {
     None
 }
 
@@ -263,6 +342,84 @@ mod tests {
         // Another user's process is unreadable, and that is not an error:
         // it is simply not something we can see.
         assert_eq!(running_binary("/proc/nonexistent/exe"), None);
+    }
+
+    #[test]
+    fn a_pty_with_its_own_emulator_on_the_far_end_is_not_contention() {
+        // A PTY always has a holder -- whoever opened the master. That is
+        // the pairing working, and a PTY has no DTR to unkey anything
+        // with.
+        assert_eq!(contention_on(Path::new("/dev/pts/19")), None);
+    }
+
+    #[test]
+    fn a_real_port_still_reports_its_holder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ttyUSB0");
+        let _held = std::fs::File::create(&path).expect("create");
+        assert_eq!(
+            contention_on(&path).map(|h| h.pid),
+            Some(std::process::id()),
+            "the guard must still fire on a real device node"
+        );
+    }
+
+    #[test]
+    fn the_same_port_named_twice_collides() {
+        assert!(ports_collide("/dev/ttyUSB0", Some("/dev/ttyUSB0")));
+    }
+
+    #[test]
+    fn two_real_device_nodes_are_assumed_to_be_one_re_enumerated_adapter() {
+        // The case the guard exists for: the adapter came back as ttyUSB1
+        // while the running server still holds a handle to ttyUSB0, so
+        // `holder_of` finds nobody on the new node.
+        assert!(ports_collide("/dev/ttyUSB1", Some("/dev/ttyUSB0")));
+    }
+
+    #[test]
+    fn a_pty_never_collides_with_a_real_adapter() {
+        // An emulator's PTY is created fresh by whoever opened its
+        // master; it cannot be a re-enumeration of a USB adapter. Testing
+        // against the emulator must not require taking the station off
+        // the air.
+        assert!(!ports_collide("/dev/pts/19", Some("/dev/ttyUSB0")));
+        assert!(!ports_collide("/dev/ttyUSB0", Some("/dev/pts/19")));
+    }
+
+    #[test]
+    fn two_different_ptys_do_not_collide() {
+        assert!(!ports_collide("/dev/pts/19", Some("/dev/pts/20")));
+    }
+
+    #[test]
+    fn the_same_pty_twice_still_collides() {
+        assert!(ports_collide("/dev/pts/19", Some("/dev/pts/19")));
+    }
+
+    #[test]
+    fn a_server_whose_port_cannot_be_read_is_assumed_to_collide() {
+        // Silence is not evidence of safety.
+        assert!(ports_collide("/dev/ttyUSB0", None));
+    }
+
+    #[test]
+    fn the_port_argument_is_found_in_either_spelling() {
+        let split: Vec<&[u8]> = vec![b"ts570d", b"server", b"--port", b"/dev/ttyUSB0"];
+        assert_eq!(port_argument(&split).as_deref(), Some("/dev/ttyUSB0"));
+        let joined: Vec<&[u8]> = vec![b"ts570d", b"server", b"--port=/dev/pts/9"];
+        assert_eq!(port_argument(&joined).as_deref(), Some("/dev/pts/9"));
+        let absent: Vec<&[u8]> = vec![b"ts570d", b"server", b"--rigctl-port", b"4532"];
+        assert_eq!(port_argument(&absent), None);
+        // `--port` last, with nothing after it.
+        let dangling: Vec<&[u8]> = vec![b"ts570d", b"server", b"--port"];
+        assert_eq!(port_argument(&dangling), None);
+    }
+
+    #[test]
+    fn a_similarly_named_flag_is_not_the_serial_port() {
+        let other: Vec<&[u8]> = vec![b"ts570d", b"server", b"--console-port", b"7400"];
+        assert_eq!(port_argument(&other), None);
     }
 
     #[test]
