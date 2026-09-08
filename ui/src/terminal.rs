@@ -2789,6 +2789,7 @@ async fn ui_task(
         if let Some(feed) = sources.spectrum.as_ref() {
             feed.retune(state.vfo_a_hz);
             view.spectrum = feed.frames();
+            view.spectrum_live = feed.is_live();
             if let Some(fault) = feed.fault() {
                 view.message = Some(fault);
             }

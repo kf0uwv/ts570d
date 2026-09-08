@@ -70,8 +70,22 @@ pub struct SpectrumFeed {
     dial_hz: Arc<AtomicU64>,
     /// Set once the thread has stopped, with why.
     fault: Arc<Mutex<Option<String>>>,
+    /// When a frame last arrived.
+    ///
+    /// `fault` catches a source that *errors*. It does not catch one that
+    /// simply stops producing, and `frames` keeps its history either way
+    /// -- so the SOURCE tab reported the tap's centre and span in the
+    /// streaming colour over a waterfall that had stopped scrolling.
+    last_at: Arc<Mutex<Option<std::time::Instant>>>,
     running: Arc<AtomicBool>,
 }
+
+/// How long without a frame before the tap is no longer feeding.
+///
+/// Frames arrive around thirty a second on this bench, so two seconds is
+/// some sixty missed in a row -- not a hiccup, and short enough that an
+/// operator finds out.
+const SPECTRUM_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl SpectrumFeed {
     /// Start feeding from `source`.
@@ -88,11 +102,13 @@ impl SpectrumFeed {
         let frames = Arc::new(Mutex::new(Vec::new()));
         let dial = Arc::new(AtomicU64::new(dial_hz));
         let fault = Arc::new(Mutex::new(None));
+        let last_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
         let running = Arc::new(AtomicBool::new(true));
 
         let t_frames = Arc::clone(&frames);
         let t_dial = Arc::clone(&dial);
         let t_fault = Arc::clone(&fault);
+        let t_last_at = Arc::clone(&last_at);
         let t_running = Arc::clone(&running);
 
         std::thread::Builder::new()
@@ -117,6 +133,9 @@ impl SpectrumFeed {
                             let mut held = t_frames.lock().expect("spectrum lock");
                             held.insert(0, frame);
                             held.truncate(HISTORY);
+                            drop(held);
+                            *t_last_at.lock().expect("spectrum arrival lock") =
+                                Some(std::time::Instant::now());
                         }
                         Err(e) => {
                             *t_fault.lock().expect("spectrum fault lock") =
@@ -132,8 +151,19 @@ impl SpectrumFeed {
             frames,
             dial_hz: dial,
             fault,
+            last_at,
             running,
         }
+    }
+
+    /// Whether the source is still producing.
+    ///
+    /// Not "has it ever". See [`Self::last_at`].
+    pub fn is_live(&self) -> bool {
+        self.last_at
+            .lock()
+            .expect("spectrum arrival lock")
+            .is_some_and(|t| t.elapsed() < SPECTRUM_STALE_AFTER)
     }
 
     /// Tell the source the dial has moved.
