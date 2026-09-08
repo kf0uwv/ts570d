@@ -91,6 +91,28 @@ pub fn holder_of(_path: &std::path::Path) -> Option<PortHolder> {
     None
 }
 
+/// The binary behind a `/proc/<pid>/exe` link, with the kernel's
+/// ` (deleted)` marker removed.
+///
+/// After a rebuild the kernel reports a running process's exe as
+/// `.../ts570d (deleted)`, because the inode it is executing no longer has
+/// that name. Comparing the raw links then says two processes running the
+/// same program are running different ones -- which is how three servers
+/// came to be running at once on 2026-09-07, each pulling DTR low on open
+/// and unkeying the transmitter mid-transmission. The same marker had
+/// already defeated the kill loop in `scratchpad/srv.sh` earlier the same
+/// evening.
+#[cfg(target_os = "linux")]
+fn running_binary<P: AsRef<Path>>(link: P) -> Option<String> {
+    let path = std::fs::read_link(link).ok()?;
+    let text = path.to_string_lossy();
+    Some(
+        text.strip_suffix(" (deleted)")
+            .unwrap_or(text.as_ref())
+            .to_string(),
+    )
+}
+
 #[cfg(target_os = "linux")]
 fn process_name(pid: u32) -> String {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
@@ -112,13 +134,13 @@ fn process_name(pid: u32) -> String {
 #[cfg(target_os = "linux")]
 pub fn another_server() -> Option<PortHolder> {
     let me = std::process::id();
-    let exe = std::fs::read_link("/proc/self/exe").ok()?;
+    let exe = running_binary("/proc/self/exe")?;
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let pid: u32 = match entry.file_name().to_str().and_then(|s| s.parse().ok()) {
             Some(p) if p != me => p,
             _ => continue,
         };
-        if std::fs::read_link(entry.path().join("exe")).ok().as_deref() != Some(exe.as_path()) {
+        if running_binary(entry.path().join("exe")) != Some(exe.clone()) {
             continue;
         }
         // The first argument after the program name. A TUI or a
@@ -216,6 +238,31 @@ mod tests {
             Some(std::process::id()),
             "a symlink must resolve to the node the holder opened"
         );
+    }
+
+    #[test]
+    fn a_rebuilt_binary_is_still_the_same_program() {
+        // The kernel marks a running process's exe as "(deleted)" once the
+        // file has been replaced. Comparing raw links then treats two
+        // instances of the same program as different programs -- which let
+        // three servers run at once, each pulling DTR low on open and
+        // unkeying the transmitter mid-transmission.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("ts570d");
+        std::fs::write(&real, b"").expect("write");
+        let link = dir.path().join("exe");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let seen = running_binary(&link).expect("should resolve");
+        assert_eq!(seen, real.to_string_lossy());
+        assert!(!seen.ends_with(" (deleted)"));
+    }
+
+    #[test]
+    fn a_missing_link_resolves_to_nothing() {
+        // Another user's process is unreadable, and that is not an error:
+        // it is simply not something we can see.
+        assert_eq!(running_binary("/proc/nonexistent/exe"), None);
     }
 
     #[test]

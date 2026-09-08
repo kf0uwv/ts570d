@@ -541,6 +541,11 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
     poll!("SM", radio.get_smeter(), |s: u16| {
         state.smeter = s;
     });
+    // This console polls every field in the reference rail, so it may
+    // draw them. A network console cannot -- the console protocol carries
+    // none of them -- and must show dashes instead of the struct's
+    // defaults. See `RadioDisplay::levels_known`.
+    state.levels_known = true;
     poll!("AF", radio.get_af_gain(), |v: u8| {
         state.af_gain = v;
     });
