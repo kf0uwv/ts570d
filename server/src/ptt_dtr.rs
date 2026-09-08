@@ -43,6 +43,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use tracing::{info, warn};
 
 use cat_server::{BrokerCatSession, TaskFn};
 
@@ -105,10 +106,11 @@ impl PttDtr {
     ///
     /// Takes an owned session so it can be driven from a spawned watchdog or
     /// from `Drop`, neither of which can borrow the caller's.
-    async fn force_release(keyed: Rc<Cell<bool>>, session: BrokerCatSession) {
+    async fn force_release(keyed: Rc<Cell<bool>>, session: BrokerCatSession, why: &'static str) {
         if !keyed.get() {
             return;
         }
+        warn!("PTT: released ({why}) -- this was NOT a client asking to stop");
         let _ = session.submit_task(Self::line_task(false)).await;
         keyed.set(false);
     }
@@ -123,7 +125,11 @@ impl PttDtr {
             return;
         }
         let keyed = Rc::clone(&self.keyed);
-        monoio::spawn(Self::force_release(keyed, session));
+        monoio::spawn(Self::force_release(
+            keyed,
+            session,
+            "the client that keyed it disconnected",
+        ));
     }
 
     /// Assert DTR, ordered against CAT traffic.
@@ -136,6 +142,12 @@ impl PttDtr {
             return Err(String::from_utf8_lossy(&out[4..]).into_owned());
         }
         self.keyed.set(true);
+        // Every key and every release is logged, with what caused it.
+        // Nothing here said anything before, so "the radio flips back to
+        // receive part-way through a transmission" could only be guessed
+        // at -- a client's `T 0`, a dropped connection and the watchdog
+        // all look identical from outside.
+        info!("PTT: keyed (DTR asserted)");
 
         // Arm the hard timeout. Independent of the client: it fires whether
         // or not anything ever sends `T 0`, and whether or not the client is
@@ -146,7 +158,8 @@ impl PttDtr {
         monoio::spawn(async move {
             monoio::time::sleep(MAX_KEY_DOWN).await;
             if keyed.get() {
-                Self::force_release(keyed, watchdog_session).await;
+                Self::force_release(keyed, watchdog_session, "the hard key-down timeout expired")
+                    .await;
             }
         });
         Ok(())
@@ -154,6 +167,7 @@ impl PttDtr {
 
     /// De-assert DTR. Must not queue — see this module's doc comment.
     pub async fn release(&self, session: &BrokerCatSession) -> Result<(), String> {
+        info!("PTT: released (a client asked to stop transmitting)");
         let result = session.submit_task(Self::line_task(false)).await;
         // Clear the flag even if the release reported failure: believing we
         // are still keyed when we may not be is the safer error, and the

@@ -41,6 +41,7 @@
 //! method (unlike e.g. `ft991a`'s radio crate).
 
 use std::ops::{Deref, DerefMut};
+use tracing::info;
 
 use async_trait::async_trait;
 use cat_transport_core::{CatSession, TransportError};
@@ -92,6 +93,9 @@ impl<S: CatSession> Drop for RigctlTs570d<S> {
     fn drop(&mut self) {
         if let Some((ptt, session)) = &self.ptt {
             if ptt.is_keyed() {
+                tracing::warn!(
+                    "rigctl: the client's connection dropped while still keyed -- releasing PTT"
+                );
                 let handoff =
                     cat_server::BrokerCatSession::new(session.handle(), session.client_id());
                 ptt.release_on_disconnect(handoff);
@@ -144,6 +148,7 @@ where
     }
 
     async fn transmit(&mut self) -> Result<(), Self::Error> {
+        info!("rigctl: a client asked to TRANSMIT");
         match &self.ptt {
             // DTR, ordered against CAT: keying must not overtake the command
             // that set the mode or frequency.
@@ -156,6 +161,7 @@ where
     }
 
     async fn receive(&mut self) -> Result<(), Self::Error> {
+        info!("rigctl: a client asked to RECEIVE");
         match &self.ptt {
             Some((ptt, session)) => ptt
                 .release(session)
