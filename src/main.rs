@@ -962,6 +962,12 @@ async fn run_server_mode() {
     // a serial device permits multiple openers, and the second one to
     // arrive silently takes the modem-control lines with it.
     if !args.force {
+        // Asked first, because it survives the adapter re-enumerating --
+        // which is exactly when the device-node check goes blind.
+        if let Some(other) = port_guard::another_server() {
+            eprintln!("error: {}", port_guard::already_running(&other));
+            std::process::exit(1);
+        }
         if let Some(holder) = port_guard::holder_of(std::path::Path::new(&args.port)) {
             eprintln!("error: {}", port_guard::refusal(&args.port, &holder));
             std::process::exit(1);

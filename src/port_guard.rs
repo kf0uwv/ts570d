@@ -98,6 +98,63 @@ fn process_name(pid: u32) -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
+/// Another instance of this program already running as a server.
+///
+/// `holder_of` asks "who has this device node open", which is the right
+/// question until the adapter re-enumerates. Then the running server holds
+/// a handle to the *old* node, the new node has nobody on it, and a second
+/// server starts happily. Observed 2026-09-07: three servers at once, each
+/// opening the port with `initial_dtr: false` -- and DTR is the PTT line,
+/// so every start unkeyed a transmitter mid-transmission.
+///
+/// So this asks the other question too: is another one of us already
+/// being a server at all, whatever node it thinks it has.
+#[cfg(target_os = "linux")]
+pub fn another_server() -> Option<PortHolder> {
+    let me = std::process::id();
+    let exe = std::fs::read_link("/proc/self/exe").ok()?;
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let pid: u32 = match entry.file_name().to_str().and_then(|s| s.parse().ok()) {
+            Some(p) if p != me => p,
+            _ => continue,
+        };
+        if std::fs::read_link(entry.path().join("exe")).ok().as_deref() != Some(exe.as_path()) {
+            continue;
+        }
+        // The first argument after the program name. A TUI or a
+        // `calibrate` run is not a competing server.
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let mut args = cmdline.split(|b| *b == 0).skip(1);
+        if args.next() == Some(b"server".as_slice()) {
+            return Some(PortHolder {
+                pid,
+                name: process_name(pid),
+            });
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn another_server() -> Option<PortHolder> {
+    None
+}
+
+/// What to tell an operator who is already running one.
+pub fn already_running(other: &PortHolder) -> String {
+    format!(
+        "another `ts570d server` is already running as {other}.\n\
+         \n\
+         Two servers both own the serial port, and both set DTR low when they open\n\
+         it -- which on this station unkeys the transmitter, mid-transmission if the\n\
+         timing is unlucky. They also interleave CAT traffic on one link.\n\
+         \n\
+         Stop it first, or pass --force if you are certain this is safe."
+    )
+}
+
 /// What to tell an operator who is about to lose their transmitter.
 pub fn refusal(port: &str, holder: &PortHolder) -> String {
     format!(
