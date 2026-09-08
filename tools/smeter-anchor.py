@@ -28,6 +28,20 @@ Park the radio on any steady signal you can see move the meter -- a
 broadcast carrier in AM is ideal, an SSB station is not. The script never
 transmits, never touches PC, and puts every setting back where it found
 it, including if you interrupt it.
+
+# The other thing this settles
+
+The CAT reference gives `SM` a range of `0000~0015`; the code assumes
+`0~30` and places S9 at raw 20. If the manual is right the radio can
+never produce a reading the console calls S9. A sweep of eight broadcast
+bands could not push the meter past 7, so it is unsettled -- see
+troubleshooting-plan.md item 48.
+
+**So the strongest signal you can find is the useful one here.** If the
+raw value climbs above 15 the code is right. If it pins at 15 while the
+panel meter keeps climbing past S9, the range and the S-unit table both
+want halving. This script prints the highest raw it sees for exactly that
+reason.
 """
 
 import json
@@ -127,6 +141,8 @@ def main():
             raw = statistics.median(v)
             print(f"\n  {label}")
             print(f"  CAT reports raw {raw:.1f}  (min {min(v)}, max {max(v)})")
+            if max(v) > 15:
+                print("  ** raw above 15: the 0-30 range is right, the manual is not")
             db = ask_s_unit("  What does the FRONT PANEL read? (e.g. 5, 9, 9+20, or q) ")
             if db is None:
                 print("\n  stopped at your request")
@@ -161,6 +177,10 @@ def main():
         print("    &[" + ", ".join(str(t) for t in table) + ", u16::MAX]")
         print("\nCompare against the current table before adopting it:")
         print("    &[2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 24, 28, u16::MAX]")
+        if raw_at_s9 < 15:
+            print("\nNote: S9 lands below raw 15, which is where the CAT")
+            print("reference says the scale ends. That supports halving the")
+            print("range as well as the table -- see item 48.")
         out = {
             "points": [{"raw": r, "panel_db_over_s0": d} for r, d in points],
             "db_per_raw_count": round(db_per_count, 3),

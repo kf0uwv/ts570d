@@ -127,6 +127,31 @@ const MODES: &[ModeDescriptor] = &[
 const METERS: &[MeterDescriptor] = &[
     MeterDescriptor {
         kind: MeterKind::S,
+        // **Disputed.** The CAT reference's parameter table gives the
+        // `SM` command a range of `0000~0015`, half of this, and adds
+        // "Relative values are output" -- so the manual declines to
+        // define what the number means as well as disagreeing about how
+        // far it goes.
+        //
+        // Thirty is kept because it is what this radio's console has
+        // always drawn and because a controlled measurement supports it:
+        // three preamp steps, each sized on the IF tap rather than
+        // assumed, put a raw count at 2.95 dB, which is the 3.0 dB a
+        // count that a 0-30 scale spanning S0..S9+30 implies. Fifteen
+        // would make it 6.0.
+        //
+        // Against that, the operator's own reading of the front panel --
+        // S7 to S9+10 while `SM;` returned 6 to 10 -- works out at 5.5 dB
+        // a count, which is the manual's number. One is a measurement
+        // against a known step and the other a glance at a bouncing
+        // needle mid-FT8-burst, which would settle it if the manual did
+        // not agree with the glance.
+        //
+        // The test is one strong signal: if `SM;` ever answers above 15
+        // this is right, and if it pins at 15 while the panel climbs past
+        // S9 then this and `SUnitScale::TS570D` both want halving. A
+        // sweep of eight broadcast bands on 2026-09-08 reached raw 7, so
+        // it is still open. See troubleshooting-plan.md item 48.
         raw_range: RawRange::new(0, 30),
         active_on_transmit: false,
         s_units: Some(SUnitScale::TS570D),
