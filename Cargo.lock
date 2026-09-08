@@ -2805,6 +2805,7 @@ dependencies = [
  "cat-signal",
  "cat-transport-core",
  "cat-transport-serial",
+ "cat-ui-ratatui",
  "mockall",
  "monoio",
  "serde",

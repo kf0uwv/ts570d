@@ -39,6 +39,11 @@ mockall = { workspace = true }
 # wire-framing-level unit tests in ts570d.rs. Never used by production code
 # (radio never depends on a concrete transport).
 cat-transport-serial = { workspace = true }
+# Test-only: the terminal console's own `natural` density, so the layout
+# test checks the number that renderer actually uses rather than a copy of
+# it that can drift. This crate never depends on a renderer otherwise --
+# a radio describes its console, it does not draw it.
+cat-ui-ratatui = { workspace = true }
 
 [features]
 default = []
