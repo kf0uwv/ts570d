@@ -245,6 +245,16 @@ impl NativeConsoleRadio {
     }
 }
 
+impl NativeConsoleRadio {
+    /// The occasional settings, if the server has read them yet.
+    fn levels(&self) -> RadioResult<cat_native::RadioLevels> {
+        self.state
+            .as_ref()
+            .and_then(|s| s.levels)
+            .ok_or(RadioError::NotImplemented)
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl Radio for NativeConsoleRadio {
     async fn get_vfo_a(&mut self) -> RadioResult<Frequency> {
@@ -319,6 +329,74 @@ impl Radio for NativeConsoleRadio {
             ctcss_tone: 0,
             tone_number: 0,
         })
+    }
+
+    // ── the occasional settings ────────────────────────────────────
+    //
+    // These used to report `NotImplemented`, because `RadioState` did not
+    // carry them. The console skipped the failed poll and kept whatever
+    // `RadioDisplay::default()` held -- so a network console displayed
+    // `AF 200` at a radio reading `AG034`, and `PRE off` at a radio with
+    // its preamp on, confidently and indistinguishably from a reading.
+    //
+    // The protocol carries them now, read on the server's slow clock.
+    // Still `NotImplemented` until the first slow poll has landed, which
+    // is the honest answer for "nobody has read this yet".
+
+    async fn get_af_gain(&mut self) -> RadioResult<u8> {
+        self.levels().map(|l| l.af_gain)
+    }
+
+    async fn get_rf_gain(&mut self) -> RadioResult<u8> {
+        self.levels().map(|l| l.rf_gain)
+    }
+
+    async fn get_squelch(&mut self) -> RadioResult<u8> {
+        self.levels().map(|l| l.squelch)
+    }
+
+    async fn get_mic_gain(&mut self) -> RadioResult<u8> {
+        self.levels().map(|l| l.mic_gain)
+    }
+
+    async fn get_power(&mut self) -> RadioResult<u8> {
+        self.levels().map(|l| l.power_pct)
+    }
+
+    async fn get_agc(&mut self) -> RadioResult<u8> {
+        self.levels().map(|l| l.agc)
+    }
+
+    async fn get_noise_reduction(&mut self) -> RadioResult<u8> {
+        self.levels().map(|l| l.noise_reduction)
+    }
+
+    async fn get_antenna(&mut self) -> RadioResult<u8> {
+        self.levels().map(|l| l.antenna)
+    }
+
+    async fn get_noise_blanker(&mut self) -> RadioResult<bool> {
+        self.levels().map(|l| l.noise_blanker)
+    }
+
+    async fn get_preamp(&mut self) -> RadioResult<bool> {
+        self.levels().map(|l| l.preamp)
+    }
+
+    async fn get_attenuator(&mut self) -> RadioResult<bool> {
+        self.levels().map(|l| l.attenuator)
+    }
+
+    async fn get_speech_processor(&mut self) -> RadioResult<bool> {
+        self.levels().map(|l| l.speech_processor)
+    }
+
+    async fn get_vox(&mut self) -> RadioResult<bool> {
+        self.levels().map(|l| l.vox)
+    }
+
+    async fn get_frequency_lock(&mut self) -> RadioResult<bool> {
+        self.levels().map(|l| l.freq_lock)
     }
 
     /// This radio reports IF shift as a direction and a magnitude, where

@@ -144,7 +144,22 @@ where
     }
 
     async fn get_transmitting(&mut self) -> Result<bool, Self::Error> {
-        self.radio.get_information().await.map(|info| info.tx_rx)
+        // When this server drives PTT itself, it already knows the answer:
+        // it set the line. Reading `IF;` to find out costs 38 bytes back
+        // over a 9600-baud link -- measured at a 319 ms median against 4 ms
+        // for the DTR ioctl that keys the radio -- and `t` is the command a
+        // client polls *during* a transmission. Spending a third of a
+        // second of the shared link on a question we can answer from a
+        // `Cell<bool>` is how a keying command ends up queued behind a
+        // state read.
+        //
+        // Falls back to the radio when this server is not the thing
+        // keying: then `IF;` genuinely is the only source, and a front
+        // panel or another client may have keyed it.
+        match &self.ptt {
+            Some((ptt, _)) => Ok(ptt.is_keyed()),
+            None => self.radio.get_information().await.map(|info| info.tx_rx),
+        }
     }
 
     async fn transmit(&mut self) -> Result<(), Self::Error> {
@@ -233,6 +248,17 @@ where
     /// the text.
     fn capabilities() -> Option<&'static cat_framework::capabilities::RadioCapabilities> {
         Some(&radio::capabilities::TS570D)
+    }
+
+    /// Lets the rigctl cache answer `m` without a round trip.
+    ///
+    /// Safe to implement here because `radio::capabilities::to_mode` is
+    /// one half of an exact bijection with `from_mode` -- the eight modes
+    /// this radio has, each with exactly one `ModeId`. `None` for a
+    /// `ModeId` this radio does not have (`DataUsb`, `C4fm`), which sends
+    /// the read to the wire rather than reporting a near miss.
+    fn mode_from_id(id: cat_framework::capabilities::ModeId) -> Option<Self::Mode> {
+        radio::capabilities::to_mode(id)
     }
 }
 
@@ -386,6 +412,38 @@ mod tests {
         );
         assert!(caps.vfos.rit_hz.is_some(), "no RIT limit to generate from");
         assert!(caps.rx_range.min_hz < caps.rx_range.max_hz);
+    }
+
+    #[test]
+    fn every_mode_survives_the_round_trip_through_a_mode_id() {
+        // The cache answers `m` from a `ModeId`, so a mapping that is not
+        // exactly one-to-one would report the radio in a mode it is not
+        // in. Checked in both directions over every mode this radio has.
+        use radio::capabilities::{from_mode, to_mode};
+        for mode in [
+            Mode::Lsb,
+            Mode::Usb,
+            Mode::Cw,
+            Mode::Fm,
+            Mode::Am,
+            Mode::Fsk,
+            Mode::CwReverse,
+            Mode::FskReverse,
+        ] {
+            assert_eq!(
+                to_mode(from_mode(mode)),
+                Some(mode),
+                "{mode:?} must come back as itself"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mode_this_radio_lacks_has_no_mapping() {
+        // Sends the read to the wire rather than reporting a near miss.
+        use cat_framework::capabilities::ModeId;
+        assert_eq!(radio::capabilities::to_mode(ModeId::DataUsb), None);
+        assert_eq!(radio::capabilities::to_mode(ModeId::C4fm), None);
     }
 
     #[test]

@@ -77,6 +77,40 @@ where
             // already declares. Reporting one would contradict it.
             filter_width_hz: None,
             meters,
+            // Filled in by the pump on its own slower clock, so this read
+            // stays one `IF;` plus one `SM;`.
+            levels: None,
+        })
+    }
+
+    /// The fourteen settings the reference rail shows.
+    ///
+    /// Read here rather than in `state` because they belong on a slower
+    /// clock -- fourteen CAT commands at the dial's rate would be most of
+    /// a 9600-baud link. `cat_rigctl` calls this every few seconds.
+    ///
+    /// All or nothing: a partial answer would put a real value beside a
+    /// default and there would be no way for a console to tell which was
+    /// which. That is precisely the bug this exists to fix -- a network
+    /// console showed `AF 200` at a radio reading `AG034`, because the
+    /// protocol carried none of these and the console drew its own struct
+    /// defaults with total confidence.
+    async fn levels(&mut self) -> Option<cat_native::RadioLevels> {
+        Some(cat_native::RadioLevels {
+            af_gain: self.0.get_af_gain().await.ok()?,
+            rf_gain: self.0.get_rf_gain().await.ok()?,
+            squelch: self.0.get_squelch().await.ok()?,
+            mic_gain: self.0.get_mic_gain().await.ok()?,
+            power_pct: self.0.get_power().await.ok()?,
+            agc: self.0.get_agc().await.ok()?,
+            noise_reduction: self.0.get_noise_reduction().await.ok()?,
+            antenna: self.0.get_antenna().await.ok()?,
+            noise_blanker: self.0.get_noise_blanker().await.ok()?,
+            preamp: self.0.get_preamp().await.ok()?,
+            attenuator: self.0.get_attenuator().await.ok()?,
+            speech_processor: self.0.get_speech_processor().await.ok()?,
+            vox: self.0.get_vox().await.ok()?,
+            freq_lock: self.0.get_frequency_lock().await.ok()?,
         })
     }
 

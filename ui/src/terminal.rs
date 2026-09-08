@@ -496,13 +496,15 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
         ($label:expr, $expr:expr, $ok:expr) => {
             match $expr.await {
                 Ok(v) => $ok(v),
-                // A field this link cannot reach is not a fault. Over the
-                // native console protocol most of this radio's controls
-                // have no wire representation, and reporting each one as
-                // an error would put a permanent banner over a console
-                // that is working exactly as it can. The field simply
-                // stays at its default, which is what an unread field
-                // should look like.
+                // A field this link cannot reach is not a fault, and
+                // reporting each one as an error would put a permanent
+                // banner over a console working exactly as it can.
+                //
+                // The field stays at its struct default -- which is NOT
+                // what an unread field should look like, and used to be
+                // drawn as though it were a reading. `levels_known` is
+                // what keeps that honest now: unless a read answers, the
+                // rail draws dashes rather than the default.
                 Err(radio::RadioError::NotImplemented) => {}
                 Err(e) => {
                     if state.poll_errors.len() < 20 {
@@ -541,13 +543,19 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
     poll!("SM", radio.get_smeter(), |s: u16| {
         state.smeter = s;
     });
-    // This console polls every field in the reference rail, so it may
-    // draw them. A network console cannot -- the console protocol carries
-    // none of them -- and must show dashes instead of the struct's
-    // defaults. See `RadioDisplay::levels_known`.
-    state.levels_known = true;
+    // Cleared, then set by the first level read that actually answers.
+    //
+    // Over a serial link every one of these is a real CAT command and they
+    // all succeed. Over the console protocol they are served from the
+    // server's slow-poll block, which is absent until the first slow poll
+    // lands -- and `poll!` leaves a failed read at its struct default, so
+    // claiming the rail is known before one has answered would draw
+    // `AF 200` at a radio reading `AG034`. They share one source, so one
+    // answering means all did. See `RadioDisplay::levels_known`.
+    state.levels_known = false;
     poll!("AF", radio.get_af_gain(), |v: u8| {
         state.af_gain = v;
+        state.levels_known = true;
     });
     poll!("RF", radio.get_rf_gain(), |v: u8| {
         state.rf_gain = v;
