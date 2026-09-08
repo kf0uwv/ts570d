@@ -50,7 +50,12 @@ fn main() {
         cat_ui_egui::theme::Palette::from_theme(&radio::console_layout::theme()),
     );
     console.demo_capabilities({
-        let mut c = gui::demo::ts570d();
+        // Derived from this radio's own declaration, never transcribed.
+        // The copy this replaced listed four meters where the radio
+        // declares five, so every still taken from it was missing the
+        // compression meter -- and a meter absent from a rail looks
+        // exactly like a radio that does not have one.
+        let mut c = cat_native::CapabilitiesWire::from(&radio::capabilities::TS570D);
         c.theme = Some(radio::console_layout::theme());
         c.layout = Some(radio::console_layout::layout());
         c
