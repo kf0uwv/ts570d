@@ -488,7 +488,41 @@ async fn yield_sleep(duration: Duration) {
 /// `state.poll_errors` is cleared at the start of each call and re-populated
 /// with any errors from this cycle. Previous values are preserved when a
 /// getter fails.
-async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
+/// Consecutive cycles without an essential read before the console stops
+/// calling itself linked.
+///
+/// Three, so a single dropped frame on a serial link does not flap the
+/// indicator, and an operator learns within about a second that what they
+/// are looking at has stopped being current.
+const FAIL_CYCLES_BEFORE_LOST: u32 = 3;
+
+/// The new failure count, and whether the console is still linked.
+///
+/// Driven by whether the essential read answered, not by how many errors
+/// were counted. `poll_radio_state` deliberately swallows
+/// `NotImplemented` without recording it -- a field this link cannot
+/// reach is not a fault -- so an error count is a measure of how many
+/// *reachable* fields went wrong, which is not the same question. When
+/// the server went away, a cycle produced four errors against a threshold
+/// of ten and the console went on saying "linked" beside `IF: connection
+/// lost`.
+fn link_health(essential: bool, fail_cycles: u32) -> (u32, bool) {
+    let cycles = if essential {
+        0
+    } else {
+        fail_cycles.saturating_add(1)
+    };
+    (cycles, cycles < FAIL_CYCLES_BEFORE_LOST)
+}
+
+/// Poll the radio into `state`, and say whether the **essential** read
+/// answered.
+///
+/// `IF` is the essential one: it carries the dial, the mode and the
+/// keyed state. Everything else on this console is detail beside it, and
+/// a console that cannot read `IF` is not talking to a radio, whatever
+/// else it managed.
+async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) -> bool {
     radio.flush_rx();
     state.poll_errors.clear();
 
@@ -515,10 +549,12 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
         };
     }
 
+    let mut essential = false;
     poll!(
         "IF",
         radio.get_information(),
         |info: radio::InformationResponse| {
+            essential = true;
             state.vfo_a_hz = info.frequency.hz();
             state.mode = info.mode.name().to_string();
             // Beside the label, not instead of it: the label is what an
@@ -633,6 +669,7 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
     poll!("FS", radio.get_fine_step(), |v: bool| {
         state.fine_step = v;
     });
+    essential
 }
 
 /// How many fields the reference rail draws, and therefore how many reads
@@ -2553,27 +2590,43 @@ async fn radio_task<R: Radio + 'static>(
 ) {
     let mut fail_cycles: u32 = 0;
     let mut if_shift_dir: char = ' ';
+    // Carried between cycles rather than rebuilt. Every cycle used to
+    // start from `RadioDisplay::default()`, so any field a poll failed to
+    // set fell back to an *invented* value -- and the default dial is
+    // 14_000_000. Kill the server under an attached console and it drew
+    // `14.000.000 MHz` at a radio sitting on 14.074.000: not stale, not
+    // blank, just wrong, and indistinguishable from a reading.
+    //
+    // Holding the last reading is the same choice the server makes for
+    // its own cache, and for the same reason: one missed poll on a serial
+    // link is ordinary, and blanking on each one would make the whole
+    // console flicker between known and unknown. What has to be right is
+    // that the operator is told when to stop trusting it -- which is what
+    // `connected` is for, below.
+    let mut state = RadioDisplay {
+        initializing: false,
+        ..RadioDisplay::default()
+    };
 
     loop {
-        // 1. Poll radio state.
-        let mut state = RadioDisplay {
-            initializing: false,
-            ..RadioDisplay::default()
-        };
-        poll_radio_state(&mut radio, &mut state).await;
+        // 1. Poll radio state, over the top of the last one.
+        let essential = poll_radio_state(&mut radio, &mut state).await;
 
         // 2. Update connection health.
-        const FAIL_THRESHOLD: usize = 10;
-        if state.poll_errors.len() >= FAIL_THRESHOLD {
-            fail_cycles = fail_cycles.saturating_add(1);
-        } else {
-            fail_cycles = 0;
-        }
-        state.connected = fail_cycles < 3;
+        //
+        // Judged on whether the essential read answered, not on how many
+        // errors were counted. `poll!` deliberately swallows
+        // `NotImplemented` without recording it -- a field this link
+        // cannot reach is not a fault -- so when the server went away the
+        // cycle produced four errors against a threshold of ten, and the
+        // console went on saying "linked" beside `IF: connection lost`.
+        let linked;
+        (fail_cycles, linked) = link_health(essential, fail_cycles);
+        state.connected = linked;
         state.initializing = false;
 
         // 3. Send state snapshot to UI task.
-        ch_send(&update_tx, RadioUpdate::State(state));
+        ch_send(&update_tx, RadioUpdate::State(state.clone()));
 
         // 4. Process all pending commands from the UI task.
         for cmd in ch_recv_all(&cmd_rx) {
@@ -3280,5 +3333,53 @@ mod console_action_tests {
                 _ => panic!("{hz} Hz produced the wrong action"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_link_that_answers_is_linked() {
+        assert_eq!(link_health(true, 0), (0, true));
+    }
+
+    #[test]
+    fn one_missed_cycle_does_not_flap_the_indicator() {
+        // A dropped frame on a serial link is ordinary. An indicator that
+        // reported it would cry wolf often enough to be ignored.
+        let (cycles, linked) = link_health(false, 0);
+        assert_eq!(cycles, 1);
+        assert!(linked);
+    }
+
+    #[test]
+    fn a_link_that_stops_answering_is_reported_lost() {
+        // The bug this replaced: the console said "linked" beside
+        // `IF: connection lost` because the old rule needed ten recorded
+        // errors and the failure produced four.
+        let mut cycles = 0;
+        let mut linked = true;
+        for _ in 0..FAIL_CYCLES_BEFORE_LOST {
+            (cycles, linked) = link_health(false, cycles);
+        }
+        assert!(!linked, "after {cycles} silent cycles the link is gone");
+    }
+
+    #[test]
+    fn one_good_read_clears_the_count() {
+        let (cycles, linked) = link_health(true, 99);
+        assert_eq!(cycles, 0);
+        assert!(linked);
+    }
+
+    #[test]
+    fn a_long_outage_does_not_overflow_the_count() {
+        let mut cycles = u32::MAX - 1;
+        for _ in 0..5 {
+            (cycles, _) = link_health(false, cycles);
+        }
+        assert_eq!(cycles, u32::MAX);
     }
 }
