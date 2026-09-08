@@ -160,6 +160,36 @@ where
         self.radio.set_tx_vfo(u8::from(on)).await
     }
 
+    /// The RIT offset, from the `IF` record that carries it already.
+    ///
+    /// Zero when RIT is off: the radio keeps the offset across the switch
+    /// and reporting it while it is not applied would describe a receiver
+    /// that is not the one listening.
+    ///
+    /// There is no matching setter. This radio's CAT set has `RC` to
+    /// clear the offset and `RU`/`RD` to step it, and nothing that takes
+    /// a frequency -- so `I`/`X` stay refused rather than pretending, and
+    /// an operator who needs an offset sets it at the front panel.
+    async fn get_rit_hz(&mut self) -> Result<i32, Self::Error> {
+        let info = self.radio.get_information().await?;
+        Ok(if info.rit_enabled {
+            info.rit_xit_offset
+        } else {
+            0
+        })
+    }
+
+    async fn get_xit_hz(&mut self) -> Result<i32, Self::Error> {
+        // One offset field, two switches -- the radio applies it to
+        // receive, transmit or both, and the `IF` record says which.
+        let info = self.radio.get_information().await?;
+        Ok(if info.xit_enabled {
+            info.rit_xit_offset
+        } else {
+            0
+        })
+    }
+
     async fn get_transmitting(&mut self) -> Result<bool, Self::Error> {
         // When this server drives PTT itself, it already knows the answer:
         // it set the line. Reading `IF;` to find out costs 38 bytes back
