@@ -1084,9 +1084,23 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
             // payload is five characters (`20000`) but the set takes one
             // (`2`), so the read payload is NOT a valid set payload.
             if params.is_empty() {
-                let value = match state.meter_selection {
-                    1 | 4 => u16::from(state.power_control),
-                    _ => state.smeter,
+                // Zero unless keyed. Every meter this selects -- SWR,
+                // compression, ALC -- is a transmit meter, and the
+                // physical radio answers `0000` for all three while
+                // receiving whatever is selected. Measured 2026-09-08:
+                // `RM1;`, `RM2;` and `RM3;` each then answered
+                // `RM<n>0000;` with the radio listening.
+                //
+                // This returned the S-meter reading (or the power
+                // setting, for selector 1), so a console reading `RM`
+                // saw a transmit meter deflecting on a receiving radio.
+                let value = if state.tx {
+                    match state.meter_selection {
+                        1 | 4 => u16::from(state.power_control),
+                        _ => state.smeter,
+                    }
+                } else {
+                    0
                 };
                 query!(format!("RM{}{:04};", state.meter_selection, value))
             } else if params.len() == 1 {
@@ -1691,6 +1705,40 @@ mod tests {
         let payload = &resp[2..resp.len() - 1];
         assert_eq!(payload.len(), 35, "IF payload length: {payload:?}");
         assert!(payload.ends_with(' '), "IF payload tail: {payload:?}");
+    }
+
+    #[test]
+    fn a_transmit_meter_reads_zero_while_receiving() {
+        // All three `RM` selects -- SWR, compression, ALC -- are transmit
+        // meters. The physical radio answers `0000` for every one of them
+        // while listening; this answered with the S-meter, so a console
+        // reading `RM` saw a transmit meter deflecting on a receiving
+        // radio.
+        let mut s = default_state();
+        s.smeter = 9;
+        s.tx = false;
+        for sel in 1..=3u8 {
+            s.meter_selection = sel;
+            let (resp, _) = handle("RM", &mut s);
+            assert_eq!(
+                resp,
+                format!("RM{sel}0000;"),
+                "selector {sel} while receiving"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transmit_meter_deflects_once_keyed() {
+        let mut s = default_state();
+        s.smeter = 9;
+        s.tx = true;
+        s.meter_selection = 3;
+        let (resp, _) = handle("RM", &mut s);
+        assert_ne!(
+            resp, "RM30000;",
+            "a keyed radio's ALC meter is not stuck at zero"
+        );
     }
 
     #[test]
