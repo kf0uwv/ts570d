@@ -295,8 +295,22 @@ impl Radio for NativeConsoleRadio {
     }
 
     async fn get_smeter(&mut self) -> RadioResult<u16> {
-        self.state()?
+        // Whichever meter `SM;` was answering when the server read it.
+        //
+        // On this radio that command is two meters: the S-meter while
+        // receiving, and -- per the manual -- "a calibrated power meter"
+        // while transmitting. The server labels the sample with the state
+        // it was taken in. Asking only for `MeterKind::S` here would make
+        // this read fail for the whole length of a transmission, and the
+        // console would hold its last receive reading and go on drawing
+        // it as though the radio were still listening.
+        //
+        // The console labels the row from its own `tx` flag, read in the
+        // same cycle, so the value and its meaning stay together.
+        let state = self.state()?;
+        state
             .meter(MeterKind::S)
+            .or_else(|| state.meter(MeterKind::Po))
             .ok_or(RadioError::NotImplemented)
     }
 

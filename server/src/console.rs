@@ -53,11 +53,27 @@ where
         // drops the meter rather than the whole state -- a console can
         // draw a dash for one meter, and cannot do anything useful with a
         // frequency it did not get.
+        //
+        // **What `SM;` means depends on whether the radio is keyed.** The
+        // manual is explicit, both in the operating description -- "While
+        // receiving, serves as an S-meter... While transmitting, serves as
+        // a calibrated power meter" -- and in the CAT reference, whose
+        // note against `SM` reads "In transmit mode: power meter reading".
+        //
+        // This published every reading as `MeterKind::S`. During a
+        // transmission that put a power reading on the S bar with an
+        // S-unit scale applied to it: `S9+20` for what was really a power
+        // level, on the one meter an operator looks at to decide whether
+        // the radio is doing what they asked. `info.tx_rx` is read in the
+        // same `IF;` a few lines above, so the reading is labelled with
+        // the state it was taken in.
+        let kind = if info.tx_rx {
+            MeterKind::Po
+        } else {
+            MeterKind::S
+        };
         let meters = match self.0.get_smeter().await {
-            Ok(raw) => vec![MeterSample {
-                kind: MeterKind::S,
-                raw,
-            }],
+            Ok(raw) => vec![MeterSample { kind, raw }],
             Err(_) => Vec::new(),
         };
 
@@ -164,6 +180,21 @@ mod tests {
     // What stays here is the question only this seam can ask: whether the
     // modes the capability set *offers a console* are the same ones this
     // adapter can actually apply.
+
+    #[test]
+    fn this_radio_declares_the_meter_a_transmit_reading_is_labelled_with() {
+        // `state` labels a reading taken while keyed as `Po`, because
+        // that is what `SM;` answers with then. A console draws each
+        // reading on the row for its own meter, so a label the radio does
+        // not declare is a reading with nowhere to go -- it would simply
+        // not appear, which looks like a meter that stopped working.
+        for kind in [MeterKind::S, MeterKind::Po] {
+            assert!(
+                radio::capabilities::TS570D.meters.has(kind),
+                "{kind:?} is used as a label but not declared"
+            );
+        }
+    }
 
     #[test]
     fn the_declared_modes_are_exactly_the_ones_this_seam_accepts() {

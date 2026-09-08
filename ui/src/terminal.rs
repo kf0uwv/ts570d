@@ -578,6 +578,16 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) -> 
     });
     poll!("SM", radio.get_smeter(), |s: u16| {
         state.smeter = s;
+        // `SM;` is two meters. While receiving it is the S-meter; while
+        // transmitting the manual says it is "a calibrated power meter".
+        // `state.tx` was set by the `IF` read a few lines above, in the
+        // same cycle, so the reading is labelled with the state it was
+        // taken in rather than assumed to be a signal strength.
+        state.meter_kind = if state.tx {
+            cat_framework::capabilities::MeterKind::Po
+        } else {
+            cat_framework::capabilities::MeterKind::S
+        };
     });
     // Cleared, then set by the first level read that actually answers.
     //
