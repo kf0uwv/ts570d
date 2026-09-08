@@ -177,7 +177,22 @@ pub struct AudioFeed {
     tap: Box<dyn AudioTap>,
     latest: Option<AudioFrame>,
     fault: Option<String>,
+    /// When a block last arrived.
+    ///
+    /// `fault` catches a tap that *errors*. It does not catch one that
+    /// simply stops -- a host that stops publishing, a card that goes
+    /// quiet without complaining -- and there `latest` stays `Some` and
+    /// the panels went on reporting `LIVE` over a trace that had stopped
+    /// moving.
+    last_at: Option<std::time::Instant>,
 }
+
+/// How long without a block before the tap is no longer streaming.
+///
+/// Blocks arrive around twenty-four a second on this bench, so two
+/// seconds is some fifty missed in a row -- not a hiccup. Short enough
+/// that an operator learns quickly, long enough not to flicker.
+const AUDIO_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl AudioFeed {
     pub fn new(tap: impl AudioTap + 'static) -> Self {
@@ -185,6 +200,7 @@ impl AudioFeed {
             tap: Box::new(tap),
             latest: None,
             fault: None,
+            last_at: None,
         }
     }
 
@@ -200,7 +216,10 @@ impl AudioFeed {
         }
         loop {
             match self.tap.try_next_frame() {
-                Ok(Some(frame)) => self.latest = Some(frame),
+                Ok(Some(frame)) => {
+                    self.latest = Some(frame);
+                    self.last_at = Some(std::time::Instant::now());
+                }
                 Ok(None) => return,
                 Err(e) => {
                     self.fault = Some(format!("audio stopped: {e}"));
@@ -227,7 +246,10 @@ impl AudioFeed {
     /// A console with no `--acc2-audio` has no `AudioFeed` at all and shows
     /// `Configured`, which is the same honest answer.
     pub fn state(&self) -> AudioState {
-        if self.latest.is_some() && self.fault.is_none() {
+        let arriving = self
+            .last_at
+            .is_some_and(|t| t.elapsed() < AUDIO_STALE_AFTER);
+        if self.latest.is_some() && self.fault.is_none() && arriving {
             AudioState::Streaming
         } else {
             AudioState::Configured
@@ -470,5 +492,68 @@ mod remote_tests {
         // Not merely "the list is empty": there is no attach function, so
         // even a stale selection cannot open local hardware.
         assert!(ConsoleSources::remote().attach.is_none());
+    }
+}
+
+#[cfg(test)]
+mod audio_liveness_tests {
+    use super::*;
+
+    /// A tap that hands over exactly the blocks it is given, then stops
+    /// -- without ever reporting an error, which is the case `fault` does
+    /// not cover.
+    struct Quiet(Vec<AudioFrame>);
+
+    impl AudioTap for Quiet {
+        fn try_next_frame(&mut self) -> Result<Option<AudioFrame>, cat_signal_audio::AudioError> {
+            Ok(self.0.pop())
+        }
+    }
+
+    fn frame() -> AudioFrame {
+        AudioFrame {
+            scope: cat_signal::AudioScopeFrame {
+                sample_rate_hz: 48_000,
+                samples: vec![0.0; 8],
+                sequence: 1,
+            },
+            spectrum: cat_signal::AudioSpectrumFrame {
+                start_hz: 0,
+                span_hz: 4_000,
+                bins: vec![-90.0, -50.0],
+                sequence: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn a_tap_that_has_delivered_nothing_is_not_streaming() {
+        let feed = AudioFeed::new(Quiet(Vec::new()));
+        assert_eq!(feed.state(), AudioState::Configured);
+    }
+
+    #[test]
+    fn a_tap_delivering_blocks_is_streaming() {
+        let mut feed = AudioFeed::new(Quiet(vec![frame()]));
+        feed.poll();
+        assert_eq!(feed.state(), AudioState::Streaming);
+    }
+
+    #[test]
+    fn a_tap_that_goes_quiet_without_an_error_stops_being_streaming() {
+        // `fault` catches a tap that errors. A host that simply stops
+        // publishing raises nothing, and `latest` stays `Some` -- so the
+        // panels reported LIVE over a trace that had stopped moving.
+        let mut feed = AudioFeed::new(Quiet(vec![frame()]));
+        feed.poll();
+        assert_eq!(feed.state(), AudioState::Streaming);
+
+        feed.last_at = Some(std::time::Instant::now() - AUDIO_STALE_AFTER);
+        feed.poll(); // polls, gets nothing, reports no error
+        assert_eq!(
+            feed.state(),
+            AudioState::Configured,
+            "silence is not streaming, however quietly it arrives"
+        );
     }
 }
