@@ -58,6 +58,24 @@ pub const MAX_KEY_DOWN: std::time::Duration = std::time::Duration::from_secs(120
 /// Keys and releases PTT on the DTR line.
 pub struct PttDtr {
     keyed: Rc<Cell<bool>>,
+    /// Which key-down we are on.
+    ///
+    /// Incremented by every [`PttDtr::key`]. A watchdog captures the value
+    /// current when it was armed and refuses to act once it has moved, so
+    /// it can only ever end the transmission it was armed for.
+    ///
+    /// Without this the watchdog tested `keyed` alone, which cannot tell
+    /// "still keyed from the transmission I am guarding" from "keyed again
+    /// since". Nothing cancelled a watchdog on release, so every key-down
+    /// left one running for the full `MAX_KEY_DOWN`, and any transmission
+    /// that happened to start two minutes after an earlier one was cut
+    /// down by the earlier one's timer.
+    ///
+    /// Observed on the bench 2026-09-09 with WSJT-X on FT8: keyed at
+    /// 06:11:00.088795, force-released at 06:11:00.392249 -- 304 ms into a
+    /// 13.8-second transmission -- exactly 120.0016 s after the key-down
+    /// at 06:09:00.390667. The operator hears the transmission chop.
+    generation: Rc<Cell<u64>>,
 }
 
 impl Default for PttDtr {
@@ -70,6 +88,7 @@ impl PttDtr {
     pub fn new() -> Self {
         Self {
             keyed: Rc::new(Cell::new(false)),
+            generation: Rc::new(Cell::new(0)),
         }
     }
 
@@ -100,6 +119,22 @@ impl PttDtr {
                          not available on it"
                 .to_string()),
         })
+    }
+
+    /// Whether a watchdog armed at `armed_generation` may end the current
+    /// key-down.
+    ///
+    /// Two conditions, and the second is the one that was missing. The
+    /// radio must still be keyed, *and* it must still be keyed for the
+    /// same transmission this watchdog was armed for. A watchdog that
+    /// outlives its own key-down is guarding something that has already
+    /// ended, and the next transmission is not its to end.
+    ///
+    /// A pure function so the rule can be tested in microseconds. The
+    /// alternative is a test that sleeps for `MAX_KEY_DOWN`, which is two
+    /// minutes per case and would never have been written.
+    fn watchdog_may_release(keyed: bool, current_generation: u64, armed_generation: u64) -> bool {
+        keyed && current_generation == armed_generation
     }
 
     /// Release DTR without waiting on the caller — the failsafe path.
@@ -142,6 +177,10 @@ impl PttDtr {
             return Err(String::from_utf8_lossy(&out[4..]).into_owned());
         }
         self.keyed.set(true);
+        // A new key-down, so any watchdog still running from an earlier one
+        // is now guarding a transmission that has ended and must stand
+        // down.
+        self.generation.set(self.generation.get().wrapping_add(1));
         // Every key and every release is logged, with what caused it.
         // Nothing here said anything before, so "the radio flips back to
         // receive part-way through a transmission" could only be guessed
@@ -154,10 +193,15 @@ impl PttDtr {
         // still connected. This is the last line of defence against a
         // transmitter left keyed.
         let keyed = Rc::clone(&self.keyed);
+        let generation = Rc::clone(&self.generation);
+        // The key-down this watchdog is responsible for. It may only end
+        // this one: a later transmission is somebody else's to guard, and
+        // a watchdog that outlives its own key-down must do nothing.
+        let mine = generation.get();
         let watchdog_session = BrokerCatSession::new(session.handle(), session.client_id());
         monoio::spawn(async move {
             monoio::time::sleep(MAX_KEY_DOWN).await;
-            if keyed.get() {
+            if Self::watchdog_may_release(keyed.get(), generation.get(), mine) {
                 Self::force_release(keyed, watchdog_session, "the hard key-down timeout expired")
                     .await;
             }
@@ -200,6 +244,61 @@ mod tests {
         assert!(!ptt.is_keyed());
         // No runtime is running here; if this tried to spawn, it would panic.
         // That it returns quietly is the assertion.
+    }
+
+    #[test]
+    fn a_stale_watchdog_does_not_end_a_later_transmission() {
+        // The chuttering bug, as a rule rather than a story.
+        //
+        // Every key-down armed a watchdog and nothing cancelled it on
+        // release, so each one ran the full `MAX_KEY_DOWN` and then tested
+        // `keyed` alone -- which cannot tell "still keyed from the
+        // transmission I am guarding" from "keyed again since". Any
+        // transmission starting roughly two minutes after an earlier one
+        // was cut down by the earlier one's timer.
+        //
+        // Observed on the bench 2026-09-09, WSJT-X on FT8: keyed at
+        // 06:11:00.088795, force-released at 06:11:00.392249 -- 304 ms
+        // into a 13.8 s transmission -- which is 120.0016 s after the
+        // key-down at 06:09:00.390667. Within 1.6 ms of `MAX_KEY_DOWN`
+        // measured from the *wrong* key-down.
+        assert!(
+            !PttDtr::watchdog_may_release(true, 2, 1),
+            "a watchdog armed for key-down 1 must not end key-down 2"
+        );
+    }
+
+    #[test]
+    fn a_watchdog_still_ends_the_transmission_it_was_armed_for() {
+        // The other half. This is a safety failsafe against a transmitter
+        // left keyed by a client that vanished, and narrowing it must not
+        // disarm it.
+        assert!(
+            PttDtr::watchdog_may_release(true, 7, 7),
+            "a watchdog must still end a key-down that is genuinely overrunning"
+        );
+    }
+
+    #[test]
+    fn a_watchdog_does_nothing_once_the_radio_is_unkeyed() {
+        assert!(!PttDtr::watchdog_may_release(false, 3, 3));
+        assert!(!PttDtr::watchdog_may_release(false, 4, 3));
+    }
+
+    #[test]
+    fn every_key_down_gets_its_own_generation() {
+        // What makes the rule above able to tell them apart. If two
+        // key-downs ever shared a generation, the stale watchdog would be
+        // indistinguishable from the live one again.
+        let ptt = PttDtr::new();
+        let first = ptt.generation.get();
+        ptt.generation.set(ptt.generation.get().wrapping_add(1));
+        let second = ptt.generation.get();
+        ptt.generation.set(ptt.generation.get().wrapping_add(1));
+        let third = ptt.generation.get();
+        assert_ne!(first, second);
+        assert_ne!(second, third);
+        assert_ne!(first, third);
     }
 
     #[test]
