@@ -17,9 +17,13 @@
 //! # Why the server has to own this
 //!
 //! The card's mixer settings are load-bearing on this interface: capture
-//! gain sets the ACC2 receive level, the playback level sets TX drive into
-//! the interface's divider, AGC has to be off for anything
+//! gain sets the ACC2 receive level, AGC has to be off for anything
 //! amplitude-linear, and the mic monitor has to be off or it loops back.
+//! Those three are asserted and re-asserted.
+//!
+//! The playback level -- TX drive -- is **reported and never set**. It
+//! belongs to whatever generates the transmit audio. See
+//! [`report_playback`] for why that distinction is not cosmetic.
 //!
 //! **Every USB re-enumeration reverts all of it.** ALSA restores its own
 //! saved values while PipeWire goes on reporting 100%, so nothing looks
@@ -131,9 +135,10 @@ pub fn assert_state(spec: &str, settings: &MixerSettings) -> Result<Vec<String>,
                 did.extend(set_capture(&selem, &name, want));
             }
         }
-        if let Some(want) = settings.playback {
+        // Reported, not asserted -- see `report_playback`.
+        if let Some(expected) = settings.playback {
             if selem.has_playback_volume() && name == "Speaker" {
-                did.extend(set_playback(&selem, &name, want));
+                did.extend(report_playback(&selem, &name, expected));
             }
         }
     }
@@ -163,24 +168,47 @@ fn set_capture(selem: &alsa::mixer::Selem, name: &str, want: i64) -> Vec<String>
     }
 }
 
-fn set_playback(selem: &alsa::mixer::Selem, name: &str, want: i64) -> Vec<String> {
+/// Report a TX drive level that has moved. Never set it.
+///
+/// # Why this one reports where the others correct
+///
+/// The playback level is the transmit drive, and the transmit audio
+/// belongs to whatever is generating it -- WSJT-X, fldigi, an operator
+/// with a mixer open. Asserting it takes that away: the level an operator
+/// chose is overwritten on the next re-assertion, and they get no say.
+///
+/// This *did* assert it, from `ba11e21` on 2026-09-07 until 2026-09-09.
+/// The station ran with `--acc2-playback 151`, which is the maximum of
+/// that card's 0..151 range, so the server pinned transmit drive at full
+/// scale and put it back every time anything moved it.
+///
+/// Item 33's finding stands and is the reason this function still exists:
+/// a USB re-enumeration reverts the card's mixer while PipeWire goes on
+/// reporting 100%, so drive silently drops 20 dB with nothing looking
+/// wrong from the desktop. But **the detection was the valuable half, not
+/// the correction**. Saying "your transmit drive changed and here is what
+/// it changed to" solves that without deciding what the level should be.
+///
+/// The capture gain, the AGC switch and the mic monitor keep asserting.
+/// Those are invariants of this interface rather than anybody's levels --
+/// nothing else manages them, AGC has to be off for anything
+/// amplitude-linear, and the monitor loops back if it is on.
+fn report_playback(selem: &alsa::mixer::Selem, name: &str, expected: i64) -> Vec<String> {
     let (min, max) = selem.get_playback_volume_range();
-    let want = want.clamp(min, max);
-    let was = selem
+    let expected = expected.clamp(min, max);
+    let now = selem
         .get_playback_volume(SelemChannelId::mono())
         .unwrap_or(-1);
-    if was == want {
+    if now == expected {
         return Vec::new();
     }
-    match selem.set_playback_volume_all(want) {
-        Ok(()) => vec![format!(
-            "{name}: playback level {was} -> {want} (range {min}..{max}{})",
-            db_suffix(selem.ask_playback_vol_db(want))
-        )],
-        Err(e) => vec![format!(
-            "{name}: could not set playback level to {want}: {e}"
-        )],
-    }
+    vec![format!(
+        "{name}: TX drive is {now}, not the {expected} this station expects \
+         (range {min}..{max}{}). NOT changed -- transmit audio belongs to \
+         whatever generates it. Set it where you set it before, or pass a \
+         different --acc2-playback if {now} is now correct.",
+        db_suffix(selem.ask_playback_vol_db(now))
+    )]
 }
 
 fn db_suffix(v: Result<alsa::mixer::MilliBel, alsa::Error>) -> String {
@@ -248,5 +276,69 @@ pub fn assert_and_log(spec: &str, settings: &MixerSettings, first: bool) {
         // come back yet, and warning every two seconds would bury the log.
         Err(e) if !first => info!("ACC2 mixer: {e}"),
         Err(e) => warn!("ACC2 mixer: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tx_drive_is_not_ours {
+    use super::*;
+
+    #[test]
+    fn the_settings_type_still_carries_a_playback_expectation() {
+        // The flag survives the change of meaning: the station still says
+        // what it expects TX drive to be, and the server still notices
+        // when it moves. What changed is that noticing no longer means
+        // overwriting.
+        let s = MixerSettings {
+            capture: Some(0),
+            playback: Some(151),
+        };
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn nothing_in_this_module_writes_a_playback_volume() {
+        // The assertion that actually holds the rule, checked against the
+        // source rather than a mock: an ALSA `Selem` cannot be constructed
+        // without a card, so a behavioural test here would need the
+        // hardware, and a test that needs the operator's radio to run is a
+        // test that does not run.
+        //
+        // `set_playback_volume_all` is the only call that can move TX
+        // drive. If it comes back, this fails and the reviewer is pointed
+        // at `report_playback`'s doc comment for why it must not.
+        // Only the real code: the test module below names the call in
+        // order to look for it, and must not match itself.
+        let src = include_str!("mixer.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let calls: Vec<&str> = production
+            .lines()
+            .filter(|l| l.contains("set_playback_volume_all"))
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect();
+        assert!(
+            calls.is_empty(),
+            "this module sets a playback volume again: {calls:?}. TX drive \
+             belongs to whatever generates the transmit audio -- see \
+             `report_playback`."
+        );
+    }
+
+    #[test]
+    fn the_switch_invariants_are_still_asserted() {
+        // The other half of the split, so a later reader does not "tidy"
+        // the whole module into report-only. AGC off and monitor off are
+        // invariants of this interface, not anybody's levels: nothing else
+        // manages them, and the monitor loops transmit audio back if on.
+        let src = include_str!("mixer.rs");
+        let src = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            src.contains("set_playback_switch_all(0)"),
+            "the AGC/monitor switches must still be asserted"
+        );
+        assert!(
+            src.contains("set_capture_volume_all"),
+            "the capture gain must still be asserted"
+        );
     }
 }

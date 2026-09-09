@@ -509,8 +509,10 @@ fn usage_exit() -> ! {
                                       units. Asserted on open and re-asserted\n\
                                       after every USB re-enumeration, which\n\
                                       silently reverts it.\n\
-           --acc2-playback <n>        sound card playback level (TX drive),\n\
-                                      same treatment.\n\
+           --acc2-playback <n>        the TX drive level this station\n\
+                                      expects. Reported when it differs,\n\
+                                      never set: transmit audio belongs to\n\
+                                      whatever generates it.\n\
            --force                    open the serial port even if another\n\
                                       process holds it. Refused by default:\n\
                                       the CAT port is also the PTT line, so\n\
@@ -687,9 +689,10 @@ struct ServerArgs {
     /// once at startup. `None` is itself reported — a radio whose menus
     /// nobody has recorded is worth one line.
     calibration: Option<String>,
-    /// `--acc2-capture <n>` / `--acc2-playback <n>`: the sound card mixer
-    /// values this server asserts and re-asserts. Station-specific, so
-    /// flags rather than constants.
+    /// `--acc2-capture <n>`: the receive gain this server asserts and
+    /// re-asserts. `--acc2-playback <n>`: the TX drive it expects and
+    /// *reports* on, without ever setting it. Station-specific, so flags
+    /// rather than constants.
     acc2_capture: Option<i64>,
     acc2_playback: Option<i64>,
     /// `--acc2-mixer <card>`: which card's mixer this server owns.
