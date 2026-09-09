@@ -4,7 +4,7 @@ Architecture: amd64
 Maintainer: Matt Franklin <radiombf@gmail.com>
 Section: hamradio
 Priority: optional
-Depends: libc6 (>= 2.17)
+Depends: libc6 (>= 2.17), libasound2t64 | libasound2, librtlsdr0
 License: Apache-2.0
 Description: Kenwood TS-570D terminal radio control
  Terminal-based CAT control for the Kenwood TS-570D/S HF transceiver.
@@ -19,6 +19,13 @@ Description: Kenwood TS-570D terminal radio control
     protocol to a running "ts570d-control --server" or to the emulator's
     --native listener. Needs a display and a working Vulkan or GL driver;
     the other four tools do not.
+ .
+ Built with the sdr-device and audio-device features: ts570d-control can
+ open a local RTL-SDR for the IF-tap spectrum (--if-out rtl:<n>), read
+ ACC2 receive audio from an ALSA/PipeWire device (--acc2-audio), and own
+ the interface's mixer (--acc2-mixer). An RTL-SDR Blog V4 needs the
+ rtl-sdr-blog fork of librtlsdr for its tuner; the distro librtlsdr0
+ satisfies the link but may not detect a V4.
  .
  Requires Linux kernel 5.1+ for io_uring support.
 Homepage: https://github.com/kf0uwv/ts570d
