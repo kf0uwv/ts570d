@@ -1056,7 +1056,21 @@ async fn run_server_mode() {
         playback: args.acc2_playback,
     });
     #[cfg(not(all(target_os = "linux", feature = "audio-device")))]
-    let audio_source = server::audio::AudioSelection::new();
+    let audio_source = {
+        // `--acc2-capture` and `--acc2-playback` parse on every build, so
+        // a build that cannot act on them says so rather than accepting
+        // them and doing nothing -- the same trade `--if-out rtl:<n>`
+        // makes without `sdr-device`. Silently ignoring a mixer level is
+        // the worst case: the operator believes the capture gain was set.
+        if args.acc2_capture.is_some() || args.acc2_playback.is_some() {
+            eprintln!(
+                "warning: --acc2-capture/--acc2-playback need the `audio-device` \
+                 feature (Linux, ALSA); this build cannot set the mixer. Rebuild \
+                 with --features audio-device, or set the levels with amixer."
+            );
+        }
+        server::audio::AudioSelection::new()
+    };
     // Which card's mixer to own. Named explicitly when given, because a
     // stream taken through PipeWire says nothing about which ALSA card is
     // behind it. Falls back to the audio spec, which names a card directly
