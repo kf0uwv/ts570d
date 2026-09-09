@@ -358,6 +358,26 @@ pub const NEVER_RESTORE: &[&str] = &["PS", "AC"];
 ///
 /// 38 and 39 are the two that produce a radio which looks broken with
 /// nothing on the display to explain it.
+/// Menus a restore must never write, whatever the file says.
+///
+/// Menu 35 is the CAT transfer rate and stop bits (manual p.51: "select
+/// the appropriate transfer rate and number of stop bits via Menu No.
+/// 35"). Writing it over CAT is the one menu write that can destroy the
+/// channel carrying it.
+///
+/// There is no version of writing it that helps. If the file agrees with
+/// the radio, the write changes nothing. If it disagrees, the radio
+/// changes rate mid-restore and every command after it -- including any
+/// attempt to put it back -- goes out at a rate the radio is no longer
+/// listening at. The operator is then left with a radio that answers
+/// nothing, no indication on the front panel of why, and a tool that
+/// cannot reach it to explain. Recovery means finding menu 35 by hand.
+///
+/// It is not in [`CONSEQUENTIAL_MENUS`] because that list *warns* and
+/// then writes. A warning is the wrong instrument for a setting whose
+/// failure takes away the ability to act on the warning.
+pub const NEVER_RESTORE_MENUS: &[(u8, &str)] = &[(35, "CAT transfer rate and stop bits")];
+
 pub const CONSEQUENTIAL_MENUS: &[(u8, &str)] = &[
     (33, "ACC2 AF input level"),
     (34, "ACC2 AF output level"),
@@ -575,6 +595,13 @@ pub struct RestoreReport {
     pub settings_failed: Vec<Changed>,
     /// Menus written. Every one is unconfirmed until a verify sweep.
     pub menus_written: Vec<u8>,
+    /// Menus deliberately not written -- see [`NEVER_RESTORE_MENUS`].
+    ///
+    /// Reported rather than silently omitted: an operator restoring a
+    /// complete file is owed the fact that one menu in it was left alone,
+    /// or they will believe the radio matches the file when one setting
+    /// does not.
+    pub menus_skipped: Vec<u8>,
 }
 
 impl RestoreReport {
@@ -642,6 +669,13 @@ where
     }
 
     for (menu, reading) in &snapshot.menus {
+        // The CAT rate is not restorable over CAT -- see
+        // `NEVER_RESTORE_MENUS`. Skipped silently here and reported by the
+        // caller, rather than attempted and half-completed.
+        if NEVER_RESTORE_MENUS.iter().any(|(n, _)| n == menu) {
+            report.menus_skipped.push(*menu);
+            continue;
+        }
         if write_menu(radio, *menu, reading.value).await.is_ok() {
             report.menus_written.push(*menu);
         }
@@ -1665,6 +1699,57 @@ mod restore_against_a_stateful_radio {
                 "{code} was reported restored but must never be written"
             );
         }
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn the_cat_rate_menu_is_never_written_back() {
+        // Menu 35 sets the CAT transfer rate. Writing it over CAT is the
+        // one menu write that can destroy the channel carrying it: get it
+        // wrong and the radio changes rate mid-restore, every later
+        // command goes out at a rate it is no longer listening at, and
+        // the tool that would put it back can no longer be heard. The
+        // front panel shows nothing to explain it.
+        //
+        // There is no upside to weigh against that. If the file agrees
+        // with the radio the write changes nothing; if it disagrees it
+        // disconnects. So it is skipped, and the skip is reported.
+        let (mut r, seen) = radio();
+        let mut snap = Snapshot::new("TS-570D", "2026-09-09T00:00:00Z".to_string());
+        snap.record_menu(35, 2, MenuSource::Panel); // 4800 bps, 1 stop
+        snap.record_menu(34, 9, MenuSource::Panel);
+
+        let sent_before = seen.borrow().len();
+        let report = restore(&mut r, &snap).await;
+        let sent: Vec<String> = seen.borrow()[sent_before..].to_vec();
+
+        assert!(
+            !sent.iter().any(|c| c.starts_with("EX035")),
+            "restore sent a write to the CAT rate menu: {sent:?}"
+        );
+        assert_eq!(report.menus_skipped, vec![35]);
+        assert_eq!(
+            report.menus_written,
+            vec![34],
+            "every other menu is still restored"
+        );
+    }
+
+    #[test]
+    fn the_never_restore_menu_list_is_not_merely_a_warning() {
+        // `CONSEQUENTIAL_MENUS` warns and then writes, which is right for
+        // a menu whose damage the operator can see and undo. It is the
+        // wrong instrument for one whose failure removes the ability to
+        // act on the warning at all, so the two lists must stay disjoint.
+        for (menu, _) in NEVER_RESTORE_MENUS {
+            assert!(
+                !CONSEQUENTIAL_MENUS.iter().any(|(n, _)| n == menu),
+                "menu {menu} is both warned-about and never-written; pick one"
+            );
+        }
+        assert!(
+            NEVER_RESTORE_MENUS.iter().any(|(n, _)| *n == 35),
+            "menu 35 is the CAT transfer rate (manual p.51)"
+        );
     }
 
     #[monoio::test(driver = "legacy")]
