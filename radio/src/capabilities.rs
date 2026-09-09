@@ -285,10 +285,17 @@ mod tests {
         assert_eq!(scale.label(1), "S1");
         assert_eq!(scale.label(5), "S5");
 
-        // Full scale is 15 per the manual, and the labels stop at S9+30,
-        // so the top four counts share it. Under-reading the very top by
-        // up to 30 dB is the conservative direction.
-        assert_eq!(scale.label(15), "S9+30");
+        // The top four counts continue the same ten dB a count. They were
+        // not read off the panel -- the operator's three readings stop at
+        // S9+20 -- but the line arriving exactly at S9+60 on raw 15, the
+        // last value the manual says the meter can report, is the reason
+        // to believe them. The labels used to stop at S9+30 and these four
+        // counts all collapsed onto it, under-reading the top of the meter
+        // by up to 30 dB.
+        assert_eq!(scale.label(12), "S9+30");
+        assert_eq!(scale.label(13), "S9+40");
+        assert_eq!(scale.label(14), "S9+50");
+        assert_eq!(scale.label(15), "S9+60");
     }
 
     #[test]
@@ -310,10 +317,14 @@ mod tests {
         let scale = s.s_units.expect("publishes its S-unit table");
         let labels: Vec<&str> = (0..=s.raw_range.max).map(|r| scale.label(r)).collect();
         let distinct: std::collections::BTreeSet<&&str> = labels.iter().collect();
-        assert!(
-            distinct.len() >= 12,
-            "only {} distinct labels across the reachable range: {labels:?}",
-            distinct.len()
+        // Sixteen raw values, sixteen labels: with the label set running
+        // to S9+60 the mapping is one-to-one across the whole meter, so
+        // every count the radio can report moves the display. This was
+        // `>= 12` while the top four counts shared S9+30.
+        assert_eq!(
+            distinct.len(),
+            labels.len(),
+            "labels repeat across the reachable range: {labels:?}"
         );
     }
 

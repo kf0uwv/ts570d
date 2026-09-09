@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use cat_framework::capabilities::MeterKind;
 use radio::TS570D_COMMAND_TABLE;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -207,23 +208,37 @@ fn tick_label_line(width: usize, ticks: &[(usize, &str)]) -> String {
     String::from_utf8(buf).unwrap_or_default()
 }
 
-/// Map an S-meter value (0–30) to a human-readable label.
+/// Map an S-meter value to a human-readable label.
+///
+/// Deferred to the radio's own declared table rather than repeated here.
+/// This used to carry its own ladder spreading S0..S9+30 over 0..30, which
+/// put S9 at raw 20 on a meter the manual stops at 15: every reading the
+/// emulator can produce drew about five S-units low, and the emulator's
+/// panel disagreed with the console it exists to test.
 fn smeter_label(v: u16) -> &'static str {
-    match v {
-        0..=2 => "S0",
-        3..=4 => "S1",
-        5..=6 => "S2",
-        7..=8 => "S3",
-        9..=10 => "S4",
-        11..=12 => "S5",
-        13..=14 => "S6",
-        15..=16 => "S7",
-        17..=18 => "S8",
-        19..=20 => "S9",
-        21..=24 => "S9+10",
-        25..=28 => "S9+20",
-        _ => "S9+30",
+    match s_meter().and_then(|m| m.s_units) {
+        Some(scale) => scale.label(v),
+        // The radio crate declares one; if that ever stops being true the
+        // display says so instead of inventing a scale.
+        None => "S?",
     }
+}
+
+/// The radio's own S-meter descriptor: its range and its S-unit table.
+fn s_meter() -> Option<&'static cat_framework::capabilities::MeterDescriptor> {
+    radio::capabilities::TS570D.meters.find(MeterKind::S)
+}
+
+/// Full scale, from the descriptor rather than a literal.
+///
+/// The widget below used to divide by a hardcoded 30 in three places. The
+/// meter reports 0-15, so the bar never passed half width, every tick sat
+/// at twice its proper position, and the red band was unreachable.
+fn smeter_full_scale() -> u16 {
+    s_meter()
+        .map(|m| m.raw_range.max)
+        .filter(|m| *m > 0)
+        .unwrap_or(15)
 }
 
 fn draw_rx_smeter(f: &mut Frame, area: Rect, state: &RadioState) {
@@ -244,14 +259,17 @@ fn draw_rx_smeter(f: &mut Frame, area: Rect, state: &RadioState) {
     let label = smeter_label(state.smeter);
     let title = "S-METER";
     let pad = width.saturating_sub(title.len() + label.len());
+    // Below S9 green, S9 to S9+20 yellow, above it red -- expressed as
+    // raw counts against this radio's law (one count per S-unit to S9),
+    // not as a fraction of the bar.
     let title_line = Line::from(vec![
         Span::styled(title, Style::default().fg(Color::DarkGray)),
         Span::raw(" ".repeat(pad)),
         Span::styled(
             label,
-            if state.smeter <= 10 {
+            if state.smeter < 9 {
                 Style::default().fg(Color::Green)
-            } else if state.smeter <= 20 {
+            } else if state.smeter <= 11 {
                 Style::default().fg(Color::Yellow)
             } else {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
@@ -259,24 +277,27 @@ fn draw_rx_smeter(f: &mut Frame, area: Rect, state: &RadioState) {
         ),
     ]);
 
-    // Row 1: tick mark labels at computed positions
-    // smeter scale: 0–30, map ticks to character positions in [0..width]
-    // Use single-char digit labels (S1→"1", S3→"3", etc.) to avoid overlap at 22 chars wide.
+    let full_scale = smeter_full_scale();
+
+    // Row 1: tick mark labels at computed positions.
+    // One raw count per S-unit to S9, ten dB a count above, so these are
+    // raw values and not evenly spaced fractions. Single-char digit labels
+    // (S1 -> "1") avoid overlap at 22 chars wide.
     let ticks: Vec<(usize, &str)> = [
-        (3usize, "1"),
-        (7, "3"),
-        (11, "5"),
-        (15, "7"),
-        (19, "9"),
-        (25, "+20"),
+        (1usize, "1"),
+        (3, "3"),
+        (5, "5"),
+        (7, "7"),
+        (9, "9"),
+        (11, "+20"),
     ]
     .iter()
-    .map(|&(v, lbl)| (v * width / 30, lbl))
+    .map(|&(v, lbl)| (v * width / full_scale as usize, lbl))
     .collect();
     let tick_str = tick_label_line(width, &ticks);
 
     // Row 2: bargraph, color based on fill ratio
-    let ratio = state.smeter as f64 / 30.0;
+    let ratio = (state.smeter as f64 / full_scale as f64).min(1.0);
     let bar_color = if ratio <= 0.5 {
         Color::Green
     } else if ratio <= 0.75 {
@@ -776,5 +797,38 @@ fn format_log_line(s: &str) -> Line<'static> {
         Line::from(spans)
     } else {
         Line::from(Span::raw(owned))
+    }
+}
+
+#[cfg(test)]
+mod smeter_scale_tests {
+    use super::*;
+
+    #[test]
+    fn the_panel_reads_the_same_scale_the_radio_declares() {
+        // The emulator exists to be a stand-in for the radio, so its own
+        // panel disagreeing with the radio's declared table is a fault in
+        // the test instrument. It used to: a local ladder spread
+        // S0..S9+30 over 0..30, putting S9 at raw 20 on a meter that stops
+        // at 15, so every reading it could produce read five S-units low.
+        assert_eq!(smeter_label(0), "S0");
+        assert_eq!(smeter_label(5), "S5");
+        assert_eq!(smeter_label(9), "S9");
+        assert_eq!(smeter_label(10), "S9+10");
+        assert_eq!(smeter_label(15), "S9+60");
+    }
+
+    #[test]
+    fn full_scale_is_the_declared_range_and_not_a_literal() {
+        // The bar divided by a hardcoded 30, so a full-scale signal filled
+        // half of it and the red band was unreachable.
+        assert_eq!(smeter_full_scale(), 15);
+    }
+
+    #[test]
+    fn every_reading_the_meter_can_report_draws_a_distinct_label() {
+        let labels: Vec<&str> = (0..=smeter_full_scale()).map(smeter_label).collect();
+        let distinct: std::collections::BTreeSet<&&str> = labels.iter().collect();
+        assert_eq!(distinct.len(), labels.len(), "labels repeat: {labels:?}");
     }
 }
