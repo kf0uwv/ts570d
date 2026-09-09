@@ -127,32 +127,25 @@ const MODES: &[ModeDescriptor] = &[
 const METERS: &[MeterDescriptor] = &[
     MeterDescriptor {
         kind: MeterKind::S,
-        // **Disputed.** The CAT reference's parameter table gives the
-        // `SM` command a range of `0000~0015`, half of this, and adds
-        // "Relative values are output" -- so the manual declines to
-        // define what the number means as well as disagreeing about how
-        // far it goes.
+        // Fifteen, as the CAT reference's parameter table says: "`SM`
+        // command: 0000~0015". This declared thirty, which the radio
+        // never reaches -- measured on 2026-09-08 with an operator
+        // reading the panel while the same signal was sampled over CAT,
+        // a signal at S9+20 answered raw 11.
         //
-        // Thirty is kept because it is what this radio's console has
-        // always drawn and because a controlled measurement supports it:
-        // three preamp steps, each sized on the IF tap rather than
-        // assumed, put a raw count at 2.95 dB, which is the 3.0 dB a
-        // count that a 0-30 scale spanning S0..S9+30 implies. Fifteen
-        // would make it 6.0.
+        // The consequence was not a cosmetic one. `SUnitScale::TS570D`
+        // spread S0..S9+30 over 0..28, so S9 sat at raw 20 and was
+        // unreachable: a signal the panel called S9+10 drew as S4, and
+        // raw 9 and 10 collapsed onto the same label so a ten dB change
+        // did not move the display at all.
         //
-        // Against that, the operator's own reading of the front panel --
-        // S7 to S9+10 while `SM;` returned 6 to 10 -- works out at 5.5 dB
-        // a count, which is the manual's number. One is a measurement
-        // against a known step and the other a glance at a bouncing
-        // needle mid-FT8-burst, which would settle it if the manual did
-        // not agree with the glance.
-        //
-        // The test is one strong signal: if `SM;` ever answers above 15
-        // this is right, and if it pins at 15 while the panel climbs past
-        // S9 then this and `SUnitScale::TS570D` both want halving. A
-        // sweep of eight broadcast bands on 2026-09-08 reached raw 7, so
-        // it is still open. See troubleshooting-plan.md item 48.
-        raw_range: RawRange::new(0, 30),
+        // A note on why the earlier bench measurement pointed the other
+        // way (troubleshooting-plan.md item 48): three controlled preamp
+        // steps put a raw count at 2.95 dB, which fitted a 0-30 scale.
+        // The meter is not linear -- six dB a count below S9 and ten
+        // above -- and those steps straddled the knee, averaging the two
+        // into something that looked uniform.
+        raw_range: RawRange::new(0, 15),
         active_on_transmit: false,
         s_units: Some(SUnitScale::TS570D),
     },
@@ -275,19 +268,53 @@ mod tests {
     }
 
     #[test]
-    fn the_s_meter_publishes_the_table_its_console_has_always_drawn() {
+    fn the_s_meter_publishes_the_table_measured_against_the_panel() {
         let s = TS570D.meters.find(MeterKind::S).expect("has an S meter");
         let scale = s.s_units.expect("publishes its S-unit table");
-        // The four values the shipped table and an interpolated one
-        // disagree about at the top of the scale.
-        assert_eq!(scale.label(20), "S9");
-        assert_eq!(scale.label(24), "S9+10");
-        assert_eq!(scale.label(28), "S9+20");
-        assert_eq!(scale.label(30), "S9+30");
-        // S0 gets three raw counts; every other unit gets two.
+
+        // The three readings this was measured from: an operator watching
+        // the panel while the same signal was sampled over CAT, one
+        // front-end step apart. 2026-09-08.
+        assert_eq!(scale.label(9), "S9");
+        assert_eq!(scale.label(10), "S9+10");
+        assert_eq!(scale.label(11), "S9+20");
+
+        // One count per S-unit below S9, which is what makes raw 0 read
+        // S0 and raw 9 read S9 at the same time.
         assert_eq!(scale.label(0), "S0");
-        assert_eq!(scale.label(2), "S0");
-        assert_eq!(scale.label(3), "S1");
+        assert_eq!(scale.label(1), "S1");
+        assert_eq!(scale.label(5), "S5");
+
+        // Full scale is 15 per the manual, and the labels stop at S9+30,
+        // so the top four counts share it. Under-reading the very top by
+        // up to 30 dB is the conservative direction.
+        assert_eq!(scale.label(15), "S9+30");
+    }
+
+    #[test]
+    fn the_s_meter_range_is_the_one_the_manual_documents() {
+        // "SM command: 0000~0015", CAT reference, parameter type 22. This
+        // declared 0..30, which the radio never reaches: a signal the
+        // panel called S9+20 answered raw 11.
+        let s = TS570D.meters.find(MeterKind::S).expect("has an S meter");
+        assert_eq!(s.raw_range.max, 15);
+    }
+
+    #[test]
+    fn every_reachable_reading_maps_to_a_distinct_step() {
+        // The fault this replaces: S9 sat at raw 20 on a meter that stops
+        // at 15, so the whole reachable range squeezed into the bottom
+        // third of the table and raw 9 and 10 drew the same label -- a
+        // ten dB change that did not move the display.
+        let s = TS570D.meters.find(MeterKind::S).expect("has an S meter");
+        let scale = s.s_units.expect("publishes its S-unit table");
+        let labels: Vec<&str> = (0..=s.raw_range.max).map(|r| scale.label(r)).collect();
+        let distinct: std::collections::BTreeSet<&&str> = labels.iter().collect();
+        assert!(
+            distinct.len() >= 12,
+            "only {} distinct labels across the reachable range: {labels:?}",
+            distinct.len()
+        );
     }
 
     #[test]

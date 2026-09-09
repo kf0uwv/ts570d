@@ -57,19 +57,26 @@ const DB_PER_OVER: f32 = 10.0;
 
 /// This radio's raw reading for S9.
 ///
-/// From `SUnitScale::TS570D`'s own table: raw 19–20 is S9. The top of the
-/// band is taken, so a reading that maps exactly to S9 labels as S9 rather
-/// than falling into S8.
-const RAW_S9: f32 = 20.0;
+/// From `SUnitScale::TS570D`'s own table: raw 9 is S9.
+///
+/// Measured against the physical radio on 2026-09-08, an operator reading
+/// the panel while the same signal was sampled over CAT. It was 20 here,
+/// which is above the raw 15 this meter can reach at all -- so the
+/// emulator produced readings a real radio never sends.
+const RAW_S9: f32 = 9.0;
 
-/// Raw counts per S-unit below S9, from the same table.
-const RAW_PER_S_UNIT: f32 = 2.0;
+/// Raw counts per S-unit below S9, from the same table. One each.
+const RAW_PER_S_UNIT: f32 = 1.0;
 
-/// Raw counts per +10 dB division above S9: 20→24→28.
-const RAW_PER_OVER: f32 = 4.0;
+/// Raw counts per +10 dB division above S9: 9→10→11.
+const RAW_PER_OVER: f32 = 1.0;
 
 /// The top of this radio's meter.
-const RAW_MAX: f32 = 30.0;
+///
+/// Fifteen, as the CAT reference documents for `SM` and as the radio
+/// answers. This was thirty, so the emulator could report readings the
+/// radio it models cannot produce.
+const RAW_MAX: f32 = 15.0;
 
 /// The strongest thing in the passband at `dial_hz`, in dBm.
 ///
@@ -157,9 +164,9 @@ mod tests {
 
     #[test]
     fn the_mapping_agrees_with_the_scale_the_console_draws() {
-        // The whole point: a console labelling raw 20 "S9" and an emulator
-        // that thought S9 was raw 15 would disagree about the same signal,
-        // and every test between them would still pass.
+        // The whole point: a console labelling raw 9 "S9" and an emulator
+        // that thought S9 was somewhere else would disagree about the
+        // same signal, and every test between them would still pass.
         let scale = SUnitScale::TS570D;
         for (dbm, want) in [
             (-73.0, "S9"),
@@ -192,8 +199,9 @@ mod tests {
         let on = reading(&band, 14_100_000, 0.0);
         let off = reading(&band, 14_200_000, 0.0);
         assert!(on > off, "on {on} vs off {off}");
+        // S9 is raw 9 on this meter, measured against the panel.
         assert!(
-            on >= 20,
+            on >= 9,
             "a -60 dBm carrier should read at least S9, got {on}"
         );
     }
@@ -226,12 +234,13 @@ mod tests {
 
     #[test]
     fn it_never_reads_past_the_top_of_the_scale() {
-        // `SM` is a two-digit field and the capability set says 0-30. A
-        // reading above that would be a protocol violation as well as a
-        // lie.
+        // The CAT reference gives `SM` a range of `0000~0015`, and the
+        // radio answers within it: a signal the panel called S9+20 read
+        // raw 11. A reading above fifteen would be a protocol violation
+        // as well as a lie.
         let enormous = band_with_carrier_at(14_100_000, 40.0);
-        assert!(reading(&enormous, 14_100_000, 0.0) <= 30);
-        assert_eq!(raw_for_dbm(f32::INFINITY), 30);
+        assert!(reading(&enormous, 14_100_000, 0.0) <= 15);
+        assert_eq!(raw_for_dbm(f32::INFINITY), 15);
         assert_eq!(raw_for_dbm(f32::NEG_INFINITY), 0);
     }
 
