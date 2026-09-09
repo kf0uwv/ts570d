@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "emulator"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "cat-framework",
  "cat-signal",
@@ -1413,7 +1413,7 @@ dependencies = [
 
 [[package]]
 name = "gui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "cat-native",
  "cat-signal",
@@ -2796,7 +2796,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "radio"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "cat-client",
@@ -3070,7 +3070,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "alsa",
  "async-trait",
@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "ts570d"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "cat-native",
@@ -3613,7 +3613,7 @@ dependencies = [
 
 [[package]]
 name = "ui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "cat-framework",
  "cat-native",
