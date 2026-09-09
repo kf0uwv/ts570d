@@ -102,13 +102,37 @@ fn wait_for_peak(shared: &NativeShared, want: impl Fn(usize) -> bool) -> Option<
     None
 }
 
+/// A non-zero, negative station calibration, so a swap that silently
+/// dropped or re-signed the trim shows up rather than reading the same as
+/// the uncalibrated default.
+const TRIM_HZ: i32 = -115;
+
+#[test]
+fn a_swapped_in_source_is_opened_with_the_stations_calibration() {
+    // Three different callers open a source -- the `--if-out` flag, a
+    // console's attach, and the reconnect after a dongle drops -- and a
+    // waterfall that was calibrated until the dongle was replugged would
+    // be a miserable bug to chase. The selection is where all three can
+    // read the same number.
+    let selection = IfSelection::new(Some(serve_band(0)), TRIM_HZ);
+    assert_eq!(selection.trim_hz(), TRIM_HZ);
+
+    let source =
+        open_spec(&serve_band(0), selection.trim_hz()).expect("the virtual dongle should open");
+    selection.select("swapped".to_string(), source);
+
+    // Surviving a swap is the property under test: `select` replaces the
+    // source, never the station's calibration.
+    assert_eq!(selection.trim_hz(), TRIM_HZ);
+}
+
 #[test]
 fn a_console_picking_a_new_source_changes_what_the_waterfall_shows() {
     let low = serve_band(-60_000);
     let high = serve_band(60_000);
 
     let shared = NativeShared::new(&radio::capabilities::TS570D);
-    let selection = IfSelection::new(Some(low.clone()));
+    let selection = IfSelection::new(Some(low.clone()), TRIM_HZ);
     server::spectrum::spawn(Arc::clone(&shared), Arc::clone(&selection));
 
     // The dial has to be published or the pipeline has nothing to centre
@@ -118,7 +142,8 @@ fn a_console_picking_a_new_source_changes_what_the_waterfall_shows() {
         .expect("the first source never produced a frame with its carrier below centre");
 
     // What a console's attach does: open, then hand over.
-    let source = open_spec(&high).expect("the second virtual dongle should open");
+    let source =
+        open_spec(&high, selection.trim_hz()).expect("the second virtual dongle should open");
     selection.select(high.clone(), source);
 
     let second = wait_for_peak(&shared, |bin| bin > bins / 2).expect(
@@ -135,12 +160,12 @@ fn a_source_that_will_not_open_is_refused_before_anything_is_swapped() {
     // picker, and the running source is left alone.
     let good = serve_band(-60_000);
     let shared = NativeShared::new(&radio::capabilities::TS570D);
-    let selection = IfSelection::new(Some(good));
+    let selection = IfSelection::new(Some(good), TRIM_HZ);
     server::spectrum::spawn(Arc::clone(&shared), Arc::clone(&selection));
 
     assert!(wait_for_peak(&shared, |_| true).is_some());
 
-    let err = match open_spec("127.0.0.1:1") {
+    let err = match open_spec("127.0.0.1:1", selection.trim_hz()) {
         Err(e) => e,
         Ok(_) => panic!("nothing listens on port 1, so opening it must fail"),
     };

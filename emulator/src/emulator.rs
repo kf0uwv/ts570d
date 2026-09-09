@@ -51,6 +51,14 @@ pub type SharedRadio = Arc<Mutex<CatFramework<Ts570dRadio>>>;
 /// look broken. Set through `EX` rather than by writing the field, for the
 /// same reason keying goes through `TX;`: there is one way to change this
 /// radio's state and it is the command table.
+///
+/// This does **not** leave menu 34 selected, and a bare `EX;` here answers
+/// for menu 0. That is not a gap: on the real radio the selected menu
+/// follows the front panel, which CAT can neither read nor move, so there
+/// is no selection an emulator could adopt that would be right for any
+/// particular radio. Expect `EX;` to diverge from a physical set, and
+/// compare menu *values* through a command that reports them -- menu 20 is
+/// readable as `PT;`.
 pub fn new_shared_radio() -> SharedRadio {
     let framework = Arc::new(Mutex::new(CatFramework::new(Ts570dRadio::new())));
     let mut out = Vec::new();

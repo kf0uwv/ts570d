@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.2"
 edition = "2021"
 authors = ["Matt Franklin <radiombf@gmail.com>"]
 license = "Apache-2.0"
@@ -185,8 +185,15 @@ radio = { path = "radio" }
 ui = { path = "ui" }
 server = { path = "server" }
 
+# The calibration snapshot is written and read as JSON here; the type and
+# its meaning live in `radio::calibration`.
+serde_json = { workspace = true }
+
 [dev-dependencies]
 radio    = { path = "radio" }
+# src/port_guard.rs's tests open a real file and look for themselves in
+# /proc, which needs somewhere disposable to put it.
+tempfile = { workspace = true }
 cat-transport-serial = { workspace = true }
 # tests/rfc2217_under_monoio.rs -- the guard for the monoio `sync` feature.
 cat-transport-rfc2217 = { workspace = true }

@@ -50,16 +50,27 @@ fn main() {
         cat_ui_egui::theme::Palette::from_theme(&radio::console_layout::theme()),
     );
     console.demo_capabilities({
-        let mut c = gui::demo::ts570d();
+        // Derived from this radio's own declaration, never transcribed.
+        // The copy this replaced listed four meters where the radio
+        // declares five, so every still taken from it was missing the
+        // compression meter -- and a meter absent from a rail looks
+        // exactly like a radio that does not have one.
+        let mut c = cat_native::CapabilitiesWire::from(&radio::capabilities::TS570D);
         c.theme = Some(radio::console_layout::theme());
         c.layout = Some(radio::console_layout::layout());
         c
     });
     console.demo_state();
+    console.demo_levels();
     // A real band, from the same generator the emulator serves, so the
     // still shows the waterfall under something like live conditions.
     let band = cat_signal::synthetic::Band::populated(14_000_000, 14_350_000, 43, -110.0, 7);
-    let frames: Vec<_> = (0..220)
+    // More frames than the waterfall has rows, so the still shows a full
+    // scrollback *and* a ring that has wrapped -- which is the only state
+    // in which a mistake in the two-band UV mapping is visible. At 220 the
+    // bottom of the fall was still the unfilled black of a ring that had
+    // never come round.
+    let frames: Vec<_> = (0..300)
         .map(|i| band.frame(14_074_000, 48_000, 1024, f64::from(i) * 0.08, i as u64))
         .collect();
     console.demo_spectrum(&frames);

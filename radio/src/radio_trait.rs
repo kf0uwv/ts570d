@@ -336,6 +336,18 @@ pub trait Radio {
     async fn get_smeter(&mut self) -> RadioResult<u16> {
         Err(RadioError::NotImplemented)
     }
+    /// The selected transmit meter and its reading: `(selector, value)`.
+    ///
+    /// A different meter from [`Self::get_smeter`]. On a TS-570D `SM;`
+    /// answers with signal strength while receiving and, per the manual,
+    /// "a calibrated power meter" while transmitting; `RM;` answers with
+    /// whichever of SWR, compression or ALC the operator has selected.
+    /// The selector is `0` none, `1` SWR, `2` COMP, `3` ALC.
+    ///
+    /// Zero while receiving -- all three are transmit meters.
+    async fn get_meter_reading(&mut self) -> RadioResult<(u8, u16)> {
+        Err(RadioError::NotImplemented)
+    }
     async fn transmit(&mut self) -> RadioResult<()> {
         Err(RadioError::NotImplemented)
     }
@@ -1127,14 +1139,19 @@ mod tests {
 /// and the only way to guarantee they agree is for there to be one of these.
 ///
 /// `cw_pitch` is the menu index, not a frequency: the TS-570D offers
-/// 400-1000 Hz in 100 Hz steps, so index 0 is 400 Hz.
+/// 400-1000 Hz in **50 Hz** steps, so index 0 is 400 Hz and index 12 is
+/// 1000 Hz. Menu 20 lists all thirteen (400 450 500 ... 1000), and CAT
+/// parameter format 52 states "00 (400 Hz min.) ~ 12 (1000 Hz max.)" --
+/// which only holds at 50 Hz per step. This used to read 100, which put
+/// the CW window as much as 600 Hz above the tone at the top of the
+/// range, and the marked filter edges disagreed with what you could hear.
 pub fn audio_passband_hz(mode: Mode, cw_pitch: u8) -> (f32, f32) {
     /// The low edge of a voice passband. Below this is rumble, and the
     /// radio does not pass it.
     const AF_LOW: f32 = 300.0;
     const AF_HIGH: f32 = 2_700.0;
 
-    let pitch = 400.0 + f32::from(cw_pitch) * 100.0;
+    let pitch = 400.0 + f32::from(cw_pitch) * 50.0;
     match mode {
         Mode::Lsb | Mode::FskReverse => (-AF_HIGH, -AF_LOW),
         Mode::Usb | Mode::Fsk => (AF_LOW, AF_HIGH),

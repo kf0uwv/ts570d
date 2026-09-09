@@ -28,14 +28,17 @@ fn main() {
         smeter: 17,
         connected: true,
         initializing: false,
+        // `TX=1` draws the transmitting state. The absent states and the
+        // receiving one are both easy to look at by accident; the one
+        // that has to be unmistakable across the room is the one nobody
+        // sees until the radio is already keyed.
+        tx: std::env::var("TX").is_ok(),
         ..Default::default()
     };
     // Attach whatever the environment offers, and give the sources a
     // moment to produce something. A still taken before the first frame
     // would show the pending state and say nothing about the live one.
-    let mut view = ui::console::ConsoleView::for_capabilities(&cat_native::CapabilitiesWire::from(
-        &radio::capabilities::TS570D,
-    ));
+    let mut view = ui::console::ConsoleView::for_capabilities(&ui::debug_capabilities());
     let mut sources = ui::feeds::ConsoleSources::default();
     if let Ok(addr) = std::env::var("CN4") {
         let iq = cat_signal_rtlsdr::RtlTcpSource::connect(addr.as_str()).expect("CN4 tap");
@@ -76,7 +79,7 @@ fn main() {
     // A still with no mode id would lose the AF passband marks, which is
     // exactly the sort of silent difference a still exists to catch.
     state.mode_id = crate_mode_id(&state.mode);
-    let caps = cat_native::CapabilitiesWire::from(&radio::capabilities::TS570D);
+    let caps = ui::debug_capabilities();
     view.passband = state
         .mode_id
         .and_then(|mode| cat_ui::af::passband_for(&caps, mode));

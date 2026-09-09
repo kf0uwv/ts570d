@@ -28,6 +28,21 @@ use cat_rigctl::native_bridge::NativeRadio;
 use cat_transport_core::{CatSession, TransportError};
 use radio::{Frequency, Ts570d};
 
+/// The meter `RM;`'s selector digit names.
+///
+/// From the CAT reference's METER SWITCH parameter: `0` no selection,
+/// `1` SWR, `2` COMP, `3` ALC. Anything else is a radio reporting
+/// something this does not know about, and inventing a meter for it would
+/// put a reading on a row it does not belong to.
+fn meter_switch(selector: u8) -> Option<MeterKind> {
+    match selector {
+        1 => Some(MeterKind::Swr),
+        2 => Some(MeterKind::Comp),
+        3 => Some(MeterKind::Alc),
+        _ => None,
+    }
+}
+
 /// This radio, as the console protocol sees it.
 pub struct ConsoleTs570d<S: CatSession>(pub Ts570d<S>);
 
@@ -53,13 +68,47 @@ where
         // drops the meter rather than the whole state -- a console can
         // draw a dash for one meter, and cannot do anything useful with a
         // frequency it did not get.
-        let meters = match self.0.get_smeter().await {
-            Ok(raw) => vec![MeterSample {
-                kind: MeterKind::S,
-                raw,
-            }],
+        //
+        // **What `SM;` means depends on whether the radio is keyed.** The
+        // manual is explicit, both in the operating description -- "While
+        // receiving, serves as an S-meter... While transmitting, serves as
+        // a calibrated power meter" -- and in the CAT reference, whose
+        // note against `SM` reads "In transmit mode: power meter reading".
+        //
+        // This published every reading as `MeterKind::S`. During a
+        // transmission that put a power reading on the S bar with an
+        // S-unit scale applied to it: `S9+20` for what was really a power
+        // level, on the one meter an operator looks at to decide whether
+        // the radio is doing what they asked. `info.tx_rx` is read in the
+        // same `IF;` a few lines above, so the reading is labelled with
+        // the state it was taken in.
+        let kind = if info.tx_rx {
+            MeterKind::Po
+        } else {
+            MeterKind::S
+        };
+        let mut meters = match self.0.get_smeter().await {
+            Ok(raw) => vec![MeterSample { kind, raw }],
             Err(_) => Vec::new(),
         };
+
+        // While keyed, a second meter is answering at the same moment.
+        // `RM;` reports whichever of SWR, compression or ALC the operator
+        // has selected on the front panel, and the ALC reading is the one
+        // that says whether the radio is actually being driven -- the
+        // question a whole evening went into answering by other means
+        // (troubleshooting-plan.md item 36).
+        //
+        // Only while transmitting: all three are transmit meters, they
+        // read zero the rest of the time, and this is a CAT round trip on
+        // a link shared with whatever is keying.
+        if info.tx_rx {
+            if let Ok((selector, raw)) = self.0.get_meter_reading().await {
+                if let Some(kind) = meter_switch(selector) {
+                    meters.push(MeterSample { kind, raw });
+                }
+            }
+        }
 
         Some(RadioState {
             vfo_a_hz: info.frequency.hz(),
@@ -77,6 +126,40 @@ where
             // already declares. Reporting one would contradict it.
             filter_width_hz: None,
             meters,
+            // Filled in by the pump on its own slower clock, so this read
+            // stays one `IF;` plus one `SM;`.
+            levels: None,
+        })
+    }
+
+    /// The fourteen settings the reference rail shows.
+    ///
+    /// Read here rather than in `state` because they belong on a slower
+    /// clock -- fourteen CAT commands at the dial's rate would be most of
+    /// a 9600-baud link. `cat_rigctl` calls this every few seconds.
+    ///
+    /// All or nothing: a partial answer would put a real value beside a
+    /// default and there would be no way for a console to tell which was
+    /// which. That is precisely the bug this exists to fix -- a network
+    /// console showed `AF 200` at a radio reading `AG034`, because the
+    /// protocol carried none of these and the console drew its own struct
+    /// defaults with total confidence.
+    async fn levels(&mut self) -> Option<cat_native::RadioLevels> {
+        Some(cat_native::RadioLevels {
+            af_gain: self.0.get_af_gain().await.ok()?,
+            rf_gain: self.0.get_rf_gain().await.ok()?,
+            squelch: self.0.get_squelch().await.ok()?,
+            mic_gain: self.0.get_mic_gain().await.ok()?,
+            power_pct: self.0.get_power().await.ok()?,
+            agc: self.0.get_agc().await.ok()?,
+            noise_reduction: self.0.get_noise_reduction().await.ok()?,
+            antenna: self.0.get_antenna().await.ok()?,
+            noise_blanker: self.0.get_noise_blanker().await.ok()?,
+            preamp: self.0.get_preamp().await.ok()?,
+            attenuator: self.0.get_attenuator().await.ok()?,
+            speech_processor: self.0.get_speech_processor().await.ok()?,
+            vox: self.0.get_vox().await.ok()?,
+            freq_lock: self.0.get_frequency_lock().await.ok()?,
         })
     }
 
@@ -130,6 +213,58 @@ mod tests {
     // What stays here is the question only this seam can ask: whether the
     // modes the capability set *offers a console* are the same ones this
     // adapter can actually apply.
+
+    #[test]
+    fn the_meter_switch_digits_are_the_ones_the_manual_gives() {
+        // CAT reference, METER SWITCH: 0 no selection, 1 SWR, 2 COMP,
+        // 3 ALC. A digit mapped to the wrong meter draws a reading on
+        // the wrong row, which is worse than not drawing it -- an SWR
+        // figure sitting on the ALC row reads as a radio that is being
+        // driven correctly.
+        assert_eq!(meter_switch(1), Some(MeterKind::Swr));
+        assert_eq!(meter_switch(2), Some(MeterKind::Comp));
+        assert_eq!(meter_switch(3), Some(MeterKind::Alc));
+    }
+
+    #[test]
+    fn an_unselected_or_unknown_meter_is_not_invented() {
+        // 0 is "no selection". Anything above 3 is a radio reporting
+        // something this does not know about, and guessing would put a
+        // reading on a row it does not belong to.
+        assert_eq!(meter_switch(0), None);
+        for unknown in [4u8, 5, 9, 255] {
+            assert_eq!(meter_switch(unknown), None, "{unknown}");
+        }
+    }
+
+    #[test]
+    fn every_meter_a_switch_digit_names_is_declared_by_this_radio() {
+        // A label the radio does not declare is a reading with nowhere to
+        // go: the rails draw each reading on the row for its own meter,
+        // so it would simply not appear.
+        for digit in 1..=3u8 {
+            let kind = meter_switch(digit).expect("mapped");
+            assert!(
+                radio::capabilities::TS570D.meters.has(kind),
+                "{kind:?} is a switch target but not declared"
+            );
+        }
+    }
+
+    #[test]
+    fn this_radio_declares_the_meter_a_transmit_reading_is_labelled_with() {
+        // `state` labels a reading taken while keyed as `Po`, because
+        // that is what `SM;` answers with then. A console draws each
+        // reading on the row for its own meter, so a label the radio does
+        // not declare is a reading with nowhere to go -- it would simply
+        // not appear, which looks like a meter that stopped working.
+        for kind in [MeterKind::S, MeterKind::Po] {
+            assert!(
+                radio::capabilities::TS570D.meters.has(kind),
+                "{kind:?} is used as a label but not declared"
+            );
+        }
+    }
 
     #[test]
     fn the_declared_modes_are_exactly_the_ones_this_seam_accepts() {

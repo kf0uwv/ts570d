@@ -27,8 +27,15 @@ if [[ "${1:-}" != "--skip-build" ]]; then
     # emulator eight days old, from before it had a network interface at
     # all. A stale binary in a package is worse than a build failure,
     # because nothing anywhere says so.
-    echo "==> cargo build --release --workspace"
-    (cd "${ROOT}" && cargo build --release --workspace)
+    # WITH the features. Without them this shipped a binary that starts
+    # cleanly, refuses the RTL, and has no ACC2 audio or mixer support at
+    # all -- every deb before 0.3.2 was built this way, and srv.sh has
+    # carried a warning about exactly this trap since the first time it
+    # cost an evening. The runtime libraries these need are in
+    # DEBIAN/control's Depends.
+    FEATURES="sdr-device,audio-device"
+    echo "==> cargo build --release --workspace --features ${FEATURES}"
+    (cd "${ROOT}" && cargo build --release --workspace --features "${FEATURES}")
 
     # `pin-test` is not in this workspace at all any more -- it moved to
     # radio-cat-rs's cat-transport-serial as a shared [[bin]] (CLAUDE.md).

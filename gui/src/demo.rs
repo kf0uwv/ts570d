@@ -29,118 +29,19 @@
 //! never work the first time somebody points it at something simpler.
 
 use cat_native::{
-    CapabilitiesWire, FilterWire, FrequencyRange, Installation, MemoryCapability, MenuCapability,
-    MeterDescriptorWire, MeterKind, ModeId, ModeKind, ModeWire, RawRange, SUnitScale, Sideband,
-    SignalSupport, VfoCapability,
+    CapabilitiesWire, FilterWire, FrequencyRange, Installation, SignalSupport, VfoCapability,
 };
 
-fn mode(id: ModeId, label: &str, kind: ModeKind, sideband: Option<Sideband>, bw: u32) -> ModeWire {
-    ModeWire {
-        id,
-        label: label.to_string(),
-        kind,
-        sideband,
-        default_bandwidth_hz: bw,
-    }
-}
-
-/// A TS-570D as a server describes it.
-pub fn ts570d() -> CapabilitiesWire {
-    CapabilitiesWire {
-        model: "Kenwood TS-570D".to_string(),
-        endpoints: Vec::new(),
-        vfos: VfoCapability {
-            count: 2,
-            split: true,
-            rit_hz: Some(9999),
-            xit_hz: Some(9999),
-        },
-        modes: vec![
-            mode(
-                ModeId::Lsb,
-                "LSB",
-                ModeKind::Ssb,
-                Some(Sideband::Lower),
-                2400,
-            ),
-            mode(
-                ModeId::Usb,
-                "USB",
-                ModeKind::Ssb,
-                Some(Sideband::Upper),
-                2400,
-            ),
-            mode(
-                ModeId::CwUpper,
-                "CW",
-                ModeKind::Cw,
-                Some(Sideband::Upper),
-                500,
-            ),
-            mode(ModeId::Fm, "FM", ModeKind::Fm, None, 12000),
-            mode(ModeId::Am, "AM", ModeKind::Am, None, 6000),
-        ],
-        tuning_steps_hz: vec![10, 100, 1_000, 5_000, 9_000, 10_000],
-        rx_range: FrequencyRange::new(500_000, 60_000_000),
-        filters: FilterWire {
-            if_shift_hz: Some(1_000),
-            // No CAT-selectable widths. This is why the quick bar shows no
-            // FILTER control for this radio, and it is a real property
-            // rather than a gap in the fixture.
-            widths_hz: None,
-            notch: false,
-        },
-        // All four the radio actually publishes. A fixture with one meter
-        // in it makes a meter rail look right when it is not: the inert
-        // rows are the ones whose treatment is easy to get wrong.
-        meters: vec![
-            MeterDescriptorWire {
-                kind: MeterKind::S,
-                raw_range: RawRange::new(0, 30),
-                active_on_transmit: false,
-                s_units: Some(SUnitScale::TS570D),
-            },
-            MeterDescriptorWire {
-                kind: MeterKind::Po,
-                raw_range: RawRange::new(0, 30),
-                active_on_transmit: true,
-                s_units: None,
-            },
-            MeterDescriptorWire {
-                kind: MeterKind::Swr,
-                raw_range: RawRange::new(0, 30),
-                active_on_transmit: true,
-                s_units: None,
-            },
-            MeterDescriptorWire {
-                kind: MeterKind::Alc,
-                raw_range: RawRange::new(0, 30),
-                active_on_transmit: true,
-                s_units: None,
-            },
-        ],
-        memory: Some(MemoryCapability {
-            channels: RawRange::new(0, 99),
-            named: false,
-            stores_mode: true,
-            scan: true,
-        }),
-        menu: Some(MenuCapability {
-            item_count: 52,
-            writable: true,
-        }),
-        signal: SignalSupport::IfTapPoint {
-            if_center_hz: 73_050_000,
-            inverted: true,
-        },
-        // A fixture for a still, not a server: the arrangement is the
-        // server's to author, so a console drawn from this uses its own
-        // default.
-        layout: None,
-        theme: None,
-        installation: Installation::default(),
-    }
-}
+// The TS-570D's capabilities were transcribed here by hand, and the copy
+// drifted: it listed four meters where the radio declares five, so the
+// still was missing the compression meter -- the same way the FT-991A's
+// copy was missing VDD and COMP.
+//
+// They now come straight from `radio::capabilities::TS570D`, in
+// `examples/render.rs`. That is the only place that can reach them: this
+// crate depends on `radio` as a **dev**-dependency only, because the
+// binary stays protocol-only (ADR 0008 §3), and a fixture that cannot be
+// derived is a fixture that will drift again.
 
 /// A radio with nothing but a dial.
 ///

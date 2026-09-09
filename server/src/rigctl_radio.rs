@@ -41,6 +41,7 @@
 //! method (unlike e.g. `ft991a`'s radio crate).
 
 use std::ops::{Deref, DerefMut};
+use tracing::info;
 
 use async_trait::async_trait;
 use cat_transport_core::{CatSession, TransportError};
@@ -48,19 +49,72 @@ use radio::{Frequency, Mode, Ts570d};
 
 /// Local newtype around `radio::Ts570d<S>` -- see this module's doc
 /// comment for why it exists (orphan rule).
-pub struct RigctlTs570d<S: CatSession>(pub Ts570d<S>);
+pub struct RigctlTs570d<S: CatSession> {
+    /// The typed radio. Public and named `0`-like for continuity with the
+    /// tuple struct this replaced.
+    pub radio: Ts570d<S>,
+    /// How to key. `Some` when the station keys PTT on the DTR line, which
+    /// is what an ACC2-style opto interface does; `None` falls back to CAT
+    /// `TX;`/`RX;`.
+    ///
+    /// The two are **not** interchangeable: ACC2 pin 9 (PKS) mutes the mic
+    /// while keyed and CAT `TX;` does not, so a digital-mode client gets
+    /// different audio behaviour depending on which path keys the radio.
+    ptt: Option<(crate::PttDtr, cat_server::BrokerCatSession)>,
+}
+
+impl<S: CatSession> RigctlTs570d<S> {
+    /// Key with CAT `TX;`/`RX;` — the original behaviour.
+    pub fn new(radio: Ts570d<S>) -> Self {
+        Self { radio, ptt: None }
+    }
+
+    /// Key by asserting DTR, ordered against CAT traffic by the broker.
+    pub fn with_dtr_ptt(radio: Ts570d<S>, session: cat_server::BrokerCatSession) -> Self {
+        Self {
+            radio,
+            ptt: Some((crate::PttDtr::new(), session)),
+        }
+    }
+}
+
+impl<S: CatSession> Drop for RigctlTs570d<S> {
+    /// Release PTT if this connection is going away while still keyed.
+    ///
+    /// `cat_rigctl`'s listener builds one `RigctlTs570d` per connection, so a
+    /// client whose TCP session drops mid-transmission drops this value. Left
+    /// alone, the radio would stay keyed indefinitely — nothing in the rigctl
+    /// protocol requires a station to handle that, and a station with a
+    /// transmitter on the end of it has to.
+    ///
+    /// `Drop` cannot be async, so this spawns the release rather than
+    /// awaiting it. The watchdog armed in `PttDtr::key` is the backstop for
+    /// the case where the runtime is going away too and the spawn never runs.
+    fn drop(&mut self) {
+        if let Some((ptt, session)) = &self.ptt {
+            if ptt.is_keyed() {
+                tracing::warn!(
+                    "rigctl: the client's connection dropped while still keyed -- releasing PTT"
+                );
+                let handoff =
+                    cat_server::BrokerCatSession::new(session.handle(), session.client_id());
+                ptt.release_on_disconnect(handoff);
+            }
+        }
+    }
+}
 
 impl<S: CatSession> Deref for RigctlTs570d<S> {
     type Target = Ts570d<S>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.radio
     }
 }
 
 impl<S: CatSession> DerefMut for RigctlTs570d<S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.radio
     }
 }
 
@@ -73,32 +127,110 @@ where
     type Error = radio::RadioError;
 
     async fn get_vfo_a_hz(&mut self) -> Result<u64, Self::Error> {
-        self.0.get_vfo_a().await.map(Frequency::hz)
+        self.radio.get_vfo_a().await.map(Frequency::hz)
     }
 
     async fn set_vfo_a_hz(&mut self, hz: u64) -> Result<(), Self::Error> {
         let freq = Frequency::new(hz)?;
-        self.0.set_vfo_a(freq).await
+        self.radio.set_vfo_a(freq).await
     }
 
     async fn get_mode(&mut self) -> Result<Self::Mode, Self::Error> {
-        self.0.get_mode().await
+        self.radio.get_mode().await
     }
 
     async fn set_mode(&mut self, mode: Self::Mode) -> Result<(), Self::Error> {
-        self.0.set_mode(mode).await
+        self.radio.set_mode(mode).await
+    }
+
+    fn unsupported() -> Self::Error {
+        radio::RadioError::NotImplemented
+    }
+
+    /// Split, which on this radio *is* which VFO transmits.
+    ///
+    /// There is no separate split flag in the CAT set: `FT0;` puts
+    /// transmit on VFO A and `FT1;` on VFO B, and "split" is the second
+    /// of those. `console.rs` says the same thing on the other seam.
+    async fn get_split(&mut self) -> Result<bool, Self::Error> {
+        self.radio.get_tx_vfo().await.map(|vfo| vfo != 0)
+    }
+
+    async fn set_split(&mut self, on: bool) -> Result<(), Self::Error> {
+        self.radio.set_tx_vfo(u8::from(on)).await
+    }
+
+    /// The RIT offset, from the `IF` record that carries it already.
+    ///
+    /// Zero when RIT is off: the radio keeps the offset across the switch
+    /// and reporting it while it is not applied would describe a receiver
+    /// that is not the one listening.
+    ///
+    /// There is no matching setter. This radio's CAT set has `RC` to
+    /// clear the offset and `RU`/`RD` to step it, and nothing that takes
+    /// a frequency -- so `I`/`X` stay refused rather than pretending, and
+    /// an operator who needs an offset sets it at the front panel.
+    async fn get_rit_hz(&mut self) -> Result<i32, Self::Error> {
+        let info = self.radio.get_information().await?;
+        Ok(if info.rit_enabled {
+            info.rit_xit_offset
+        } else {
+            0
+        })
+    }
+
+    async fn get_xit_hz(&mut self) -> Result<i32, Self::Error> {
+        // One offset field, two switches -- the radio applies it to
+        // receive, transmit or both, and the `IF` record says which.
+        let info = self.radio.get_information().await?;
+        Ok(if info.xit_enabled {
+            info.rit_xit_offset
+        } else {
+            0
+        })
     }
 
     async fn get_transmitting(&mut self) -> Result<bool, Self::Error> {
-        self.0.get_information().await.map(|info| info.tx_rx)
+        // When this server drives PTT itself, it already knows the answer:
+        // it set the line. Reading `IF;` to find out costs 38 bytes back
+        // over a 9600-baud link -- measured at a 319 ms median against 4 ms
+        // for the DTR ioctl that keys the radio -- and `t` is the command a
+        // client polls *during* a transmission. Spending a third of a
+        // second of the shared link on a question we can answer from a
+        // `Cell<bool>` is how a keying command ends up queued behind a
+        // state read.
+        //
+        // Falls back to the radio when this server is not the thing
+        // keying: then `IF;` genuinely is the only source, and a front
+        // panel or another client may have keyed it.
+        match &self.ptt {
+            Some((ptt, _)) => Ok(ptt.is_keyed()),
+            None => self.radio.get_information().await.map(|info| info.tx_rx),
+        }
     }
 
     async fn transmit(&mut self) -> Result<(), Self::Error> {
-        self.0.transmit().await
+        info!("rigctl: a client asked to TRANSMIT");
+        match &self.ptt {
+            // DTR, ordered against CAT: keying must not overtake the command
+            // that set the mode or frequency.
+            Some((ptt, session)) => ptt
+                .key(session)
+                .await
+                .map_err(radio::RadioError::InvalidProtocolString),
+            None => self.radio.transmit().await,
+        }
     }
 
     async fn receive(&mut self) -> Result<(), Self::Error> {
-        self.0.receive().await
+        info!("rigctl: a client asked to RECEIVE");
+        match &self.ptt {
+            Some((ptt, session)) => ptt
+                .release(session)
+                .await
+                .map_err(radio::RadioError::InvalidProtocolString),
+            None => self.radio.receive().await,
+        }
     }
 
     /// Map a [`Mode`] to the Hamlib rig-mode name `m`/`M` exchange on the
@@ -164,6 +296,17 @@ where
     fn capabilities() -> Option<&'static cat_framework::capabilities::RadioCapabilities> {
         Some(&radio::capabilities::TS570D)
     }
+
+    /// Lets the rigctl cache answer `m` without a round trip.
+    ///
+    /// Safe to implement here because `radio::capabilities::to_mode` is
+    /// one half of an exact bijection with `from_mode` -- the eight modes
+    /// this radio has, each with exactly one `ModeId`. `None` for a
+    /// `ModeId` this radio does not have (`DataUsb`, `C4fm`), which sends
+    /// the read to the wire rather than reporting a near miss.
+    fn mode_from_id(id: cat_framework::capabilities::ModeId) -> Option<Self::Mode> {
+        radio::capabilities::to_mode(id)
+    }
 }
 
 // Gated to Linux: uses #[monoio::test] (see
@@ -175,7 +318,7 @@ mod tests {
     use cat_transport_core::test_support::{Exchange, ScriptedCatSession};
 
     fn radio_with(session: ScriptedCatSession) -> RigctlTs570d<ScriptedCatSession> {
-        RigctlTs570d(Ts570d::new(session))
+        RigctlTs570d::new(Ts570d::new(session))
     }
 
     #[monoio::test(driver = "legacy")]
@@ -316,6 +459,38 @@ mod tests {
         );
         assert!(caps.vfos.rit_hz.is_some(), "no RIT limit to generate from");
         assert!(caps.rx_range.min_hz < caps.rx_range.max_hz);
+    }
+
+    #[test]
+    fn every_mode_survives_the_round_trip_through_a_mode_id() {
+        // The cache answers `m` from a `ModeId`, so a mapping that is not
+        // exactly one-to-one would report the radio in a mode it is not
+        // in. Checked in both directions over every mode this radio has.
+        use radio::capabilities::{from_mode, to_mode};
+        for mode in [
+            Mode::Lsb,
+            Mode::Usb,
+            Mode::Cw,
+            Mode::Fm,
+            Mode::Am,
+            Mode::Fsk,
+            Mode::CwReverse,
+            Mode::FskReverse,
+        ] {
+            assert_eq!(
+                to_mode(from_mode(mode)),
+                Some(mode),
+                "{mode:?} must come back as itself"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mode_this_radio_lacks_has_no_mapping() {
+        // Sends the read to the wire rather than reporting a near miss.
+        use cat_framework::capabilities::ModeId;
+        assert_eq!(radio::capabilities::to_mode(ModeId::DataUsb), None);
+        assert_eq!(radio::capabilities::to_mode(ModeId::C4fm), None);
     }
 
     #[test]

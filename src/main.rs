@@ -47,6 +47,9 @@
 #[cfg(target_os = "windows")]
 mod win_runtime;
 
+mod calibrate;
+mod port_guard;
+
 #[path = "endpoint.rs"]
 mod endpoint;
 
@@ -97,6 +100,32 @@ enum Transport {
     ServerRaw { addr: String },
 }
 
+/// Parse an `--if-trim` value: signed Hz, calibrated against a known
+/// carrier.
+///
+/// Its own function because it is the one CLI value with a sign that
+/// matters and no natural bound. A trim is a small correction -- this
+/// bench measures -115 Hz -- so a figure in the tens of kHz is a typo or
+/// a units mix-up, and half a band away is not a calibration.
+fn parse_trim_hz(value: &str) -> Result<i32, String> {
+    let hz: i32 = value
+        .parse()
+        .map_err(|_| format!("--if-trim wants a whole number of Hz, got {value:?}"))?;
+    if hz.abs() > MAX_TRIM_HZ {
+        return Err(format!(
+            "--if-trim {hz} Hz is beyond +/-{MAX_TRIM_HZ}; that is not a calibration"
+        ));
+    }
+    Ok(hz)
+}
+
+/// As far from the IF as a station calibration can plausibly be.
+///
+/// The correction absorbs a dongle's crystal error and the radio's own
+/// deviation from a nominal 73.05 MHz. Both are small. A wider bound
+/// would accept a typo that silently mis-labels the whole waterfall.
+const MAX_TRIM_HZ: i32 = 50_000;
+
 /// Parsed command-line arguments for the local TUI.
 struct Args {
     transport: Transport,
@@ -107,6 +136,9 @@ struct Args {
     /// `--acc2-audio <endpoint>`: the ACC2 receive-audio pair. Either a
     /// PCM server (`host:port`) or a local sound device.
     acc2_audio: Option<String>,
+    /// `--if-trim <hz>`: this station's IF calibration. See
+    /// [`parse_trim_hz`].
+    if_trim: i32,
 }
 
 /// The TS-570D's first IF, and what its IF output needs corrected.
@@ -122,11 +154,13 @@ struct Args {
 /// On this radio the IF output is the **CN4** header; `--if-out` names the
 /// signal rather than the connector, because the designation is a TS-570D
 /// fact and the signal is what every radio with one has.
-const IF_TAP: IfTapConfig = IfTapConfig {
-    if_center_hz: 73_050_000,
-    inverted: true,
-    trim_hz: 0,
-};
+fn if_tap(trim_hz: i32) -> IfTapConfig {
+    IfTapConfig {
+        if_center_hz: 73_050_000,
+        inverted: true,
+        trim_hz,
+    }
+}
 
 /// Where the tap is pointed until the first CAT poll says otherwise.
 ///
@@ -145,6 +179,7 @@ fn open_sources(
     if_out: Option<String>,
     acc2_audio: Option<String>,
     dial_hz: u64,
+    trim_hz: i32,
 ) -> ConsoleSources {
     let mut sources = ConsoleSources::default();
 
@@ -152,7 +187,11 @@ fn open_sources(
         // One call, and this program's only say in it is `IF_TAP`. The
         // spec may name a dongle on this machine or an rtl_tcp server; the
         // library decides which and how, and pins the tuner to the IF.
-        match cat_signal_rtlsdr::open(&spec, IF_TAP, cat_signal_rtlsdr::IfSourceConfig::default()) {
+        match cat_signal_rtlsdr::open(
+            &spec,
+            if_tap(trim_hz),
+            cat_signal_rtlsdr::IfSourceConfig::default(),
+        ) {
             Ok(source) => {
                 info!("IF output attached at {spec}");
                 sources.spectrum = Some(SpectrumFeed::start(source, dial_hz));
@@ -199,7 +238,7 @@ fn open_sources(
             *slot = enumerate_devices();
         }
     }));
-    sources.attach = Some(Box::new(move |device| attach(device, dial_hz)));
+    sources.attach = Some(Box::new(move |device| attach(device, dial_hz, trim_hz)));
 
     sources
 }
@@ -280,7 +319,23 @@ fn sdr_devices() -> cat_signal::DeviceList {
 struct ServerDevices {
     if_source: std::sync::Arc<server::spectrum::IfSelection>,
     audio_source: std::sync::Arc<server::audio::AudioSelection>,
+    /// The last device enumeration, and when it was taken.
+    ///
+    /// Enumerating asks ALSA to walk every PCM it knows, including
+    /// plugins this machine has no hardware for -- `oss` fails on a
+    /// missing `/dev/dsp` and libasound prints that to stderr itself,
+    /// which nothing in this program can suppress. A console asking for
+    /// the device list on a timer therefore fills the operator's terminal
+    /// with library noise.
+    ///
+    /// Cached briefly rather than forever: a picker exists to show what
+    /// is plugged in *now*, and an SDR pushed in while it is open should
+    /// appear. `refresh_devices` still forces a re-read.
+    devices: std::sync::Mutex<Option<(std::time::Instant, Vec<cat_signal::DeviceList>)>>,
 }
+
+/// How long a device enumeration stays fresh. See `ServerDevices::devices`.
+const DEVICE_CACHE: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl ServerDevices {
     /// What this bench has wired, as a console should be told it.
@@ -338,7 +393,19 @@ impl cat_signal::DeviceDirectory for ServerDevices {
     fn list(&self) -> Vec<cat_signal::DeviceList> {
         // The same enumeration the local console does, because it is the
         // same machine's hardware and an operator should not see two
-        // different answers depending on where they sat down.
+        // different answers depending on where they sat down -- but
+        // cached, because a console that asks on a timer would otherwise
+        // have libasound print a page of `/dev/dsp` errors per poll.
+        if let Ok(mut slot) = self.devices.lock() {
+            if let Some((taken, cached)) = slot.as_ref() {
+                if taken.elapsed() < DEVICE_CACHE {
+                    return cached.clone();
+                }
+            }
+            let fresh = enumerate_devices();
+            *slot = Some((std::time::Instant::now(), fresh.clone()));
+            return fresh;
+        }
         enumerate_devices()
     }
 
@@ -349,7 +416,7 @@ impl cat_signal::DeviceDirectory for ServerDevices {
                 // the driver's own words while the operator is still
                 // looking at the picker -- rather than two seconds later
                 // on a background thread with nobody listening.
-                let source = server::spectrum::open_spec(spec)?;
+                let source = server::spectrum::open_spec(spec, self.if_source.trim_hz())?;
                 self.if_source.select(spec.to_string(), source);
                 info!("console attached the IF source {spec}");
                 Ok(())
@@ -373,11 +440,11 @@ impl cat_signal::DeviceDirectory for ServerDevices {
 ///
 /// The console never names a concrete source type; this is the wiring
 /// layer, which is the only place that may (Rule 5).
-fn attach(device: &cat_signal::DeviceInfo, dial_hz: u64) -> Result<Attached, String> {
+fn attach(device: &cat_signal::DeviceInfo, dial_hz: u64, trim_hz: i32) -> Result<Attached, String> {
     match device.kind {
         cat_signal::DeviceKind::Sdr => cat_signal_rtlsdr::open(
             &device.spec,
-            IF_TAP,
+            if_tap(trim_hz),
             cat_signal_rtlsdr::IfSourceConfig::default(),
         )
         .map(|source| Attached::Spectrum(SpectrumFeed::start(source, dial_hz)))
@@ -427,7 +494,35 @@ fn usage_exit() -> ! {
                                       server (host:port), or a local dongle\n\
                                       as rtl:0, rtl:1, ...\n\
            --acc2-audio <endpoint>    the ACC2 receive-audio pair: a PCM\n\
-                                      server (host:port), or a sound device"
+                                      server (host:port), or a sound device.\n\
+                                      Opens the capture stream EXCLUSIVELY --\n\
+                                      do not use it alongside WSJT-X.\n\
+           --acc2-mixer <card>        which ALSA card's mixer to own. Use it\n\
+                                      alongside --acc2-audio audio:pipewire\n\
+                                      to share the card with WSJT-X and still\n\
+                                      own its levels; alone, it owns the\n\
+                                      levels and opens no PCM.\n\
+           --calibration <file>       a snapshot from `ts570d calibrate`,\n\
+                                      checked once at startup. Defaults to\n\
+                                      ~/.config/ts570d/calibration.json.\n\
+           --acc2-capture <n>         sound card capture gain, raw mixer\n\
+                                      units. Asserted on open and re-asserted\n\
+                                      after every USB re-enumeration, which\n\
+                                      silently reverts it.\n\
+           --acc2-playback <n>        the TX drive level this station\n\
+                                      expects. Reported when it differs,\n\
+                                      never set: transmit audio belongs to\n\
+                                      whatever generates it.\n\
+           --force                    open the serial port even if another\n\
+                                      process holds it. Refused by default:\n\
+                                      the CAT port is also the PTT line, so\n\
+                                      taking it from a running WSJT-X keys\n\
+                                      or unkeys the radio under it.\n\
+           --if-trim <hz>             this station's IF calibration, signed\n\
+                                      Hz (default 0). Park the radio on a\n\
+                                      known-exact carrier such as WWV, see\n\
+                                      how far the trace lands off, and pass\n\
+                                      the negative of that."
     );
     std::process::exit(1);
 }
@@ -446,9 +541,19 @@ fn parse_args() -> Args {
     let mut server_raw: Option<String> = None;
     let mut if_out: Option<String> = None;
     let mut acc2_audio: Option<String> = None;
+    let mut if_trim: i32 = 0;
 
     loop {
         match args_iter.next().as_deref() {
+            Some("--if-trim") => match args_iter.next() {
+                Some(val) => {
+                    if_trim = parse_trim_hz(&val).unwrap_or_else(|e| {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    })
+                }
+                None => usage_exit(),
+            },
             Some("--cat-only") => match args_iter.next() {
                 Some(path) => cat_only = Some(path),
                 None => usage_exit(),
@@ -561,6 +666,7 @@ fn parse_args() -> Args {
         transport,
         if_out,
         acc2_audio,
+        if_trim,
     }
 }
 
@@ -571,6 +677,35 @@ fn parse_args() -> Args {
 /// listeners), instead of running the local TUI.
 struct ServerArgs {
     port: String,
+    /// `--force`: open the port even if another process holds it.
+    ///
+    /// An escape hatch, not a default. The check reads `/proc`, and a
+    /// wrong refusal must not be the end of the road — but on this radio
+    /// the CAT port is the PTT line, so the default has to be to refuse.
+    force: bool,
+    /// This station's IF calibration in Hz, from `--if-trim`.
+    if_trim: i32,
+    /// `--calibration <file>`: a snapshot from `ts570d calibrate`, checked
+    /// once at startup. `None` is itself reported — a radio whose menus
+    /// nobody has recorded is worth one line.
+    calibration: Option<String>,
+    /// `--acc2-capture <n>`: the receive gain this server asserts and
+    /// re-asserts. `--acc2-playback <n>`: the TX drive it expects and
+    /// *reports* on, without ever setting it. Station-specific, so flags
+    /// rather than constants.
+    acc2_capture: Option<i64>,
+    acc2_playback: Option<i64>,
+    /// `--acc2-mixer <card>`: which card's mixer this server owns.
+    ///
+    /// Orthogonal to `--acc2-audio`, which says where the audio *stream*
+    /// comes from. They were briefly mutually exclusive, which was wrong:
+    /// the useful arrangement alongside WSJT-X is a stream taken through
+    /// PipeWire (`--acc2-audio audio:pipewire`, which shares) while the
+    /// mixer is owned on the card itself by name — PipeWire's device names
+    /// do not identify an ALSA card, so the mixer needs telling separately.
+    ///
+    /// On its own it owns the mixer and opens no PCM at all.
+    acc2_mixer: Option<String>,
     baud: u32,
     stop_bits: u8,
     raw_tcp_port: Option<u16>,
@@ -624,6 +759,12 @@ fn parse_server_args() -> ServerArgs {
     let mut port: Option<String> = None;
     let mut baud: u32 = 9600;
     let mut stop_bits: u8 = 1;
+    let mut if_trim: i32 = 0;
+    let mut calibration: Option<String> = None;
+    let mut force = false;
+    let mut acc2_capture: Option<i64> = None;
+    let mut acc2_playback: Option<i64> = None;
+    let mut acc2_mixer: Option<String> = None;
     let mut raw_tcp_port: Option<u16> = None;
     let mut raw_udp_port: Option<u16> = None;
     let mut rigctl_port: Option<u16> = None;
@@ -702,6 +843,24 @@ fn parse_server_args() -> ServerArgs {
             }
             Some("--if-out") => if_out = args_iter.next(),
             Some("--acc2-audio") => acc2_audio = args_iter.next(),
+            Some("--calibration") => calibration = args_iter.next(),
+            Some("--force") => force = true,
+            Some("--acc2-mixer") => acc2_mixer = args_iter.next(),
+            Some("--acc2-capture") => {
+                acc2_capture = Some(parse_mixer_level(args_iter.next(), "--acc2-capture"))
+            }
+            Some("--acc2-playback") => {
+                acc2_playback = Some(parse_mixer_level(args_iter.next(), "--acc2-playback"))
+            }
+            Some("--if-trim") => match args_iter.next() {
+                Some(val) => {
+                    if_trim = parse_trim_hz(&val).unwrap_or_else(|e| {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    })
+                }
+                None => server_usage_exit(),
+            },
             Some(_) => {}
             None => break,
         }
@@ -744,6 +903,12 @@ fn parse_server_args() -> ServerArgs {
             console_port,
             if_out,
             acc2_audio,
+            if_trim,
+            calibration,
+            force,
+            acc2_capture,
+            acc2_playback,
+            acc2_mixer,
         },
         None => server_usage_exit(),
     }
@@ -824,6 +989,22 @@ impl CatSession for TcpClientSession {
 async fn run_server_mode() {
     let args = parse_server_args();
 
+    // Checked before the open, because the open itself would succeed:
+    // a serial device permits multiple openers, and the second one to
+    // arrive silently takes the modem-control lines with it.
+    if !args.force {
+        // Asked first, because it survives the adapter re-enumerating --
+        // which is exactly when the device-node check goes blind.
+        if let Some(other) = port_guard::another_server(&args.port) {
+            eprintln!("error: {}", port_guard::already_running(&other));
+            std::process::exit(1);
+        }
+        if let Some(holder) = port_guard::contention_on(std::path::Path::new(&args.port)) {
+            eprintln!("error: {}", port_guard::refusal(&args.port, &holder));
+            std::process::exit(1);
+        }
+    }
+
     let port = SerialPort::open(
         &args.port,
         SerialConfig {
@@ -842,17 +1023,69 @@ async fn run_server_mode() {
         args.port, args.baud, args.stop_bits
     );
 
-    let session = SerialCatSession::new(port);
+    // Checked before the listeners open, while nothing else is talking to
+    // the radio. The session is borrowed through a typed client and handed
+    // straight back: a serial port opens once, and `server::run` needs it.
+    let session = {
+        let mut probe = radio::Ts570d::new(SerialCatSession::new(port));
+        // The flag wins; otherwise the default location, but only if a
+        // file is actually there. A default path that does not exist is
+        // "no snapshot", not "a snapshot that will not read" — the second
+        // reads like a fault and this is just a station that has never
+        // captured one.
+        let default = calibrate::default_path().filter(|p| p.exists());
+        let path = args
+            .calibration
+            .clone()
+            .or_else(|| default.map(|p| p.display().to_string()));
+        let status = radio::calibration::check(&mut probe, path.as_deref()).await;
+        report_calibration(&status);
+        probe.into_session()
+    };
     // Built here, not inside the server: a source named by `--if-out` and
     // one a console picks later must be opened by the same code, and this
     // is the layer allowed to name it (Rule 5).
-    let if_source = server::spectrum::IfSelection::new(args.if_out.clone());
+    let if_source = server::spectrum::IfSelection::new(args.if_out.clone(), args.if_trim);
     // The audio pair, opened up front if one was named. Opening here
     // rather than inside the server means a mistyped device fails while
     // the operator is still looking at the terminal, not two seconds
     // later on a background thread.
-    let audio_source = server::audio::AudioSelection::new();
+    // Built with the mixer values up front, so the flag, a console's
+    // attach and the capture thread's own reconnect all assert the same
+    // thing. See `server::mixer` for why the server owns this at all.
+    #[cfg(all(target_os = "linux", feature = "audio-device"))]
+    let audio_source = server::audio::AudioSelection::with_mixer(server::mixer::MixerSettings {
+        capture: args.acc2_capture,
+        playback: args.acc2_playback,
+    });
+    #[cfg(not(all(target_os = "linux", feature = "audio-device")))]
+    let audio_source = {
+        // `--acc2-capture` and `--acc2-playback` parse on every build, so
+        // a build that cannot act on them says so rather than accepting
+        // them and doing nothing -- the same trade `--if-out rtl:<n>`
+        // makes without `sdr-device`. Silently ignoring a mixer level is
+        // the worst case: the operator believes the capture gain was set.
+        if args.acc2_capture.is_some() || args.acc2_playback.is_some() {
+            eprintln!(
+                "warning: --acc2-capture/--acc2-playback need the `audio-device` \
+                 feature (Linux, ALSA); this build cannot set the mixer. Rebuild \
+                 with --features audio-device, or set the levels with amixer."
+            );
+        }
+        server::audio::AudioSelection::new()
+    };
+    // Which card's mixer to own. Named explicitly when given, because a
+    // stream taken through PipeWire says nothing about which ALSA card is
+    // behind it. Falls back to the audio spec, which names a card directly
+    // when the server opens one itself.
+    if let Some(card) = args.acc2_mixer.clone() {
+        info!("ACC2 mixer owned on {card}");
+        audio_source.set_mixer_card(&card);
+    }
     if let Some(spec) = args.acc2_audio.clone() {
+        // Recorded before the open is attempted, so the mixer is still
+        // asserted when the PCM belongs to PipeWire or WSJT-X.
+        audio_source.set_requested(&spec);
         match server::audio::open_spec(&spec) {
             Ok(source) => {
                 info!("ACC2 audio attached at {spec}");
@@ -866,6 +1099,7 @@ async fn run_server_mode() {
     let devices = std::sync::Arc::new(ServerDevices {
         if_source: std::sync::Arc::clone(&if_source),
         audio_source: std::sync::Arc::clone(&audio_source),
+        devices: std::sync::Mutex::new(None),
     });
     let config = server::ServerConfig {
         raw_tcp_port: args.raw_tcp_port,
@@ -917,6 +1151,13 @@ async fn run_app() {
     // `ui::run` session.
     if std::env::args().nth(1).as_deref() == Some("server") {
         run_server_mode().await;
+        return;
+    }
+
+    // `ts570d calibrate ...` likewise: its own flag set, no TUI, and it
+    // needs a person at the front panel rather than a console.
+    if std::env::args().nth(1).as_deref() == Some("calibrate") {
+        run_calibrate_mode().await;
         return;
     }
 
@@ -984,7 +1225,7 @@ async fn run_app() {
                 Session::Local(SerialCatSession::new(local))
             };
 
-            let sources = open_sources(args.if_out, args.acc2_audio, INITIAL_DIAL_HZ);
+            let sources = open_sources(args.if_out, args.acc2_audio, INITIAL_DIAL_HZ, args.if_trim);
 
             // `--cat-only` says this station does not key from DTR, so the
             // console is handed a line it will report as absent and the
@@ -1085,6 +1326,159 @@ async fn run_app() {
     info!("Application stopped");
 }
 
+/// Print what the startup calibration check found.
+///
+/// A warning rather than a refusal to start: a radio with no snapshot is
+/// perfectly usable, and an operator who has never wanted one should not
+/// be blocked. But menus 38 (TX inhibit) and 39 (linear amplifier relay)
+/// can each make a working radio look broken with nothing on the display
+/// to explain it, and CAT cannot read either — so a server that says
+/// nothing about them is hiding the one thing it cannot find out later.
+fn report_calibration(status: &radio::calibration::CalibrationStatus) {
+    let lines = status.lines();
+    if status.is_warning() {
+        for line in lines {
+            tracing::warn!("{line}");
+        }
+    } else {
+        for line in lines {
+            info!("{line}");
+        }
+    }
+}
+
+/// Parse and run `ts570d calibrate ...`.
+///
+/// Separate from the TUI's argument parsing for the same reason `server`
+/// is: a different flag set, and no console session at all.
+async fn run_calibrate_mode() {
+    let mut args = std::env::args().skip(2);
+    let mut port: Option<String> = None;
+    let mut server: Option<String> = None;
+    let mut baud: u32 = 9600;
+    let mut force = false;
+    let mut mode: Option<calibrate::Mode> = None;
+
+    loop {
+        match args.next().as_deref() {
+            Some("--port") => port = args.next(),
+            Some("--server") => server = args.next(),
+            Some("--baud") => {
+                baud = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| calibrate_usage_exit());
+            }
+            Some("--out") => mode = args.next().map(|out| calibrate::Mode::Capture { out }),
+            Some("--verify") => mode = args.next().map(|file| calibrate::Mode::Verify { file }),
+            Some("--restore") => mode = args.next().map(|file| calibrate::Mode::Restore { file }),
+            Some("--force") => force = true,
+            Some(_) => {}
+            None => break,
+        }
+    }
+
+    let Some(mode) = mode else {
+        eprintln!("error: one of --out, --verify or --restore is required");
+        calibrate_usage_exit();
+    };
+
+    // A serial port can only be owned once, so an operator with a
+    // `ts570d server` already running reaches the radio through it rather
+    // than being told to stop it mid-calibration.
+    match (port, server) {
+        (Some(_), Some(_)) => {
+            eprintln!("error: --port and --server are mutually exclusive");
+            std::process::exit(1);
+        }
+        (Some(path), None) => {
+            if !force {
+                if let Some(holder) = port_guard::holder_of(std::path::Path::new(&path)) {
+                    eprintln!("error: {}", port_guard::refusal(&path, &holder));
+                    std::process::exit(1);
+                }
+            }
+            let local = SerialPort::open(
+                &path,
+                SerialConfig {
+                    baud_rate: baud,
+                    initial_dtr: false,
+                    ..SerialConfig::default()
+                },
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("error: could not open {path}: {e}");
+                std::process::exit(1);
+            });
+            let mut radio = radio::Ts570d::new(SerialCatSession::new(local));
+            calibrate::run(&mut radio, mode).await;
+        }
+        (None, Some(addr)) => {
+            let tcp = TcpCatSession::connect(&addr).await.unwrap_or_else(|e| {
+                eprintln!("error: could not connect to {addr}: {e}");
+                std::process::exit(1);
+            });
+            let mut radio = radio::Ts570d::new(TcpClientSession::new(tcp));
+            calibrate::run(&mut radio, mode).await;
+        }
+        (None, None) => {
+            eprintln!("error: one of --port or --server is required");
+            calibrate_usage_exit();
+        }
+    }
+}
+
+/// Parse an `--acc2-capture` / `--acc2-playback` value.
+///
+/// Raw mixer units, not dB: they are what `amixer` prints and what a bench
+/// note records. Range-checking is left to the card, which knows its own
+/// limits and clamps; this only insists on a number.
+fn parse_mixer_level(value: Option<String>, flag: &str) -> i64 {
+    match value.as_deref().map(str::parse::<i64>) {
+        Some(Ok(n)) if n >= 0 => n,
+        Some(Ok(n)) => {
+            eprintln!("error: {flag} must not be negative, got {n}");
+            std::process::exit(1);
+        }
+        Some(Err(_)) => {
+            eprintln!("error: {flag} wants a whole number of mixer units");
+            std::process::exit(1);
+        }
+        None => {
+            eprintln!("error: {flag} requires a value");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn calibrate_usage_exit() -> ! {
+    eprintln!(
+        "Usage: ts570d calibrate (--port <port> | --server <host:port>) <action>\n\
+         \n\
+         Captures every setting this radio has, including the 52 menus. CAT\n\
+         cannot read a menu it is not parked on, so the menu pass needs you at\n\
+         the front panel: you sweep the MENU knob and it records what it sees.\n\
+         \n\
+         Actions:\n\
+         \x20 --out <file>      capture the radio's state to <file>\n\
+         \x20 --verify <file>   compare the radio against <file>\n\
+         \x20 --restore <file>  write <file> back, then sweep to confirm it landed\n\
+         \n\
+         Reaching the radio:\n\
+         \x20 --port <port>     own the serial port directly (a device path, or a\n\
+         \x20                   host:port on an RFC 2217 server)\n\
+         \x20 --server <addr>   go through a running `ts570d server`'s raw CAT\n\
+         \x20                   port, when it already owns the serial line\n\
+         \x20 --baud <rate>     default 9600\n\
+         \x20 --force           take the port even if something else holds it\n\
+         \n\
+         NOTE: menu values cannot be read back over CAT. Any front-panel menu\n\
+         change after a capture makes the file silently wrong, and no software\n\
+         can detect that. Re-capture after changing settings by hand."
+    );
+    std::process::exit(1);
+}
+
 /// Linux entry point. Uses monoio's io_uring runtime (single-threaded, !Send).
 #[cfg(target_os = "linux")]
 #[monoio::main(timer_enabled = true)]
@@ -1099,4 +1493,61 @@ async fn main() {
 #[cfg(target_os = "windows")]
 fn main() {
     win_runtime::block_on(run_app());
+}
+
+#[cfg(test)]
+mod trim_tests {
+    use super::{parse_trim_hz, MAX_TRIM_HZ};
+
+    #[test]
+    fn a_measured_negative_trim_parses() {
+        // The sign is the whole point. This bench measured its carrier
+        // rendering +115 Hz high, so the correction is -115, and a parser
+        // that dropped the sign would move the waterfall the wrong way by
+        // twice the error.
+        assert_eq!(parse_trim_hz("-115"), Ok(-115));
+    }
+
+    #[test]
+    fn a_positive_trim_parses_with_or_without_its_sign() {
+        assert_eq!(parse_trim_hz("115"), Ok(115));
+        assert_eq!(parse_trim_hz("+115"), Ok(115));
+    }
+
+    #[test]
+    fn no_calibration_is_zero_and_is_legal() {
+        // An uncalibrated station is a real state, not an error.
+        assert_eq!(parse_trim_hz("0"), Ok(0));
+    }
+
+    #[test]
+    fn the_bounds_are_inclusive() {
+        assert_eq!(parse_trim_hz(&MAX_TRIM_HZ.to_string()), Ok(MAX_TRIM_HZ));
+        assert_eq!(parse_trim_hz(&(-MAX_TRIM_HZ).to_string()), Ok(-MAX_TRIM_HZ));
+    }
+
+    #[test]
+    fn an_absurd_trim_is_refused_rather_than_silently_mislabelling() {
+        // Half a band of "calibration" is a typo or a units mix-up. Taking
+        // it would render a waterfall that is wrong everywhere and looks
+        // authoritative, which is worse than refusing to start.
+        for value in ["50001", "-50001", "14285690"] {
+            let err = parse_trim_hz(value).expect_err("should refuse");
+            assert!(
+                err.contains("not a calibration"),
+                "unhelpful message for {value:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_number_is_refused_and_says_what_it_wanted() {
+        for value in ["", "115hz", "1e3", "-115.5", " 115"] {
+            let err = parse_trim_hz(value).expect_err("should refuse");
+            assert!(
+                err.contains("whole number of Hz"),
+                "unhelpful message for {value:?}: {err}"
+            );
+        }
+    }
 }

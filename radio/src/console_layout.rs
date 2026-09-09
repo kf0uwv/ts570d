@@ -50,13 +50,21 @@ pub fn layout() -> LayoutSpec {
     LayoutSpec::new(Node::rows(vec![
         // The readout is the one thing an operator looks at without
         // meaning to, so it is at the top and it is always there.
-        // Three rows: the tab bar rides with the readout, and the readout
-        // itself is two so the pending value can sit under the confirmed
-        // one.
-        // Five: the tab bar plus the readout's two rows, with room for the
-        // GPU console's taller strip. The two renderers draw the same
-        // panel at different densities, and the layout has to fit the
-        // roomier of them or one clips.
+        //
+        // Five, and `Fixed` rather than `Natural`, because here the two
+        // renderers agree -- which was checked rather than assumed. The
+        // terminal console spends them on the tab bar, three rows of
+        // box-drawing digits, and the mode/VFO/state line. The GPU
+        // console spends them on its header strip, its large frequency,
+        // and the same tab bar. Dropped to four, the terminal console
+        // falls back to small digits and the GPU console loses its tab
+        // bar altogether -- the navigation, silently.
+        //
+        // An older comment here described a two-row readout and warned
+        // about "the GPU console's taller strip". That predates the
+        // box-drawing digits, which made this console the taller of the
+        // two. The number stayed right while the reason for it stopped
+        // being.
         Child::panel(Size::Fixed(5), PanelKind::Readout),
         // Six: BAND, MODE, and the two ribbon rows with their labels. A
         // layout that gave it fewer would clip the ribbon, and a clipped
@@ -68,12 +76,33 @@ pub fn layout() -> LayoutSpec {
                 Child::new(
                     Size::Fixed(RAIL_W),
                     Node::rows(vec![
-                        Child::panel(Size::Min(4), PanelKind::MeterRail),
+                        // The renderer says how much it needs, because
+                        // the two disagree: the terminal console draws a
+                        // meter per row and wants five, the GPU console
+                        // draws a label row and a bar per meter plus a
+                        // header and wants twelve.
+                        //
+                        // Every fixed number here was wrong for one of
+                        // them. `Min(4)` let the rail absorb every spare
+                        // row in the column -- fifteen rows to draw five.
+                        // `Fixed(5)` clipped ALC off the GPU console.
+                        // `Fixed(12)` left the terminal console seven
+                        // blank rows in the middle of its rail. There is
+                        // no number; there are two.
+                        Child::panel(Size::Natural, PanelKind::MeterRail),
                         // The AF panels under the meters, because both
                         // answer "what is the receiver doing right now"
                         // and an operator reads them together.
-                        Child::panel(Size::Fixed(6), PanelKind::AfScope),
-                        Child::panel(Size::Fixed(6), PanelKind::AfFft),
+                        //
+                        // They take the slack the meters no longer hold.
+                        // Six rows each was the minimum that fits a
+                        // header and a trace; more is not padding, it is
+                        // vertical resolution -- a taller scope resolves
+                        // an envelope a six-row one flattens, and a
+                        // taller FFT separates two tones a six-row one
+                        // merges into one bar.
+                        Child::panel(Size::Fill(1), PanelKind::AfScope),
+                        Child::panel(Size::Fill(1), PanelKind::AfFft),
                     ]),
                 ),
                 Child::new(
@@ -127,6 +156,195 @@ pub fn theme() -> Theme {
 mod tests {
     use super::*;
     use cat_layout::Area;
+
+    /// The two densities this layout has to serve. See
+    /// [`cat_layout::Size::Natural`] -- the terminal console draws a
+    /// meter per row, the GPU console a label row and a bar per meter.
+    /// A named density: how much room one renderer needs per panel.
+    ///
+    /// Boxed rather than a plain `fn`, because the terminal console's
+    /// answer depends on this radio's capabilities -- how many meters it
+    /// declares -- so the closure has to carry them.
+    type Density = (
+        &'static str,
+        Box<dyn Fn(&PanelKind, cat_layout::Direction) -> u16>,
+    );
+
+    fn densities() -> Vec<Density> {
+        let caps = cat_native::CapabilitiesWire::from(&crate::capabilities::TS570D);
+        let gpu_caps = caps.clone();
+        vec![
+            (
+                "terminal",
+                Box::new(move |k: &PanelKind, d: cat_layout::Direction| {
+                    cat_ui_ratatui::console::natural(k, d, &caps)
+                }) as Box<dyn Fn(&PanelKind, cat_layout::Direction) -> u16>,
+            ),
+            (
+                // The GPU console's arithmetic, which is not exported:
+                // a pane header plus a label row and a bar per meter.
+                "gpu",
+                Box::new(
+                    move |k: &PanelKind, d: cat_layout::Direction| match (k, d) {
+                        (PanelKind::MeterRail, cat_layout::Direction::Rows) => {
+                            2 + (gpu_caps.meters.len() as u16)
+                                .max(1)
+                                .saturating_mul(5)
+                                .div_ceil(2)
+                        }
+                        _ => cat_layout::default_natural(k, d),
+                    },
+                ),
+            ),
+        ]
+    }
+
+    /// Every panel this layout places, at the design size.
+    fn placed(w: u16, h: u16) -> Vec<(PanelKind, Area)> {
+        placed_with(w, h, &cat_layout::default_natural)
+    }
+
+    fn placed_with(w: u16, h: u16, natural: cat_layout::NaturalFn<'_>) -> Vec<(PanelKind, Area)> {
+        let spec = layout();
+        [
+            PanelKind::Readout,
+            PanelKind::QuickBar,
+            PanelKind::MeterRail,
+            PanelKind::AfScope,
+            PanelKind::AfFft,
+            PanelKind::Spectrum,
+            PanelKind::Workspace,
+            PanelKind::LevelsRail,
+            PanelKind::Status,
+            PanelKind::CommandLine,
+        ]
+        .into_iter()
+        .filter_map(|k| {
+            spec.find_with(Area::new(0, 0, w, h), &k, natural)
+                .map(|a| (k, a))
+        })
+        .collect()
+    }
+
+    #[test]
+    fn show_the_layout() {
+        // Not an assertion -- a way to see the arrangement without a
+        // terminal. `cargo test -p radio show_the_layout -- --nocapture`.
+        for (k, a) in placed(120, 40) {
+            println!(
+                "{k:12?} cols {:>3}..{:<3} rows {:>3}..{:<3}  ({}x{})",
+                a.x,
+                a.x + a.width - 1,
+                a.y,
+                a.y + a.height - 1,
+                a.width,
+                a.height
+            );
+        }
+    }
+
+    #[test]
+    fn no_two_panels_overlap() {
+        // A panel drawn over another does not look like a layout bug; it
+        // looks like the panel underneath is broken. Checked at both
+        // densities, because the rail's height differs between them and
+        // everything below it moves.
+        for (name, natural) in densities() {
+            let panels = placed_with(120, 40, &natural);
+            for (i, (ka, a)) in panels.iter().enumerate() {
+                for (kb, b) in &panels[i + 1..] {
+                    let apart = a.x + a.width <= b.x
+                        || b.x + b.width <= a.x
+                        || a.y + a.height <= b.y
+                        || b.y + b.height <= a.y;
+                    assert!(apart, "{name}: {ka:?} at {a:?} overlaps {kb:?} at {b:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_meter_rail_is_the_size_each_console_asks_for() {
+        // The point of `Size::Natural`. Every fixed number was wrong for
+        // one of the two: `Fixed(5)` clipped ALC off the GPU console and
+        // `Fixed(12)` left the terminal console seven blank rows.
+        let spec = layout();
+        let area = Area::new(0, 0, 120, 40);
+        let mut heights = Vec::new();
+        for (name, natural) in densities() {
+            let rail = spec
+                .find_with(area, &PanelKind::MeterRail, &natural)
+                .unwrap_or_else(|| panic!("{name}: no rail"));
+            heights.push((name, rail.height));
+        }
+        // Five meters on this radio -- S, PO, SWR, ALC and COMP -- so the
+        // terminal console wants one row each plus the link line, and the
+        // GPU console a header plus a label row and a bar each.
+        //
+        // These numbers moved when the compression meter was declared,
+        // and nothing in the layout had to change: that is the whole
+        // point of asking the renderer rather than writing a number here.
+        assert_eq!(heights, vec![("terminal", 6), ("gpu", 15)]);
+    }
+
+    #[test]
+    fn the_rows_the_rail_does_not_need_go_to_the_af_panels() {
+        // Not blank space: seven more rows of AF scope and FFT, which is
+        // vertical resolution.
+        let spec = layout();
+        let area = Area::new(0, 0, 120, 40);
+        let af = |natural: &dyn Fn(&PanelKind, cat_layout::Direction) -> u16| {
+            let scope = spec.find_with(area, &PanelKind::AfScope, natural).unwrap();
+            let fft = spec.find_with(area, &PanelKind::AfFft, natural).unwrap();
+            scope.height + fft.height
+        };
+        let d = densities();
+        let (terminal, gpu) = (&d[0].1, &d[1].1);
+        assert!(
+            af(terminal.as_ref()) > af(gpu.as_ref()),
+            "the tighter rail leaves more for the AF panels: {} vs {}",
+            af(terminal.as_ref()),
+            af(gpu.as_ref())
+        );
+    }
+
+    #[test]
+    fn every_row_and_column_is_claimed_by_something() {
+        // Dead space is a layout that has quietly stopped adding up.
+        for (name, natural) in densities() {
+            let panels = placed_with(120, 40, &natural);
+            let covered = |x: u16, y: u16| {
+                panels
+                    .iter()
+                    .any(|(_, a)| x >= a.x && x < a.x + a.width && y >= a.y && y < a.y + a.height)
+            };
+            for y in 0..40u16 {
+                for x in 0..120u16 {
+                    assert!(covered(x, y), "{name}: cell {x},{y} belongs to no panel");
+                }
+            }
+        }
+        let panels = placed(120, 40);
+        let covered = |x: u16, y: u16| {
+            panels
+                .iter()
+                .any(|(_, a)| x >= a.x && x < a.x + a.width && y >= a.y && y < a.y + a.height)
+        };
+        let mut gaps = Vec::new();
+        for y in 0..40u16 {
+            for x in 0..120u16 {
+                if !covered(x, y) {
+                    gaps.push((x, y));
+                }
+            }
+        }
+        assert!(
+            gaps.is_empty(),
+            "{} cells belong to no panel, first at {:?}",
+            gaps.len(),
+            gaps.first()
+        );
+    }
 
     #[test]
     fn this_radios_console_gives_the_band_the_room() {

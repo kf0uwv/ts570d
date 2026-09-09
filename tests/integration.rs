@@ -1288,8 +1288,10 @@ fn test_get_ctcss_tone_number() {
             .get_ctcss_tone_number()
             .await
             .expect("get_ctcss_tone_number");
-        // Default: 0
-        assert_eq!(v, 0, "expected ctcss_tone_number default=0");
+        // Default: 1, the low end of the documented 01~39 range. It was
+        // 0, which the radio refuses -- so a caller that read the default
+        // and wrote it back could not restore what it found.
+        assert_eq!(v, 1, "expected ctcss_tone_number default=1");
     });
 }
 
@@ -1345,8 +1347,9 @@ fn test_get_tone_number() {
     async_test!(async move {
         let mut radio = open_radio(&slave);
         let v = radio.get_tone_number().await.expect("get_tone_number");
-        // Default: 0
-        assert_eq!(v, 0, "expected tone_number default=0");
+        // Default: 1, the low end of the documented 01~39 range. See
+        // test_get_ctcss_tone_number.
+        assert_eq!(v, 1, "expected tone_number default=1");
     });
 }
 

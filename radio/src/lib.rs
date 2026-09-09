@@ -40,6 +40,7 @@
 //! assert!(fa.is_writable());
 //! ```
 
+pub mod calibration;
 pub mod capabilities;
 pub mod console_layout;
 pub mod protocol;

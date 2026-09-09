@@ -59,8 +59,25 @@ pub fn debug_draw(f: &mut ratatui::Frame, state: &RadioDisplay) {
 /// default does not reach (a tab that is not the first, a command line
 /// mid-type, a spectrum that has frames in it).
 pub fn debug_draw_view(f: &mut ratatui::Frame, state: &RadioDisplay, view: &console::ConsoleView) {
-    let caps = cat_native::CapabilitiesWire::from(&radio::capabilities::TS570D);
-    console::draw(f, f.size(), state, view, &caps);
+    console::draw(f, f.size(), state, view, &debug_capabilities());
+}
+
+/// The capabilities a still should be drawn from.
+///
+/// **With this radio's layout attached.** `CapabilitiesWire::from` does
+/// not carry one -- a layout is published separately, by the server, in
+/// the handshake -- so a still built from the bare conversion silently
+/// took `console::draw`'s no-layout fallback and showed an arrangement no
+/// operator has ever seen. It renders the same panels, so it looks
+/// plausible; it just is not the console.
+///
+/// That defeats the entire point of the example this feeds. Both consoles
+/// drifted from the design they were built from because nobody could see
+/// them, and a picture of the wrong arrangement is not seeing them.
+pub fn debug_capabilities() -> cat_native::CapabilitiesWire {
+    let mut caps = cat_native::CapabilitiesWire::from(&radio::capabilities::TS570D);
+    caps.layout = Some(radio::console_layout::layout());
+    caps
 }
 
 #[derive(Debug, thiserror::Error)]

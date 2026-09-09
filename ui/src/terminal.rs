@@ -488,7 +488,57 @@ async fn yield_sleep(duration: Duration) {
 /// `state.poll_errors` is cleared at the start of each call and re-populated
 /// with any errors from this cycle. Previous values are preserved when a
 /// getter fails.
-async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
+/// The meter `RM;`'s selector digit names.
+///
+/// From the CAT reference's METER SWITCH parameter: `0` no selection,
+/// `1` SWR, `2` COMP, `3` ALC. Anything else is a radio reporting
+/// something this does not know about, and inventing a meter for it would
+/// put a reading on a row it does not belong to.
+fn meter_switch(selector: u8) -> Option<cat_framework::capabilities::MeterKind> {
+    use cat_framework::capabilities::MeterKind;
+    match selector {
+        1 => Some(MeterKind::Swr),
+        2 => Some(MeterKind::Comp),
+        3 => Some(MeterKind::Alc),
+        _ => None,
+    }
+}
+
+/// Consecutive cycles without an essential read before the console stops
+/// calling itself linked.
+///
+/// Three, so a single dropped frame on a serial link does not flap the
+/// indicator, and an operator learns within about a second that what they
+/// are looking at has stopped being current.
+const FAIL_CYCLES_BEFORE_LOST: u32 = 3;
+
+/// The new failure count, and whether the console is still linked.
+///
+/// Driven by whether the essential read answered, not by how many errors
+/// were counted. `poll_radio_state` deliberately swallows
+/// `NotImplemented` without recording it -- a field this link cannot
+/// reach is not a fault -- so an error count is a measure of how many
+/// *reachable* fields went wrong, which is not the same question. When
+/// the server went away, a cycle produced four errors against a threshold
+/// of ten and the console went on saying "linked" beside `IF: connection
+/// lost`.
+fn link_health(essential: bool, fail_cycles: u32) -> (u32, bool) {
+    let cycles = if essential {
+        0
+    } else {
+        fail_cycles.saturating_add(1)
+    };
+    (cycles, cycles < FAIL_CYCLES_BEFORE_LOST)
+}
+
+/// Poll the radio into `state`, and say whether the **essential** read
+/// answered.
+///
+/// `IF` is the essential one: it carries the dial, the mode and the
+/// keyed state. Everything else on this console is detail beside it, and
+/// a console that cannot read `IF` is not talking to a radio, whatever
+/// else it managed.
+async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) -> bool {
     radio.flush_rx();
     state.poll_errors.clear();
 
@@ -496,13 +546,15 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
         ($label:expr, $expr:expr, $ok:expr) => {
             match $expr.await {
                 Ok(v) => $ok(v),
-                // A field this link cannot reach is not a fault. Over the
-                // native console protocol most of this radio's controls
-                // have no wire representation, and reporting each one as
-                // an error would put a permanent banner over a console
-                // that is working exactly as it can. The field simply
-                // stays at its default, which is what an unread field
-                // should look like.
+                // A field this link cannot reach is not a fault, and
+                // reporting each one as an error would put a permanent
+                // banner over a console working exactly as it can.
+                //
+                // The field stays at its struct default -- which is NOT
+                // what an unread field should look like, and used to be
+                // drawn as though it were a reading. `levels_known` is
+                // what keeps that honest now: unless a read answers, the
+                // rail draws dashes rather than the default.
                 Err(radio::RadioError::NotImplemented) => {}
                 Err(e) => {
                     if state.poll_errors.len() < 20 {
@@ -513,10 +565,12 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
         };
     }
 
+    let mut essential = false;
     poll!(
         "IF",
         radio.get_information(),
         |info: radio::InformationResponse| {
+            essential = true;
             state.vfo_a_hz = info.frequency.hz();
             state.mode = info.mode.name().to_string();
             // Beside the label, not instead of it: the label is what an
@@ -538,50 +592,107 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
     poll!("VFO-B", radio.get_vfo_b(), |freq: radio::Frequency| {
         state.vfo_b_hz = freq.hz();
     });
+    // The second meter, and only while keyed: `RM;` reports whichever of
+    // SWR, compression or ALC the operator selected, all three of which
+    // are transmit meters reading zero the rest of the time. Cleared
+    // first so a reading does not outlive the transmission that produced
+    // it -- an ALC bar left standing after the radio unkeyed would be a
+    // picture of a moment that has passed.
+    state.meters.clear();
+    if state.tx {
+        poll!("RM", radio.get_meter_reading(), |(selector, raw): (
+            u8,
+            u16
+        )| {
+            if let Some(kind) = meter_switch(selector) {
+                state.meters.push(cat_native::MeterSample { kind, raw });
+            }
+        });
+    }
     poll!("SM", radio.get_smeter(), |s: u16| {
         state.smeter = s;
+        // `SM;` is two meters. While receiving it is the S-meter; while
+        // transmitting the manual says it is "a calibrated power meter".
+        // `state.tx` was set by the `IF` read a few lines above, in the
+        // same cycle, so the reading is labelled with the state it was
+        // taken in rather than assumed to be a signal strength.
+        state.meter_kind = if state.tx {
+            cat_framework::capabilities::MeterKind::Po
+        } else {
+            cat_framework::capabilities::MeterKind::S
+        };
     });
+    // Cleared, then set by the first level read that actually answers.
+    //
+    // `poll!` leaves a failed read at its struct default, which is *not*
+    // what an unread field should look like: it would draw `AF 200` at a
+    // radio reading `AG034`, confidently and indistinguishably from a
+    // reading. `levels_known` is what keeps the rail honest.
+    //
+    // Counted rather than taken from the first one that answers. Over the
+    // console protocol they do share a source -- the server's slow-poll
+    // block, absent until the first slow poll lands -- so one answering
+    // really does mean all did. Over a *serial* link each is its own CAT
+    // command and they fail independently, and there the old shortcut
+    // would have let a single successful `AG` vouch for thirteen struct
+    // defaults. The rail is known when every field behind it is.
+    let mut levels_read = 0usize;
     poll!("AF", radio.get_af_gain(), |v: u8| {
         state.af_gain = v;
+        levels_read += 1;
     });
     poll!("RF", radio.get_rf_gain(), |v: u8| {
         state.rf_gain = v;
+        levels_read += 1;
     });
     poll!("SQ", radio.get_squelch(), |v: u8| {
         state.squelch = v;
+        levels_read += 1;
     });
     poll!("MG", radio.get_mic_gain(), |v: u8| {
         state.mic_gain = v;
+        levels_read += 1;
     });
     poll!("PC", radio.get_power(), |v: u8| {
         state.power_pct = v;
+        levels_read += 1;
     });
     poll!("GT", radio.get_agc(), |v: u8| {
         state.agc = v;
+        levels_read += 1;
     });
     poll!("NB", radio.get_noise_blanker(), |v: bool| {
         state.noise_blanker = v;
+        levels_read += 1;
     });
     poll!("NR", radio.get_noise_reduction(), |v: u8| {
         state.noise_reduction = v;
+        levels_read += 1;
     });
     poll!("PA", radio.get_preamp(), |v: bool| {
         state.preamp = v;
+        levels_read += 1;
     });
     poll!("RA", radio.get_attenuator(), |v: bool| {
         state.attenuator = v;
+        levels_read += 1;
     });
     poll!("PR", radio.get_speech_processor(), |v: bool| {
         state.speech_processor = v;
+        levels_read += 1;
     });
+    // Not a rail field -- the reference rail has no beat-cancel row --
+    // so it is polled but not counted towards `levels_known`.
     poll!("BC", radio.get_beat_cancel(), |v: u8| {
         state.beat_cancel = v;
     });
     poll!("VX", radio.get_vox(), |v: bool| {
         state.vox = v;
+        levels_read += 1;
     });
     poll!("AN", radio.get_antenna(), |v: u8| {
         state.antenna = v;
+        levels_read += 1;
     });
     poll!("FR", radio.get_rx_vfo(), |v: u8| {
         state.rx_vfo = v;
@@ -591,11 +702,26 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut RadioDisplay) {
     });
     poll!("LK", radio.get_frequency_lock(), |v: bool| {
         state.freq_lock = v;
+        levels_read += 1;
     });
+    // Every field the reference rail draws has now been asked for. It is
+    // "known" only if all of them answered: one field left at its struct
+    // default and drawn as a reading is the whole failure this guards.
+    state.levels_known = levels_read == REFERENCE_RAIL_FIELDS;
+
     poll!("FS", radio.get_fine_step(), |v: bool| {
         state.fine_step = v;
     });
+    essential
 }
+
+/// How many fields the reference rail draws, and therefore how many reads
+/// have to answer before it can be called known.
+///
+/// ANT, AF, RF, SQL, MIC, PWR, AGC, NB, NR, PRE, ATT, PROC, VOX, LOCK.
+/// Beat-cancel is polled beside them and is deliberately not among them:
+/// the rail has no row for it.
+const REFERENCE_RAIL_FIELDS: usize = 14;
 
 // ---------------------------------------------------------------------------
 // Diagnostic helpers
@@ -2507,27 +2633,43 @@ async fn radio_task<R: Radio + 'static>(
 ) {
     let mut fail_cycles: u32 = 0;
     let mut if_shift_dir: char = ' ';
+    // Carried between cycles rather than rebuilt. Every cycle used to
+    // start from `RadioDisplay::default()`, so any field a poll failed to
+    // set fell back to an *invented* value -- and the default dial is
+    // 14_000_000. Kill the server under an attached console and it drew
+    // `14.000.000 MHz` at a radio sitting on 14.074.000: not stale, not
+    // blank, just wrong, and indistinguishable from a reading.
+    //
+    // Holding the last reading is the same choice the server makes for
+    // its own cache, and for the same reason: one missed poll on a serial
+    // link is ordinary, and blanking on each one would make the whole
+    // console flicker between known and unknown. What has to be right is
+    // that the operator is told when to stop trusting it -- which is what
+    // `connected` is for, below.
+    let mut state = RadioDisplay {
+        initializing: false,
+        ..RadioDisplay::default()
+    };
 
     loop {
-        // 1. Poll radio state.
-        let mut state = RadioDisplay {
-            initializing: false,
-            ..RadioDisplay::default()
-        };
-        poll_radio_state(&mut radio, &mut state).await;
+        // 1. Poll radio state, over the top of the last one.
+        let essential = poll_radio_state(&mut radio, &mut state).await;
 
         // 2. Update connection health.
-        const FAIL_THRESHOLD: usize = 10;
-        if state.poll_errors.len() >= FAIL_THRESHOLD {
-            fail_cycles = fail_cycles.saturating_add(1);
-        } else {
-            fail_cycles = 0;
-        }
-        state.connected = fail_cycles < 3;
+        //
+        // Judged on whether the essential read answered, not on how many
+        // errors were counted. `poll!` deliberately swallows
+        // `NotImplemented` without recording it -- a field this link
+        // cannot reach is not a fault -- so when the server went away the
+        // cycle produced four errors against a threshold of ten, and the
+        // console went on saying "linked" beside `IF: connection lost`.
+        let linked;
+        (fail_cycles, linked) = link_health(essential, fail_cycles);
+        state.connected = linked;
         state.initializing = false;
 
         // 3. Send state snapshot to UI task.
-        ch_send(&update_tx, RadioUpdate::State(state));
+        ch_send(&update_tx, RadioUpdate::State(state.clone()));
 
         // 4. Process all pending commands from the UI task.
         for cmd in ch_recv_all(&cmd_rx) {
@@ -2690,6 +2832,7 @@ async fn ui_task(
         if let Some(feed) = sources.spectrum.as_ref() {
             feed.retune(state.vfo_a_hz);
             view.spectrum = feed.frames();
+            view.spectrum_live = feed.is_live();
             if let Some(fault) = feed.fault() {
                 view.message = Some(fault);
             }
@@ -3234,5 +3377,53 @@ mod console_action_tests {
                 _ => panic!("{hz} Hz produced the wrong action"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_link_that_answers_is_linked() {
+        assert_eq!(link_health(true, 0), (0, true));
+    }
+
+    #[test]
+    fn one_missed_cycle_does_not_flap_the_indicator() {
+        // A dropped frame on a serial link is ordinary. An indicator that
+        // reported it would cry wolf often enough to be ignored.
+        let (cycles, linked) = link_health(false, 0);
+        assert_eq!(cycles, 1);
+        assert!(linked);
+    }
+
+    #[test]
+    fn a_link_that_stops_answering_is_reported_lost() {
+        // The bug this replaced: the console said "linked" beside
+        // `IF: connection lost` because the old rule needed ten recorded
+        // errors and the failure produced four.
+        let mut cycles = 0;
+        let mut linked = true;
+        for _ in 0..FAIL_CYCLES_BEFORE_LOST {
+            (cycles, linked) = link_health(false, cycles);
+        }
+        assert!(!linked, "after {cycles} silent cycles the link is gone");
+    }
+
+    #[test]
+    fn one_good_read_clears_the_count() {
+        let (cycles, linked) = link_health(true, 99);
+        assert_eq!(cycles, 0);
+        assert!(linked);
+    }
+
+    #[test]
+    fn a_long_outage_does_not_overflow_the_count() {
+        let mut cycles = u32::MAX - 1;
+        for _ in 0..5 {
+            (cycles, _) = link_health(false, cycles);
+        }
+        assert_eq!(cycles, u32::MAX);
     }
 }
