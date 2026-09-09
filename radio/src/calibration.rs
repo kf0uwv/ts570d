@@ -1457,3 +1457,285 @@ mod tests {
         assert_eq!(iso8601_utc(1_709_164_800), "2024-02-29T00:00:00Z");
     }
 }
+
+// ---------------------------------------------------------------------------
+
+/// `restore` driven against a radio that actually remembers what it was
+/// told.
+///
+/// The tests above cover the *policy* -- what `NEVER_RESTORE` holds, what
+/// a report means -- but nothing exercised `restore` itself, which is the
+/// one function in this tree whose job is to overwrite a radio's whole
+/// configuration. Its failure mode is not a panic: it is a restore that
+/// reports success having written nothing, or having written to the wrong
+/// settings, and the operator finds out days later.
+///
+/// The fake here is the emulator's own command handler over the real
+/// command table, so a setting written comes back changed and one that
+/// was skipped comes back untouched. That is the property a queue of
+/// canned replies cannot check.
+///
+/// Gated to Linux for the reason the module in `ts570d.rs` is: these use
+/// `#[monoio::test]`, and monoio is a Linux-only dependency.
+#[cfg(all(test, target_os = "linux"))]
+mod restore_against_a_stateful_radio {
+    use super::*;
+    use crate::radio_state::RadioState;
+    use crate::ts570d_radio_handlers::handle;
+    use async_trait::async_trait;
+    use cat_transport_core::{Transport, TransportError};
+    use cat_transport_serial::SerialCatSession;
+    use std::collections::VecDeque;
+
+    /// Every complete command a radio was sent, shared out of the
+    /// transport because `SharedSession` owns it once the client is built.
+    type CommandLog = std::rc::Rc<std::cell::RefCell<Vec<String>>>;
+
+    /// A transport whose other end is the emulator's dispatch.
+    struct EmulatedRadio {
+        state: RadioState,
+        /// Bytes the client has written but that have not yet formed a
+        /// whole `;`-terminated command.
+        partial: Vec<u8>,
+        /// Bytes waiting for the client to read.
+        pending: VecDeque<u8>,
+        /// Every complete command the radio was sent, in order. This is
+        /// how a test asks "was `PS` ever written", which is a question
+        /// about what did *not* happen and so cannot be answered by
+        /// looking at the resulting state.
+        seen: CommandLog,
+    }
+
+    impl EmulatedRadio {
+        fn new(seen: CommandLog) -> Self {
+            Self {
+                state: RadioState::default(),
+                partial: Vec::new(),
+                pending: VecDeque::new(),
+                seen,
+            }
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl Transport for EmulatedRadio {
+        async fn write(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+            for b in data {
+                self.partial.push(*b);
+                if *b == b';' {
+                    // `handle` takes the command without its terminator,
+                    // the way the emulator's framework hands it over.
+                    let cmd = String::from_utf8_lossy(&self.partial[..self.partial.len() - 1])
+                        .to_string();
+                    self.partial.clear();
+                    let (reply, _changes) = handle(&cmd, &mut self.state);
+                    self.seen.borrow_mut().push(cmd);
+                    self.pending.extend(reply.as_bytes());
+                }
+            }
+            Ok(data.len())
+        }
+
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+            match self.pending.pop_front() {
+                Some(byte) => {
+                    buf[0] = byte;
+                    Ok(1)
+                }
+                None => Ok(0),
+            }
+        }
+
+        async fn flush(&mut self) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    fn radio() -> (Ts570d<SerialCatSession<EmulatedRadio>>, CommandLog) {
+        let seen: CommandLog = Default::default();
+        let r = Ts570d::new(SerialCatSession::new(EmulatedRadio::new(seen.clone())));
+        (r, seen)
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn a_captured_radio_restores_to_the_state_it_was_captured_in() {
+        // The whole point of the file, end to end: capture, disturb the
+        // radio, restore, capture again, and the two files agree.
+        let (mut r, _seen) = radio();
+        let mut before = Snapshot::new("TS-570D", "2026-09-08T00:00:00Z".to_string());
+        capture_settings(&mut r, &mut before)
+            .await
+            .expect("the emulated radio answers");
+        assert!(
+            before.settings.len() > 10,
+            "captured only {} settings, so this proves little",
+            before.settings.len()
+        );
+
+        // Move the radio somewhere it demonstrably was not.
+        r.client
+            .set("FA", "00021074000".to_string())
+            .await
+            .expect("frequency accepted");
+        let mut moved = Snapshot::new("TS-570D", "2026-09-08T00:01:00Z".to_string());
+        capture_settings(&mut r, &mut moved).await.expect("answers");
+        assert_ne!(
+            before.settings.get("FA"),
+            moved.settings.get("FA"),
+            "the disturbance did not take, so the restore below proves nothing"
+        );
+
+        let report = restore(&mut r, &before).await;
+        assert!(
+            report.settings_failed.is_empty(),
+            "settings did not take: {:?}",
+            report.settings_failed
+        );
+
+        let mut after = Snapshot::new("TS-570D", "2026-09-08T00:02:00Z".to_string());
+        capture_settings(&mut r, &mut after).await.expect("answers");
+        assert_eq!(
+            before.settings, after.settings,
+            "the radio did not come back to where it was captured"
+        );
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn a_restore_confirms_what_it_wrote_rather_than_assuming_it() {
+        // `settings_confirmed` must mean "written and read back equal",
+        // not "the write returned Ok". A report that counts sends is a
+        // report that says success when the radio ignored every one.
+        let (mut r, _seen) = radio();
+        let mut snap = Snapshot::new("TS-570D", "2026-09-08T00:00:00Z".to_string());
+        capture_settings(&mut r, &mut snap).await.expect("answers");
+
+        let report = restore(&mut r, &snap).await;
+        assert!(
+            !report.settings_confirmed.is_empty(),
+            "nothing was confirmed, so the read-back is not running"
+        );
+        for code in &report.settings_confirmed {
+            let want = &snap.settings[code];
+            let definition = TS570D_COMMAND_TABLE
+                .definitions()
+                .iter()
+                .find(|d| d.code == code)
+                .expect("confirmed a setting the table does not define");
+            let raw = r.client.query(definition.code).await.expect("readable");
+            let got = payload_of(&raw, definition.code).unwrap_or_default();
+            assert_eq!(
+                got,
+                want.as_str(),
+                "{code} was reported confirmed but reads {got:?}, not {want:?}"
+            );
+        }
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn a_restore_never_sends_the_two_commands_that_would_hurt() {
+        // `NEVER_RESTORE` is asserted as a list elsewhere. This asserts
+        // the list is consulted: `PS0;` powers the radio off mid-restore
+        // and `AC` drives the antenna tuner, which on a radio into a
+        // mismatched load is not a configuration change.
+        let (mut r, seen) = radio();
+        let mut snap = Snapshot::new("TS-570D", "2026-09-08T00:00:00Z".to_string());
+        capture_settings(&mut r, &mut snap).await.expect("answers");
+        // Only meaningful if the capture actually saw them.
+        let captured_dangerous: Vec<&str> = NEVER_RESTORE
+            .iter()
+            .copied()
+            .filter(|c| snap.settings.contains_key(*c))
+            .collect();
+        assert!(
+            !captured_dangerous.is_empty(),
+            "the capture saw neither PS nor AC, so this test is vacuous"
+        );
+
+        let sent_before = seen.borrow().len();
+        let report = restore(&mut r, &snap).await;
+        let sent: Vec<String> = seen.borrow()[sent_before..].to_vec();
+
+        for code in captured_dangerous {
+            assert!(
+                !sent.iter().any(|c| c.starts_with(code) && c.len() > 3),
+                "restore sent a {code} write: {sent:?}"
+            );
+            assert!(
+                !report.settings_confirmed.iter().any(|c| c == code),
+                "{code} was reported restored but must never be written"
+            );
+        }
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn menus_are_written_and_reported_as_unconfirmed() {
+        // Menu writes land silently -- the radio acknowledges nothing and
+        // a read needs the panel knob -- so the report must not claim
+        // them. This is the assertion that stops a caller skipping the
+        // verify sweep.
+        let (mut r, _seen) = radio();
+        let mut snap = Snapshot::new("TS-570D", "2026-09-08T00:00:00Z".to_string());
+        snap.record_menu(34, 9, MenuSource::Panel);
+        snap.record_menu(20, 8, MenuSource::Panel);
+
+        let report = restore(&mut r, &snap).await;
+        assert_eq!(report.menus_written, vec![20, 34]);
+        assert!(
+            report.needs_verify_sweep(),
+            "menus were written, so the restore is not finished"
+        );
+        assert!(
+            report.settings_confirmed.is_empty(),
+            "no CAT settings were in the file"
+        );
+
+        // Menu 20 is the one menu that answers for itself: it and `PT`
+        // are the same setting, so the write is checkable without the
+        // panel. This is the path `capture_aliased_menus` uses.
+        let pt = r.client.query("PT").await.expect("PT answers");
+        assert_eq!(pt, "PT08;", "the menu 20 write did not land");
+
+        // Menu 34 is the ordinary case, and this is why the sweep is not
+        // optional: writing a menu does not move the panel's selection,
+        // so `EX;` still answers for whichever menu the knob is on and
+        // says nothing at all about the one just written. Confirmed on
+        // the physical radio 2026-09-07.
+        let raw = r.client.query("EX").await.expect("EX answers");
+        assert!(
+            !raw.starts_with("EX034"),
+            "EX followed the write to menu 34 ({raw:?}); if the radio really \
+             does this, the mandatory verify sweep can be reconsidered"
+        );
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn a_setting_the_radio_refuses_is_reported_failed_not_confirmed() {
+        // The failure this exists to catch: a restore that reports every
+        // setting confirmed because it never compared. The emulator
+        // ignores an out-of-range tone number in silence -- exactly what
+        // the physical radio does -- so the write returns Ok and the
+        // read-back disagrees.
+        let (mut r, _seen) = radio();
+        let mut snap = Snapshot::new("TS-570D", "2026-09-08T00:00:00Z".to_string());
+        capture_settings(&mut r, &mut snap).await.expect("answers");
+        snap.record_setting("TN", "99");
+
+        let report = restore(&mut r, &snap).await;
+        let failed = report
+            .settings_failed
+            .iter()
+            .find(|c| c.what == "TN")
+            .unwrap_or_else(|| {
+                panic!(
+                    "TN 99 was not reported as failed; confirmed={:?} failed={:?}",
+                    report.settings_confirmed, report.settings_failed
+                )
+            });
+        assert_eq!(failed.was, "99");
+        assert_ne!(failed.now, "99", "the radio cannot have accepted it");
+        assert!(
+            !report.settings_confirmed.iter().any(|c| c == "TN"),
+            "a refused setting must not also be reported confirmed"
+        );
+    }
+}
