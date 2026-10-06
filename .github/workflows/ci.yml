@@ -9,15 +9,35 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # ts570d builds against a sibling checkout of radio-cat-rs: the root
+  # Cargo.toml has `path = "../radio-cat-rs/..."` dependencies and a
+  # [patch] pointing every radio-cat-rs crate there. So both jobs check the
+  # two repositories out side by side (ts570d/ and radio-cat-rs/) and run
+  # from ts570d/. This is the one place that says which radio-cat-rs to
+  # build against; it must be a ref that contains everything ts570d uses
+  # (cat-morse, AudioPlayback, the Windows broker fixes).
+  RADIO_CAT_RS_REF: main
 
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ts570d
 
     steps:
-      - name: Checkout
+      - name: Checkout ts570d
         uses: actions/checkout@v4
+        with:
+          path: ts570d
+
+      - name: Checkout radio-cat-rs (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: kf0uwv/radio-cat-rs
+          ref: ${{ env.RADIO_CAT_RS_REF }}
+          path: radio-cat-rs
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -32,8 +52,8 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            ts570d/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('ts570d/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -41,9 +61,9 @@ jobs:
         # libhamlib-utils provides `rigctl`, the real client the rigctld
         # bridge is verified against. Both of radio-cat-rs ADR 0005's
         # interop bugs passed every unit test while failing against it.
-        # libasound2-dev: `--all-features` below includes `audio-device`,
-        # which links ALSA through cpal.
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev libhamlib-utils libasound2-dev
+        # libasound2-dev and librtlsdr-dev: `--all-features` below includes
+        # `audio-device` (ALSA through cpal) and `sdr-device` (librtlsdr).
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libhamlib-utils libasound2-dev librtlsdr-dev
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -81,6 +101,9 @@ jobs:
   windows-check:
     name: Windows (MSVC)
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: ts570d
 
     # Authoritative Windows verification, per `radio-cat-rs` ADR 0012.
     #
@@ -102,8 +125,17 @@ jobs:
     # (`serialport::TTYPort::pair()`) is Unix-only by design, not by
     # toolchain (see this repo's CLAUDE.md "Linux-Specific" section).
     steps:
-      - name: Checkout
+      - name: Checkout ts570d
         uses: actions/checkout@v4
+        with:
+          path: ts570d
+
+      - name: Checkout radio-cat-rs (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: kf0uwv/radio-cat-rs
+          ref: ${{ env.RADIO_CAT_RS_REF }}
+          path: radio-cat-rs
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -117,8 +149,8 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-windows-msvc-${{ hashFiles('**/Cargo.lock') }}
+            ts570d/target
+          key: ${{ runner.os }}-cargo-windows-msvc-${{ hashFiles('ts570d/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-windows-msvc-
             ${{ runner.os }}-cargo-
@@ -128,3 +160,8 @@ jobs:
 
       - name: cargo test (workspace, excluding emulator)
         run: cargo test --workspace --exclude emulator
+
+      - name: cargo check with audio-device (cw copy's speaker, WASAPI)
+        # The Windows release builds with this feature; nothing else here
+        # compiles the cpal path on Windows.
+        run: cargo check -p ts570d --features audio-device
