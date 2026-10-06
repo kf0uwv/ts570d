@@ -33,6 +33,14 @@ on:
 # https://github.com/kf0uwv/radio-cat-rs -- see that repo's ADR 0008's own
 # explicit callout. This is expected, not a bug in this file.
 
+# KNOWN GAP (2026-10-06): the shared workflow builds `cargo build --release
+# -p ts570d` with no `--features`, and then runs build-deb.sh with
+# --skip-build, so released binaries (deb and Windows zip alike) lack
+# `audio-device` -- and `ts570d cw copy` cannot play audio without it.
+# The fix needs a features input on radio-cat-rs's release-app.yml (Linux:
+# `sdr-device,audio-device`; Windows: `audio-device` only, since there is
+# no librtlsdr there). Until then, `make deb` builds a complete package.
+
 jobs:
   release:
     permissions:

@@ -41,7 +41,9 @@ jobs:
         # libhamlib-utils provides `rigctl`, the real client the rigctld
         # bridge is verified against. Both of radio-cat-rs ADR 0005's
         # interop bugs passed every unit test while failing against it.
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev libhamlib-utils
+        # libasound2-dev: `--all-features` below includes `audio-device`,
+        # which links ALSA through cpal.
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libhamlib-utils libasound2-dev
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -51,6 +53,12 @@ jobs:
 
       - name: Unit tests
         run: cargo test --lib --all
+
+      - name: Binary unit tests
+        # `--lib` skips binary targets, and the root `ts570d` package has no
+        # lib target: without this, src/main.rs and src/cw/ tests (including
+        # `cw copy`'s read-only safety test) ran only on the Windows job.
+        run: cargo test --workspace --bins
 
       - name: Integration tests
         # Requires /dev/pts (ptmx) and io_uring (kernel 5.1+).
