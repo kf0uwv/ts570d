@@ -48,6 +48,7 @@
 mod win_runtime;
 
 mod calibrate;
+mod cw;
 mod port_guard;
 
 #[path = "endpoint.rs"]
@@ -1161,6 +1162,12 @@ async fn run_app() {
         return;
     }
 
+    // `ts570d cw ...`: the Morse trainer. Its own flag set, no console.
+    if std::env::args().nth(1).as_deref() == Some("cw") {
+        run_cw_mode().await;
+        return;
+    }
+
     // 2. Parse CLI arguments.
     let args = parse_args();
 
@@ -1479,6 +1486,327 @@ fn calibrate_usage_exit() -> ! {
     std::process::exit(1);
 }
 
+// ---------------------------------------------------------------------------
+// `ts570d cw` -- the Morse trainer
+// ---------------------------------------------------------------------------
+
+/// `ts570d cw copy`'s flags, parsed but not yet resolved against the radio.
+#[derive(Debug, Clone, PartialEq)]
+struct CwCopyArgs {
+    server_raw: Option<String>,
+    kind: cw::Kind,
+    level: cw::Level,
+    qsos: u32,
+    call: cat_morse::Callsign,
+    wpm: Option<u32>,
+    farnsworth: cw::Farnsworth,
+    pitch_hz: Option<f32>,
+    seed: Option<u64>,
+    adapt: bool,
+    audio_out: Option<String>,
+    data_dir: Option<std::path::PathBuf>,
+}
+
+/// What `ts570d cw <...>` asked for.
+#[derive(Debug, Clone, PartialEq)]
+enum CwCommand {
+    Copy(Box<CwCopyArgs>),
+    Send,
+}
+
+/// Parse everything after `ts570d cw`. Pure, so it can be tested; unknown
+/// flags are errors, because a typo here would otherwise quietly become a
+/// default.
+fn parse_cw_args(mut args: impl Iterator<Item = String>) -> Result<CwCommand, String> {
+    match args.next().as_deref() {
+        Some("copy") => {}
+        Some("send") => return Ok(CwCommand::Send),
+        Some(other) => return Err(format!("unknown cw mode {other:?}; expected copy or send")),
+        None => return Err("a cw mode is required: copy (or send)".to_string()),
+    }
+
+    fn value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
+        args.next()
+            .ok_or_else(|| format!("{flag} requires a value"))
+    }
+    fn number<T>(text: String, flag: &str, range: std::ops::RangeInclusive<T>) -> Result<T, String>
+    where
+        T: std::str::FromStr + PartialOrd + std::fmt::Display,
+    {
+        match text.parse::<T>() {
+            Ok(n) if range.contains(&n) => Ok(n),
+            _ => Err(format!(
+                "{flag} wants a number {}-{}, got {text:?}",
+                range.start(),
+                range.end()
+            )),
+        }
+    }
+
+    let mut server_raw = None;
+    let mut kind = cw::Kind::Mixed;
+    let mut level = cw::Level::Intermediate;
+    let mut qsos = 5;
+    let mut call = None;
+    let mut wpm = None;
+    let mut farnsworth = cw::Farnsworth::Preset;
+    let mut pitch_hz = None;
+    let mut seed = None;
+    let mut adapt = true;
+    let mut audio_out = None;
+    let mut data_dir = None;
+
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--server-raw" => server_raw = Some(value(&mut args, &flag)?),
+            "--kind" => kind = value(&mut args, &flag)?.parse()?,
+            "--level" => level = value(&mut args, &flag)?.parse()?,
+            "--qsos" => qsos = number(value(&mut args, &flag)?, &flag, 1..=100)?,
+            "--call" => {
+                let v = value(&mut args, &flag)?;
+                call = Some(
+                    cat_morse::Callsign::parse(&v.to_ascii_uppercase())
+                        .map_err(|e| format!("--call {v:?}: {e}"))?,
+                );
+            }
+            "--wpm" => {
+                wpm = Some(number(
+                    value(&mut args, &flag)?,
+                    &flag,
+                    cw::MIN_WPM..=cw::MAX_WPM,
+                )?)
+            }
+            "--farnsworth" => farnsworth = value(&mut args, &flag)?.parse()?,
+            "--pitch" => {
+                pitch_hz = Some(number(
+                    value(&mut args, &flag)?,
+                    &flag,
+                    cw::MIN_PITCH_HZ..=cw::MAX_PITCH_HZ,
+                )?)
+            }
+            "--seed" => {
+                let v = value(&mut args, &flag)?;
+                seed = Some(
+                    v.parse()
+                        .map_err(|_| format!("--seed wants a whole number, got {v:?}"))?,
+                );
+            }
+            "--no-adapt" => adapt = false,
+            "--audio-out" => audio_out = Some(value(&mut args, &flag)?),
+            "--data-dir" => data_dir = Some(std::path::PathBuf::from(value(&mut args, &flag)?)),
+            other => return Err(format!("unknown flag {other:?}")),
+        }
+    }
+
+    let call = call.ok_or_else(|| {
+        "--call is required: the stations you work send to your callsign".to_string()
+    })?;
+    Ok(CwCommand::Copy(Box::new(CwCopyArgs {
+        server_raw,
+        kind,
+        level,
+        qsos,
+        call,
+        wpm,
+        farnsworth,
+        pitch_hz,
+        seed,
+        adapt,
+        audio_out,
+        data_dir,
+    })))
+}
+
+fn cw_usage_exit() -> ! {
+    eprintln!(
+        "Usage: ts570d cw copy --call <callsign> [options]\n\
+         \n\
+         Copy practice. The PC plays synthesized on-air contacts through band\n\
+         noise, fading, static and QRM; you type what you copy while it plays,\n\
+         and every over is scored character by character. Nothing is\n\
+         transmitted: with --server-raw the radio is asked for its CW pitch\n\
+         (PT;) and keyer speed (KS;) once, and nothing else.\n\
+         \n\
+         Options:\n\
+         \x20 --call <cs>             your callsign (required)\n\
+         \x20 --kind <k>              ragchew|contest|pota|sota|pileup|mixed (mixed)\n\
+         \x20 --level <l>             beginner|intermediate|advanced (intermediate)\n\
+         \x20 --qsos <n>              contacts in the session, 1-100 (5)\n\
+         \x20 --wpm <n>               starting speed, 5-60 (radio's KS, else 20)\n\
+         \x20 --farnsworth <wpm|off>  effective speed (the level's preset)\n\
+         \x20 --pitch <hz>            tone, 300-1200 (radio's PT, else 600)\n\
+         \x20 --seed <n>              replay a session (printed at the start)\n\
+         \x20 --no-adapt              keep the speed fixed\n\
+         \x20 --server-raw <addr>     a running `ts570d server`'s --raw-tcp-port,\n\
+         \x20                         to follow the radio's pitch and speed\n\
+         \x20 --audio-out <spec>      audio:<name> (the default output device)\n\
+         \x20 --data-dir <path>       where stats and history live\n\
+         \n\
+         Keys: type copy, Enter submits, Ctrl-R/F5 AGN, Ctrl-N/F6 skip, Esc quits.\n\
+         \n\
+         Known limitations: the --server-raw connection has no read timeout, so a\n\
+         server that never answers hangs startup; two sessions at once means the\n\
+         last to save stats.json wins (history.jsonl keeps both).\n\
+         \n\
+         `ts570d cw send` (sending practice) is not available yet."
+    );
+    std::process::exit(1);
+}
+
+/// A sound card, as the trainer's speaker.
+#[cfg(feature = "audio-device")]
+struct PlaybackSink(cat_signal_audio::AudioPlayback);
+
+#[cfg(feature = "audio-device")]
+impl cw::audio::AudioSink for PlaybackSink {
+    fn sample_rate_hz(&self) -> u32 {
+        self.0.format().sample_rate_hz
+    }
+    fn write(&mut self, mono: &[f32]) -> Result<usize, String> {
+        self.0.write(mono).map_err(|e| e.to_string())
+    }
+    fn queued(&self) -> usize {
+        self.0.queued()
+    }
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+    fn underruns(&self) -> u64 {
+        self.0.underruns()
+    }
+}
+
+/// Parse and run `ts570d cw ...`.
+async fn run_cw_mode() {
+    let args = match parse_cw_args(std::env::args().skip(2)) {
+        Ok(CwCommand::Copy(a)) => a,
+        Ok(CwCommand::Send) => {
+            eprintln!("`ts570d cw send` (sending practice) is not available yet.");
+            std::process::exit(2);
+        }
+        Err(e) => {
+            eprintln!("error: {e}\n");
+            cw_usage_exit();
+        }
+    };
+
+    // The radio is read here, once, and dropped before the session: copy
+    // mode holds no radio (see `cw::radio_defaults`).
+    let radio = match &args.server_raw {
+        None => cw::RadioDefaults::default(),
+        Some(addr) => {
+            let tcp = TcpCatSession::connect(addr).await.unwrap_or_else(|e| {
+                eprintln!("error: could not connect to {addr}: {e}");
+                std::process::exit(1);
+            });
+            let d =
+                cw::radio_defaults::read_defaults(radio::Ts570d::new(TcpClientSession::new(tcp)))
+                    .await;
+            for w in &d.warnings {
+                eprintln!("warning: {w}");
+            }
+            d
+        }
+    };
+    let (wpm, pitch_hz) = cw::resolve_tone_and_speed(args.wpm, args.pitch_hz, &radio);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let opts = cw::CopyOptions {
+        kind: args.kind,
+        level: args.level,
+        qsos: args.qsos,
+        call: args.call.clone(),
+        wpm,
+        farnsworth: args.farnsworth,
+        pitch_hz,
+        seed: args.seed.unwrap_or(now.as_nanos() as u64),
+        adapt: args.adapt,
+        started: radio::calibration::iso8601_utc(now.as_secs()),
+    };
+    let data_dir = args.data_dir.clone().or_else(cw::store::default_data_dir);
+    run_cw_copy(&opts, args.audio_out.as_deref(), data_dir);
+}
+
+/// Open the trainer's speaker: `audio:<name>`, or the default output.
+#[cfg(feature = "audio-device")]
+fn open_cw_sink(audio_out: Option<&str>) -> Result<PlaybackSink, String> {
+    use cat_signal_audio::{AudioPlayback, PlaybackConfig};
+
+    let playback = match audio_out {
+        Some(spec) => AudioPlayback::open(spec, PlaybackConfig::default()),
+        None => AudioPlayback::open_default(PlaybackConfig::default()),
+    }
+    .map_err(|e| format!("could not open the audio output: {e}"))?;
+    let f = playback.format();
+    info!(
+        "Audio output: {} at {} Hz, {} ch{}",
+        playback.label(),
+        f.sample_rate_hz,
+        f.channels,
+        if f.rate_substituted {
+            " (the device's own rate)"
+        } else {
+            ""
+        }
+    );
+    Ok(PlaybackSink(playback))
+}
+
+/// A build without sound-card support has no speaker to open, and
+/// [`open_cw_sink`] says how to get a build that has. This stands in for
+/// the type so the rest of the trainer is the same code in both builds.
+#[cfg(not(feature = "audio-device"))]
+#[allow(dead_code)] // never built: open_cw_sink always refuses
+struct PlaybackSink;
+
+#[cfg(not(feature = "audio-device"))]
+impl cw::audio::AudioSink for PlaybackSink {
+    fn sample_rate_hz(&self) -> u32 {
+        48_000
+    }
+    fn write(&mut self, _: &[f32]) -> Result<usize, String> {
+        Err("no audio output in this build".to_string())
+    }
+    fn queued(&self) -> usize {
+        0
+    }
+    fn clear(&mut self) {}
+}
+
+#[cfg(not(feature = "audio-device"))]
+fn open_cw_sink(_: Option<&str>) -> Result<PlaybackSink, String> {
+    Err(
+        "this build cannot play audio, and `ts570d cw copy` needs a sound card:\n\
+         rebuild with `cargo build --release --features audio-device`"
+            .to_string(),
+    )
+}
+
+fn run_cw_copy(
+    opts: &cw::CopyOptions,
+    audio_out: Option<&str>,
+    data_dir: Option<std::path::PathBuf>,
+) {
+    let mut sink = open_cw_sink(audio_out).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    });
+    let mut store = cw::store::Store::open(data_dir);
+    let result = {
+        let mut term = cw::term::CrosstermTerminal::new().unwrap_or_else(|e| {
+            eprintln!("error: cannot put the terminal in raw mode: {e}");
+            std::process::exit(1);
+        });
+        cw::session::run_copy(opts, &mut sink, &mut term, &mut store)
+    };
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+}
+
 /// Linux entry point. Uses monoio's io_uring runtime (single-threaded, !Send).
 #[cfg(target_os = "linux")]
 #[monoio::main(timer_enabled = true)]
@@ -1549,5 +1877,106 @@ mod trim_tests {
                 "unhelpful message for {value:?}: {err}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cw_args_tests {
+    use super::{parse_cw_args, CwCommand};
+    use crate::cw::{Farnsworth, Kind, Level};
+
+    fn parse(line: &str) -> Result<CwCommand, String> {
+        parse_cw_args(line.split_whitespace().map(String::from))
+    }
+
+    fn copy(line: &str) -> super::CwCopyArgs {
+        match parse(line) {
+            Ok(CwCommand::Copy(a)) => *a,
+            other => panic!("{line:?} -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_the_call_is_required() {
+        let a = copy("copy --call kf0uwv");
+        assert_eq!(a.call.as_str(), "KF0UWV");
+        assert_eq!(a.kind, Kind::Mixed);
+        assert_eq!(a.level, Level::Intermediate);
+        assert_eq!(a.qsos, 5);
+        assert_eq!(a.farnsworth, Farnsworth::Preset);
+        assert!(a.adapt);
+        assert_eq!(
+            (
+                a.server_raw,
+                a.wpm,
+                a.pitch_hz,
+                a.seed,
+                a.audio_out,
+                a.data_dir
+            ),
+            (None, None, None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn every_flag_is_read() {
+        let a = copy(
+            "copy --call W1AW --kind pileup --level advanced --qsos 3 --wpm 28 \
+             --farnsworth off --pitch 700 --seed 42 --no-adapt \
+             --server-raw 127.0.0.1:4532 --audio-out audio:USB --data-dir /tmp/cw",
+        );
+        assert_eq!(a.kind, Kind::Pileup);
+        assert_eq!(a.level, Level::Advanced);
+        assert_eq!(a.qsos, 3);
+        assert_eq!(a.wpm, Some(28));
+        assert_eq!(a.farnsworth, Farnsworth::Off);
+        assert_eq!(a.pitch_hz, Some(700.0));
+        assert_eq!(a.seed, Some(42));
+        assert!(!a.adapt);
+        assert_eq!(a.server_raw.as_deref(), Some("127.0.0.1:4532"));
+        assert_eq!(a.audio_out.as_deref(), Some("audio:USB"));
+        assert_eq!(a.data_dir, Some(std::path::PathBuf::from("/tmp/cw")));
+        assert_eq!(
+            copy("copy --call W1AW --farnsworth 12").farnsworth,
+            Farnsworth::Wpm(12)
+        );
+    }
+
+    #[test]
+    fn a_missing_call_says_why_it_is_needed() {
+        let e = parse("copy --kind contest").unwrap_err();
+        assert!(e.contains("--call is required"), "{e}");
+    }
+
+    #[test]
+    fn out_of_range_and_malformed_values_are_refused() {
+        for line in [
+            "copy --call W1AW --wpm 4",
+            "copy --call W1AW --wpm 61",
+            "copy --call W1AW --pitch 250",
+            "copy --call W1AW --pitch 1300",
+            "copy --call W1AW --qsos 0",
+            "copy --call W1AW --kind dx",
+            "copy --call W1AW --level expert",
+            "copy --call W1AW --seed abc",
+            "copy --call W1AW --farnsworth fast",
+            "copy --call 12345",
+            "copy --call W1AW --wpm",
+        ] {
+            assert!(parse(line).is_err(), "{line:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn an_unknown_flag_is_an_error_not_a_default() {
+        let e = parse("copy --call W1AW --server 127.0.0.1:4532").unwrap_err();
+        assert!(e.contains("unknown flag"), "{e}");
+    }
+
+    #[test]
+    fn modes_route() {
+        assert_eq!(parse("send"), Ok(CwCommand::Send));
+        assert!(parse("").is_err());
+        assert!(parse("listen").is_err());
     }
 }

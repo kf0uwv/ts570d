@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "cat-client"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "cat-framework"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "cat-signal",
  "serde",
@@ -374,8 +374,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cat-morse"
+version = "0.8.0"
+dependencies = [
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "cat-native"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "cat-framework",
  "cat-layout",
@@ -386,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "cat-rigctl"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -402,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "cat-server"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "cat-client",
@@ -420,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "cat-signal"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -428,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "cat-signal-audio"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "cat-signal",
@@ -439,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "cat-signal-rtlsdr"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "cat-signal",
@@ -449,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "cat-transport-core"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -459,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "cat-transport-rfc2217"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -468,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "cat-transport-serial"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "cat-framework",
@@ -482,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "cat-transport-tcp"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -492,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "cat-transport-udp"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "cat-transport-core",
@@ -502,7 +510,7 @@ dependencies = [
 
 [[package]]
 name = "cat-ui"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "cat-framework",
  "cat-native",
@@ -512,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "cat-ui-egui"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "cat-framework",
  "cat-layout",
@@ -524,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "cat-ui-ratatui"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "cat-framework",
  "cat-layout",
@@ -3575,6 +3583,7 @@ name = "ts570d"
 version = "0.3.2"
 dependencies = [
  "async-trait",
+ "cat-morse",
  "cat-native",
  "cat-signal",
  "cat-signal-audio",
@@ -3583,10 +3592,12 @@ dependencies = [
  "cat-transport-rfc2217",
  "cat-transport-serial",
  "cat-transport-tcp",
+ "crossterm",
  "emulator",
  "futures",
  "monoio",
  "radio",
+ "serde",
  "serde_json",
  "server",
  "tempfile",

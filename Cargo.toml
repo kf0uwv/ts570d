@@ -89,6 +89,13 @@ cat-signal-rtlsdr = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.
 # The ACC2 receive-audio client (radio-cat-rs ADR 0017). New alongside
 # cat-transport-rfc2217 and covered by the same temporary [patch].
 cat-signal-audio = { path = "../radio-cat-rs/cat-signal-audio" }
+# Radio-independent Morse code for `ts570d cw` (radio-cat-rs ADR 0021):
+# scripts, keying, band synthesis and copy scoring. New on radio-cat-rs's
+# `feat/cat-morse` branch and not in a tagged release, so a path dependency
+# like cat-layout and cat-signal-audio above. `serde` so per-character
+# stats and session history can be persisted. TEMPORARY: revert to a
+# tagged git dependency once radio-cat-rs releases it.
+cat-morse = { path = "../radio-cat-rs/cat-morse", features = ["serde"] }
 cat-ui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 cat-ui-ratatui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
 cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
@@ -189,11 +196,21 @@ server = { path = "server" }
 # its meaning live in `radio::calibration`.
 serde_json = { workspace = true }
 
+# `ts570d cw`: the Morse trainer. cat-morse makes the scripts and the
+# audio; crossterm reads the operator's keystrokes in raw mode (a single
+# input line, not a ratatui console); serde persists the trainer's stats.
+cat-morse = { workspace = true }
+crossterm = { workspace = true }
+serde = { workspace = true }
+
 [dev-dependencies]
 radio    = { path = "radio" }
 # src/port_guard.rs's tests open a real file and look for themselves in
 # /proc, which needs somewhere disposable to put it.
 tempfile = { workspace = true }
+# A runtime-free `block_on` for src/cw's read-only test, so it runs on the
+# Windows CI job too (the Linux-only monoio dev-dependency cannot).
+futures = { workspace = true }
 cat-transport-serial = { workspace = true }
 # tests/rfc2217_under_monoio.rs -- the guard for the monoio `sync` feature.
 cat-transport-rfc2217 = { workspace = true }
