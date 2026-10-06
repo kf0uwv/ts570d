@@ -1125,6 +1125,20 @@ mod tests {
 // Audio passband
 // ---------------------------------------------------------------------------
 
+/// The highest CW pitch index the radio accepts (`PT12;`, 1000 Hz).
+pub const CW_PITCH_INDEX_MAX: u8 = 12;
+
+/// The sidetone pitch, in Hz, that a `PT` index selects: 400 Hz at index
+/// 0, rising **50 Hz** per step to 1000 Hz at index
+/// [`CW_PITCH_INDEX_MAX`] (menu 20; CAT parameter format 52).
+///
+/// The arithmetic is not clamped. An index above 12 is not one the radio
+/// answers with, and a caller holding one should say so rather than
+/// trust the number this returns for it.
+pub fn cw_pitch_hz(index: u8) -> f32 {
+    400.0 + f32::from(index) * 50.0
+}
+
 /// The receive audio passband for `mode`, as offsets from the dial in Hz.
 ///
 /// Signed, so the **sideband is part of the answer**: USB hears what is
@@ -1151,7 +1165,7 @@ pub fn audio_passband_hz(mode: Mode, cw_pitch: u8) -> (f32, f32) {
     const AF_LOW: f32 = 300.0;
     const AF_HIGH: f32 = 2_700.0;
 
-    let pitch = 400.0 + f32::from(cw_pitch) * 50.0;
+    let pitch = cw_pitch_hz(cw_pitch);
     match mode {
         Mode::Lsb | Mode::FskReverse => (-AF_HIGH, -AF_LOW),
         Mode::Usb | Mode::Fsk => (AF_LOW, AF_HIGH),
@@ -1185,6 +1199,22 @@ mod passband_tests {
         assert!(lo < 700.0 && hi > 700.0);
         let (lo2, _) = audio_passband_hz(Mode::Cw, 0); // 400 Hz
         assert!(lo2 < lo, "a lower pitch moves the window down");
+    }
+
+    #[test]
+    fn cw_pitch_index_steps_fifty_hz_from_400_to_1000() {
+        assert_eq!(cw_pitch_hz(0), 400.0);
+        assert_eq!(cw_pitch_hz(4), 600.0);
+        assert_eq!(cw_pitch_hz(8), 800.0);
+        assert_eq!(cw_pitch_hz(CW_PITCH_INDEX_MAX), 1000.0);
+    }
+
+    #[test]
+    fn the_cw_window_is_centred_on_cw_pitch_hz() {
+        for i in 0..=CW_PITCH_INDEX_MAX {
+            let (lo, hi) = audio_passband_hz(Mode::Cw, i);
+            assert!(((lo + hi) / 2.0 - cw_pitch_hz(i)).abs() < 0.01);
+        }
     }
 
     #[test]
