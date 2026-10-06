@@ -1503,7 +1503,15 @@ struct CwCopyArgs {
     pitch_hz: Option<f32>,
     seed: Option<u64>,
     adapt: bool,
+    audio: CwAudioArgs,
+}
+
+/// The audio-output flags `cw copy` and `cw devices` share.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct CwAudioArgs {
     audio_out: Option<String>,
+    deny: Vec<String>,
+    undeny: Vec<String>,
     data_dir: Option<std::path::PathBuf>,
 }
 
@@ -1511,6 +1519,7 @@ struct CwCopyArgs {
 #[derive(Debug, Clone, PartialEq)]
 enum CwCommand {
     Copy(Box<CwCopyArgs>),
+    Devices(CwAudioArgs),
     Send,
 }
 
@@ -1518,12 +1527,17 @@ enum CwCommand {
 /// flags are errors, because a typo here would otherwise quietly become a
 /// default.
 fn parse_cw_args(mut args: impl Iterator<Item = String>) -> Result<CwCommand, String> {
-    match args.next().as_deref() {
-        Some("copy") => {}
+    let copy = match args.next().as_deref() {
+        Some("copy") => true,
+        Some("devices") => false,
         Some("send") => return Ok(CwCommand::Send),
-        Some(other) => return Err(format!("unknown cw mode {other:?}; expected copy or send")),
-        None => return Err("a cw mode is required: copy (or send)".to_string()),
-    }
+        Some(other) => {
+            return Err(format!(
+                "unknown cw mode {other:?}; expected copy, devices or send"
+            ))
+        }
+        None => return Err("a cw mode is required: copy, devices (or send)".to_string()),
+    };
 
     fn value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
         args.next()
@@ -1536,7 +1550,7 @@ fn parse_cw_args(mut args: impl Iterator<Item = String>) -> Result<CwCommand, St
         match text.parse::<T>() {
             Ok(n) if range.contains(&n) => Ok(n),
             _ => Err(format!(
-                "{flag} wants a number {}-{}, got {text:?}",
+                "{flag} wants a whole number {}-{}, got {text:?}",
                 range.start(),
                 range.end()
             )),
@@ -1553,10 +1567,26 @@ fn parse_cw_args(mut args: impl Iterator<Item = String>) -> Result<CwCommand, St
     let mut pitch_hz = None;
     let mut seed = None;
     let mut adapt = true;
-    let mut audio_out = None;
-    let mut data_dir = None;
+    let mut audio = CwAudioArgs::default();
 
     while let Some(flag) = args.next() {
+        // Flags both modes take.
+        match flag.as_str() {
+            "--deny-audio" => {
+                audio.deny.push(value(&mut args, &flag)?);
+                continue;
+            }
+            "--undeny-audio" => {
+                audio.undeny.push(value(&mut args, &flag)?);
+                continue;
+            }
+            "--data-dir" => {
+                audio.data_dir = Some(std::path::PathBuf::from(value(&mut args, &flag)?));
+                continue;
+            }
+            _ if !copy => return Err(format!("unknown flag {flag:?} for cw devices")),
+            _ => {}
+        }
         match flag.as_str() {
             "--server-raw" => server_raw = Some(value(&mut args, &flag)?),
             "--kind" => kind = value(&mut args, &flag)?.parse()?,
@@ -1578,11 +1608,13 @@ fn parse_cw_args(mut args: impl Iterator<Item = String>) -> Result<CwCommand, St
             }
             "--farnsworth" => farnsworth = value(&mut args, &flag)?.parse()?,
             "--pitch" => {
-                pitch_hz = Some(number(
+                // Whole hertz: "6e2" and "600.5" are typos, not tones.
+                let hz: u32 = number(
                     value(&mut args, &flag)?,
                     &flag,
-                    cw::MIN_PITCH_HZ..=cw::MAX_PITCH_HZ,
-                )?)
+                    cw::MIN_PITCH_HZ as u32..=cw::MAX_PITCH_HZ as u32,
+                )?;
+                pitch_hz = Some(hz as f32);
             }
             "--seed" => {
                 let v = value(&mut args, &flag)?;
@@ -1592,12 +1624,14 @@ fn parse_cw_args(mut args: impl Iterator<Item = String>) -> Result<CwCommand, St
                 );
             }
             "--no-adapt" => adapt = false,
-            "--audio-out" => audio_out = Some(value(&mut args, &flag)?),
-            "--data-dir" => data_dir = Some(std::path::PathBuf::from(value(&mut args, &flag)?)),
+            "--audio-out" => audio.audio_out = Some(value(&mut args, &flag)?),
             other => return Err(format!("unknown flag {other:?}")),
         }
     }
 
+    if !copy {
+        return Ok(CwCommand::Devices(audio));
+    }
     let call = call.ok_or_else(|| {
         "--call is required: the stations you work send to your callsign".to_string()
     })?;
@@ -1612,14 +1646,14 @@ fn parse_cw_args(mut args: impl Iterator<Item = String>) -> Result<CwCommand, St
         pitch_hz,
         seed,
         adapt,
-        audio_out,
-        data_dir,
+        audio,
     })))
 }
 
 fn cw_usage_exit() -> ! {
     eprintln!(
-        "Usage: ts570d cw copy --call <callsign> [options]\n\
+        "Usage: ts570d cw copy --call <callsign> --audio-out audio:<name> [options]\n\
+         \x20      ts570d cw devices [--deny-audio <text>] [--undeny-audio <text>]\n\
          \n\
          Copy practice. The PC plays synthesized on-air contacts through band\n\
          noise, fading, static and QRM; you type what you copy while it plays,\n\
@@ -1627,22 +1661,35 @@ fn cw_usage_exit() -> ! {
          transmitted: with --server-raw the radio is asked for its CW pitch\n\
          (PT;) and keyer speed (KS;) once, and nothing else.\n\
          \n\
+         AUDIO OUTPUT -- READ THIS. The system default output is never used: it\n\
+         may be the radio's own USB sound interface on ACC2 (often a C-Media\n\
+         \"USB PnP Sound Device\"), and audio played there goes into the\n\
+         transmitter -- with VOX on it can key the radio. Name your speakers or\n\
+         headphones once with --audio-out (it is remembered), and put the\n\
+         radio's interface on the deny list so it can never be chosen:\n\
+         \x20   ts570d cw devices --deny-audio \"USB PnP\"\n\
+         \n\
          Options:\n\
          \x20 --call <cs>             your callsign (required)\n\
+         \x20 --audio-out <spec>      audio:<name> from `ts570d cw devices`;\n\
+         \x20                         required the first time, then remembered\n\
+         \x20 --deny-audio <text>     never play to a device whose name contains\n\
+         \x20                         <text> (remembered; repeatable)\n\
+         \x20 --undeny-audio <text>   remove a deny-list entry\n\
          \x20 --kind <k>              ragchew|contest|pota|sota|pileup|mixed (mixed)\n\
          \x20 --level <l>             beginner|intermediate|advanced (intermediate)\n\
          \x20 --qsos <n>              contacts in the session, 1-100 (5)\n\
          \x20 --wpm <n>               starting speed, 5-60 (radio's KS, else 20)\n\
          \x20 --farnsworth <wpm|off>  effective speed (the level's preset)\n\
-         \x20 --pitch <hz>            tone, 300-1200 (radio's PT, else 600)\n\
+         \x20 --pitch <hz>            tone in whole Hz, 300-1200 (radio's PT, else 600)\n\
          \x20 --seed <n>              replay a session (printed at the start)\n\
          \x20 --no-adapt              keep the speed fixed\n\
          \x20 --server-raw <addr>     a running `ts570d server`'s --raw-tcp-port,\n\
          \x20                         to follow the radio's pitch and speed\n\
-         \x20 --audio-out <spec>      audio:<name> (the default output device)\n\
-         \x20 --data-dir <path>       where stats and history live\n\
+         \x20 --data-dir <path>       where stats, history and the audio choice live\n\
          \n\
          Keys: type copy, Enter submits, Ctrl-R/F5 AGN, Ctrl-N/F6 skip, Esc quits.\n\
+         Anything typed while your own line is shown is discarded.\n\
          \n\
          Known limitations: the --server-raw connection has no read timeout, so a\n\
          server that never answers hangs startup; two sessions at once means the\n\
@@ -1676,10 +1723,35 @@ impl cw::audio::AudioSink for PlaybackSink {
     }
 }
 
+/// Apply `--deny-audio`/`--undeny-audio` and return the store.
+fn open_cw_store(audio: &CwAudioArgs) -> cw::store::Store {
+    let data_dir = audio.data_dir.clone().or_else(cw::store::default_data_dir);
+    let mut store = cw::store::Store::open(data_dir);
+    let mut prefs = store.audio_prefs().clone();
+    if prefs.edit_deny(&audio.deny, &audio.undeny) {
+        store.save_audio_prefs(prefs);
+    }
+    store
+}
+
 /// Parse and run `ts570d cw ...`.
 async fn run_cw_mode() {
     let args = match parse_cw_args(std::env::args().skip(2)) {
         Ok(CwCommand::Copy(a)) => a,
+        Ok(CwCommand::Devices(audio)) => {
+            let mut store = open_cw_store(&audio);
+            for w in store.take_warnings() {
+                eprintln!("warning: {w}");
+            }
+            print!(
+                "{}",
+                cw::output::describe_devices(
+                    &cat_signal_audio::output_devices(),
+                    store.audio_prefs()
+                )
+            );
+            return;
+        }
         Ok(CwCommand::Send) => {
             eprintln!("`ts570d cw send` (sending practice) is not available yet.");
             std::process::exit(2);
@@ -1689,6 +1761,31 @@ async fn run_cw_mode() {
             cw_usage_exit();
         }
     };
+
+    // The speaker first: it is chosen, never the default (see
+    // `cw::output`), and a refusal should come before anything else
+    // happens -- including any contact with the radio.
+    let mut store = open_cw_store(&args.audio);
+    for w in store.take_warnings() {
+        eprintln!("warning: {w}");
+    }
+    let spec = cw::output::choose(args.audio.audio_out.as_deref(), store.audio_prefs())
+        .unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        });
+    let (mut sink, label) = open_cw_sink(&spec).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    });
+    if let Err(e) = store.audio_prefs().check_opened(&label) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+    let mut prefs = store.audio_prefs().clone();
+    prefs.device = Some(spec.clone());
+    store.save_audio_prefs(prefs);
+    eprintln!("\n>>> Playing to: {label}  ({spec}) <<<\n");
 
     // The radio is read here, once, and dropped before the session: copy
     // mode holds no radio (see `cw::radio_defaults`).
@@ -1724,21 +1821,30 @@ async fn run_cw_mode() {
         seed: args.seed.unwrap_or(now.as_nanos() as u64),
         adapt: args.adapt,
         started: radio::calibration::iso8601_utc(now.as_secs()),
+        audio_out: label,
     };
-    let data_dir = args.data_dir.clone().or_else(cw::store::default_data_dir);
-    run_cw_copy(&opts, args.audio_out.as_deref(), data_dir);
+
+    let result = {
+        let mut term = cw::term::CrosstermTerminal::new().unwrap_or_else(|e| {
+            eprintln!("error: cannot put the terminal in raw mode: {e}");
+            std::process::exit(1);
+        });
+        cw::session::run_copy(&opts, &mut sink, &mut term, &mut store)
+    };
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
 }
 
-/// Open the trainer's speaker: `audio:<name>`, or the default output.
+/// Open the named output (never the system default; see `cw::output`).
+/// Returns the sink and the name the device opened as.
 #[cfg(feature = "audio-device")]
-fn open_cw_sink(audio_out: Option<&str>) -> Result<PlaybackSink, String> {
+fn open_cw_sink(spec: &str) -> Result<(PlaybackSink, String), String> {
     use cat_signal_audio::{AudioPlayback, PlaybackConfig};
 
-    let playback = match audio_out {
-        Some(spec) => AudioPlayback::open(spec, PlaybackConfig::default()),
-        None => AudioPlayback::open_default(PlaybackConfig::default()),
-    }
-    .map_err(|e| format!("could not open the audio output: {e}"))?;
+    let playback = AudioPlayback::open(spec, PlaybackConfig::default())
+        .map_err(|e| format!("could not open the audio output {spec:?}: {e}"))?;
     let f = playback.format();
     info!(
         "Audio output: {} at {} Hz, {} ch{}",
@@ -1751,7 +1857,8 @@ fn open_cw_sink(audio_out: Option<&str>) -> Result<PlaybackSink, String> {
             ""
         }
     );
-    Ok(PlaybackSink(playback))
+    let label = playback.label().to_string();
+    Ok((PlaybackSink(playback), label))
 }
 
 /// A build without sound-card support has no speaker to open, and
@@ -1776,35 +1883,12 @@ impl cw::audio::AudioSink for PlaybackSink {
 }
 
 #[cfg(not(feature = "audio-device"))]
-fn open_cw_sink(_: Option<&str>) -> Result<PlaybackSink, String> {
+fn open_cw_sink(_: &str) -> Result<(PlaybackSink, String), String> {
     Err(
         "this build cannot play audio, and `ts570d cw copy` needs a sound card:\n\
          rebuild with `cargo build --release --features audio-device`"
             .to_string(),
     )
-}
-
-fn run_cw_copy(
-    opts: &cw::CopyOptions,
-    audio_out: Option<&str>,
-    data_dir: Option<std::path::PathBuf>,
-) {
-    let mut sink = open_cw_sink(audio_out).unwrap_or_else(|e| {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    });
-    let mut store = cw::store::Store::open(data_dir);
-    let result = {
-        let mut term = cw::term::CrosstermTerminal::new().unwrap_or_else(|e| {
-            eprintln!("error: cannot put the terminal in raw mode: {e}");
-            std::process::exit(1);
-        });
-        cw::session::run_copy(opts, &mut sink, &mut term, &mut store)
-    };
-    if let Err(e) = result {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    }
 }
 
 /// Linux entry point. Uses monoio's io_uring runtime (single-threaded, !Send).
@@ -1906,16 +1990,10 @@ mod cw_args_tests {
         assert_eq!(a.farnsworth, Farnsworth::Preset);
         assert!(a.adapt);
         assert_eq!(
-            (
-                a.server_raw,
-                a.wpm,
-                a.pitch_hz,
-                a.seed,
-                a.audio_out,
-                a.data_dir
-            ),
-            (None, None, None, None, None, None)
+            (a.server_raw, a.wpm, a.pitch_hz, a.seed),
+            (None, None, None, None)
         );
+        assert_eq!(a.audio, super::CwAudioArgs::default());
     }
 
     #[test]
@@ -1934,8 +2012,8 @@ mod cw_args_tests {
         assert_eq!(a.seed, Some(42));
         assert!(!a.adapt);
         assert_eq!(a.server_raw.as_deref(), Some("127.0.0.1:4532"));
-        assert_eq!(a.audio_out.as_deref(), Some("audio:USB"));
-        assert_eq!(a.data_dir, Some(std::path::PathBuf::from("/tmp/cw")));
+        assert_eq!(a.audio.audio_out.as_deref(), Some("audio:USB"));
+        assert_eq!(a.audio.data_dir, Some(std::path::PathBuf::from("/tmp/cw")));
         assert_eq!(
             copy("copy --call W1AW --farnsworth 12").farnsworth,
             Farnsworth::Wpm(12)
@@ -1962,6 +2040,8 @@ mod cw_args_tests {
             "copy --call W1AW --farnsworth fast",
             "copy --call 12345",
             "copy --call W1AW --wpm",
+            "copy --call W1AW --pitch 6e2",
+            "copy --call W1AW --pitch 600.5",
         ] {
             assert!(parse(line).is_err(), "{line:?} should be refused");
         }
@@ -1971,6 +2051,33 @@ mod cw_args_tests {
     fn an_unknown_flag_is_an_error_not_a_default() {
         let e = parse("copy --call W1AW --server 127.0.0.1:4532").unwrap_err();
         assert!(e.contains("unknown flag"), "{e}");
+    }
+
+    #[test]
+    fn deny_edits_are_taken_by_both_modes() {
+        let a = copy("copy --call W1AW --deny-audio PnP --deny-audio ACC2 --undeny-audio Old");
+        assert_eq!(a.audio.deny, vec!["PnP".to_string(), "ACC2".to_string()]);
+        assert_eq!(a.audio.undeny, vec!["Old".to_string()]);
+        match parse("devices --deny-audio PnP --data-dir /tmp/x") {
+            Ok(CwCommand::Devices(d)) => {
+                assert_eq!(d.deny, vec!["PnP".to_string()]);
+                assert_eq!(d.data_dir, Some(std::path::PathBuf::from("/tmp/x")));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(parse("devices --call W1AW").is_err());
+    }
+
+    #[test]
+    fn nothing_here_opens_the_system_default_output() {
+        // The station's default output can be the radio's ACC2 interface.
+        let src = include_str!("main.rs");
+        for forbidden in [
+            ["AudioPlayback", "::open_default"].concat(),
+            ["open_default", "(PlaybackConfig"].concat(),
+        ] {
+            assert!(!src.contains(&forbidden), "main.rs uses {forbidden}");
+        }
     }
 
     #[test]
