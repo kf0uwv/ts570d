@@ -202,6 +202,11 @@ serde_json = { workspace = true }
 cat-morse = { workspace = true }
 crossterm = { workspace = true }
 serde = { workspace = true }
+# Leave raw mode on SIGTERM/SIGHUP/SIGINT (Unix) and console close/logoff/
+# shutdown (Windows) -- one handler for both platforms, no runtime. Already
+# in the tree through `emulator`; `termination` adds SIGTERM/SIGHUP and the
+# Windows close events to the default Ctrl-C.
+ctrlc = { version = "3.0", features = ["termination"] }
 
 [dev-dependencies]
 radio    = { path = "radio" }

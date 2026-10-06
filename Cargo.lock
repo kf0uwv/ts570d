@@ -3593,6 +3593,7 @@ dependencies = [
  "cat-transport-serial",
  "cat-transport-tcp",
  "crossterm",
+ "ctrlc",
  "emulator",
  "futures",
  "monoio",
