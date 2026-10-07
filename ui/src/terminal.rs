@@ -93,6 +93,11 @@ enum RadioUpdate {
         skipped: bool,
     },
     DiagDone,
+    /// Whether the radio may still be transmitting after an un-key the
+    /// console could not confirm (`crate::unkey`). `Some` raises a standing
+    /// alert on the message line; `None` -- a later confirmed receive --
+    /// clears it.
+    ReceiveAlert(Option<String>),
 }
 
 // ---------------------------------------------------------------------------
@@ -927,11 +932,17 @@ async fn snapshot_state<R: Radio>(radio: &mut R) -> RadioSnapshot {
 }
 
 /// Restore radio state from a snapshot.  Best-effort: individual setter failures
-/// are silently ignored.  PTT is cleared first via `receive()`.
+/// are silently ignored -- except un-keying. PTT is cleared first, and
+/// confirmed, via [`crate::unkey::ensure_receive`]; if the radio cannot be
+/// confirmed in receive the rest is still restored and the failure is
+/// returned for the caller to raise.
 /// `power_on` is restored last so other setters have time to complete first.
-async fn restore_state<R: Radio>(radio: &mut R, snap: RadioSnapshot) {
+async fn restore_state<R: Radio>(
+    radio: &mut R,
+    snap: RadioSnapshot,
+) -> Result<(), crate::unkey::ReceiveUnconfirmed> {
     // Always clear PTT first.
-    let _ = radio.receive().await;
+    let receive = crate::unkey::ensure_receive(radio).await.map(|_| ());
 
     if let Some(v) = snap.vfo_a {
         let _ = radio.set_vfo_a(v).await;
@@ -1061,6 +1072,7 @@ async fn restore_state<R: Radio>(radio: &mut R, snap: RadioSnapshot) {
     if let Some(v) = snap.power_on {
         let _ = radio.set_power_on(v).await;
     }
+    receive
 }
 
 // Each step is (label, closure returning future).  We collect them as a
@@ -1937,16 +1949,11 @@ async fn run_diagnostics_task<R: Radio>(
                     diag_get!(results, update_tx, label, round, radio.get_power_on());
                 }
 
-                // transmit: call transmit(), verify Ok, then call receive() to restore
+                // transmit: call transmit(), then confirm receive -- see
+                // `diag_transmit_step`
                 56 => {
-                    let (passed, detail) = match radio.transmit().await {
-                        Err(e) => (false, format!("transmit failed: {}", e)),
-                        Ok(()) => {
-                            // Restore receive mode
-                            let _ = radio.receive().await;
-                            (true, "ok".to_string())
-                        }
-                    };
+                    let (passed, detail, receive) = diag_transmit_step(radio).await;
+                    report_receive(update_tx, &receive);
                     ch_send(
                         update_tx,
                         RadioUpdate::DiagProgress {
@@ -1966,9 +1973,27 @@ async fn run_diagnostics_task<R: Radio>(
                     });
                 }
 
-                // receive: call receive(), verify Ok
+                // receive: RX;, confirmed with IF;
                 57 => {
-                    diag_action!(results, update_tx, label, round, radio.receive());
+                    let (passed, detail, receive) = diag_receive_step(radio).await;
+                    report_receive(update_tx, &receive);
+                    ch_send(
+                        update_tx,
+                        RadioUpdate::DiagProgress {
+                            label,
+                            round,
+                            passed,
+                            detail: detail.clone(),
+                            skipped: false,
+                        },
+                    );
+                    results.push(DiagResult {
+                        label,
+                        round,
+                        passed,
+                        detail,
+                        skipped: false,
+                    });
                 }
 
                 // --- Scan ---
@@ -2620,8 +2645,78 @@ async fn run_diagnostics_task<R: Radio>(
         }
     }
 
+    end_diagnostics(radio, update_tx, snapshot).await;
+}
+
+/// The diagnostics transmit step: `TX;`, then a confirmed receive.
+///
+/// The receive is attempted whether or not `TX;` reported success: a `TX;`
+/// whose answer was lost may still have keyed the radio.
+async fn diag_transmit_step<R: Radio>(
+    radio: &mut R,
+) -> (
+    bool,
+    String,
+    Result<usize, crate::unkey::ReceiveUnconfirmed>,
+) {
+    let transmit = radio.transmit().await;
+    let receive = crate::unkey::ensure_receive(radio).await;
+    let (passed, detail) = match (&transmit, &receive) {
+        (_, Err(unconfirmed)) => (false, unconfirmed.to_string()),
+        (Err(e), Ok(_)) => (false, format!("transmit failed: {}", e)),
+        (Ok(()), Ok(_)) => (true, "ok".to_string()),
+    };
+    (passed, detail, receive)
+}
+
+/// The diagnostics receive step: a confirmed receive.
+async fn diag_receive_step<R: Radio>(
+    radio: &mut R,
+) -> (
+    bool,
+    String,
+    Result<usize, crate::unkey::ReceiveUnconfirmed>,
+) {
+    let receive = crate::unkey::ensure_receive(radio).await;
+    let (passed, detail) = match &receive {
+        Err(unconfirmed) => (false, unconfirmed.to_string()),
+        Ok(_) => (true, "ok".to_string()),
+    };
+    (passed, detail, receive)
+}
+
+/// Tell the UI task whether the radio is confirmed in receive.
+fn report_receive(
+    update_tx: &Chan<RadioUpdate>,
+    receive: &Result<usize, crate::unkey::ReceiveUnconfirmed>,
+) {
+    let alert = receive.as_ref().err().map(ToString::to_string);
+    ch_send(update_tx, RadioUpdate::ReceiveAlert(alert));
+}
+
+/// The end of every diagnostics run, aborted or not: restore the snapshot
+/// (receive first, confirmed), say so loudly if the radio may still be
+/// transmitting, and hand the UI the results.
+async fn end_diagnostics<R: Radio>(
+    radio: &mut R,
+    update_tx: &Chan<RadioUpdate>,
+    snapshot: RadioSnapshot,
+) {
     // Restore all snapshotted radio state unconditionally (best-effort).
-    restore_state(radio, snapshot).await;
+    let receive = restore_state(radio, snapshot).await;
+    if let Err(unconfirmed) = &receive {
+        ch_send(
+            update_tx,
+            RadioUpdate::DiagProgress {
+                label: "restore: receive",
+                round: 0,
+                passed: false,
+                detail: unconfirmed.to_string(),
+                skipped: false,
+            },
+        );
+    }
+    report_receive(update_tx, &receive.map(|()| 0));
 
     // Signal the UI task that diagnostics are complete.
     ch_send(update_tx, RadioUpdate::DiagDone);
@@ -2681,8 +2776,15 @@ async fn radio_task<R: Radio + 'static>(
             match cmd {
                 RadioCmd::Quit => return,
                 RadioCmd::Execute(action) => {
+                    let receiving = matches!(action, ExecuteAction::PttReceive);
                     let (desc, result) =
                         execute_action(&mut radio, action, &mut if_shift_dir).await;
+                    if receiving {
+                        // A confirmed receive clears a standing alert; an
+                        // unconfirmed one raises it.
+                        let alert = result.as_ref().err().map(ToString::to_string);
+                        ch_send(&update_tx, RadioUpdate::ReceiveAlert(alert));
+                    }
                     let (ok, msg) = match result {
                         Ok(m) => (
                             true,
@@ -2749,6 +2851,9 @@ async fn ui_task(
     view.device_selection.select_default(&view.devices);
     let mut if_shift_dir: char = ' ';
     let mut diag_results: Vec<DiagResult> = Vec::new();
+    // A standing "the radio may still be transmitting" alert, kept on the
+    // message line every frame until a confirmed receive clears it.
+    let mut receive_alert: Option<String> = None;
 
     // Draw initial connecting frame immediately.
     draw_frame(&mut terminal, &state, &control, &view, &caps)?;
@@ -2810,6 +2915,7 @@ async fn ui_task(
                     let results = std::mem::take(&mut diag_results);
                     control = ControlState::Diagnostic(DiagState::Done { results, scroll: 0 });
                 }
+                RadioUpdate::ReceiveAlert(alert) => receive_alert = alert,
             }
         }
 
@@ -2884,6 +2990,10 @@ async fn ui_task(
                 }
             }
         }
+
+        // 3c. Nothing else may take the message line from a radio that may
+        //     still be transmitting.
+        crate::unkey::stamp_receive_alert(&mut view.message, receive_alert.as_deref());
 
         // 4. Draw frame.
         draw_frame(&mut terminal, &state, &control, &view, &caps)?;
@@ -3231,7 +3341,16 @@ async fn execute_action<R: Radio>(
 
         // --- Transmit group ---
         Transmit => ("PTT transmit", ok_unit(radio.transmit().await)),
-        PttReceive => ("PTT receive", ok_unit(radio.receive().await)),
+        // Confirmed with `IF;` and retried (`crate::unkey`). `Link` because
+        // its text is shown to the operator verbatim, and this one has to
+        // be read.
+        PttReceive => (
+            "PTT receive",
+            crate::unkey::ensure_receive(radio)
+                .await
+                .map(|_| String::new())
+                .map_err(|unconfirmed| radio::RadioError::Link(unconfirmed.to_string())),
+        ),
         SetSpeechProcessor(on) => (
             "Speech processor set",
             ok_unit(radio.set_speech_processor(on).await),
@@ -3421,6 +3540,125 @@ mod tests {
         let (cycles, linked) = link_health(true, 99);
         assert_eq!(cycles, 0);
         assert!(linked);
+    }
+
+    // --- Un-keying is confirmed, and an unconfirmed one is reported ---
+
+    use crate::unkey::tests::{info, MockRadio};
+    use crate::unkey::{RECEIVE_ALERT_PREFIX, RX_CONFIRM_ATTEMPTS};
+    use futures::executor::block_on;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn the_diag_transmit_step_confirms_receive_afterwards() {
+        let mut radio = MockRadio {
+            info: VecDeque::from([Ok(info(true))]),
+            ..MockRadio::default()
+        };
+        let (passed, detail, rx) = block_on(diag_transmit_step(&mut radio));
+        assert!(passed, "{detail}");
+        assert_eq!(rx, Ok(2), "retried once, then confirmed");
+    }
+
+    #[test]
+    fn the_diag_transmit_step_fails_loudly_when_receive_is_not_confirmed() {
+        let mut radio = MockRadio::stuck_in_transmit();
+        let (passed, detail, rx) = block_on(diag_transmit_step(&mut radio));
+        assert!(!passed);
+        assert!(detail.contains(RECEIVE_ALERT_PREFIX), "{detail}");
+        assert!(rx.is_err());
+        assert_eq!(radio.rx_sent, RX_CONFIRM_ATTEMPTS);
+    }
+
+    #[test]
+    fn a_failed_transmit_is_still_followed_by_rx() {
+        // A `TX;` whose answer was lost may still have keyed the radio.
+        let mut radio = MockRadio {
+            tx: Some(Err(RadioError::Link("timed out".into()))),
+            ..MockRadio::default()
+        };
+        let (passed, detail, rx) = block_on(diag_transmit_step(&mut radio));
+        assert!(!passed);
+        assert!(detail.contains("transmit failed"), "{detail}");
+        assert_eq!(rx, Ok(1));
+        assert_eq!(radio.rx_sent, 1);
+    }
+
+    #[test]
+    fn the_diag_receive_step_is_a_confirmed_receive() {
+        let mut radio = MockRadio::stuck_in_transmit();
+        let (passed, detail, rx) = block_on(diag_receive_step(&mut radio));
+        assert!(!passed);
+        assert!(detail.contains(RECEIVE_ALERT_PREFIX), "{detail}");
+        assert!(rx.is_err());
+    }
+
+    #[test]
+    fn restore_state_reports_a_radio_it_could_not_put_in_receive() {
+        let mut radio = MockRadio::stuck_in_transmit();
+        let snapshot = block_on(snapshot_state(&mut radio));
+        let restored = block_on(restore_state(&mut radio, snapshot));
+        assert!(restored.is_err());
+        assert_eq!(radio.rx_sent, RX_CONFIRM_ATTEMPTS);
+    }
+
+    #[test]
+    fn restore_state_confirms_receive_before_restoring() {
+        let mut radio = MockRadio::default();
+        let snapshot = block_on(snapshot_state(&mut radio));
+        assert!(block_on(restore_state(&mut radio, snapshot)).is_ok());
+    }
+
+    #[test]
+    fn the_end_of_a_diagnostics_run_raises_the_alarm_if_still_transmitting() {
+        let mut radio = MockRadio::stuck_in_transmit();
+        let snapshot = block_on(snapshot_state(&mut radio));
+        let updates: Chan<RadioUpdate> = make_chan();
+        block_on(end_diagnostics(&mut radio, &updates, snapshot));
+
+        let updates = ch_recv_all(&updates);
+        assert!(
+            updates.iter().any(|u| matches!(
+                u,
+                RadioUpdate::ReceiveAlert(Some(msg)) if msg.starts_with(RECEIVE_ALERT_PREFIX)
+            )),
+            "no standing alert raised"
+        );
+        assert!(
+            updates.iter().any(|u| matches!(
+                u,
+                RadioUpdate::DiagProgress { passed: false, detail, .. }
+                    if detail.contains(RECEIVE_ALERT_PREFIX)
+            )),
+            "the results screen does not say so"
+        );
+        assert!(matches!(updates.last(), Some(RadioUpdate::DiagDone)));
+    }
+
+    #[test]
+    fn a_clean_end_of_diagnostics_clears_any_alert() {
+        let mut radio = MockRadio::default();
+        let snapshot = block_on(snapshot_state(&mut radio));
+        let updates: Chan<RadioUpdate> = make_chan();
+        block_on(end_diagnostics(&mut radio, &updates, snapshot));
+        let updates = ch_recv_all(&updates);
+        assert!(updates
+            .iter()
+            .any(|u| matches!(u, RadioUpdate::ReceiveAlert(None))));
+    }
+
+    #[test]
+    fn the_operators_ptt_receive_is_confirmed_and_reports_failure() {
+        let mut radio = MockRadio::stuck_in_transmit();
+        let mut dir = ' ';
+        let (_, result) = block_on(execute_action(
+            &mut radio,
+            ExecuteAction::PttReceive,
+            &mut dir,
+        ));
+        let err = result.unwrap_err().to_string();
+        assert!(err.starts_with(RECEIVE_ALERT_PREFIX), "{err}");
+        assert_eq!(radio.rx_sent, RX_CONFIRM_ATTEMPTS);
     }
 
     #[test]
