@@ -155,12 +155,20 @@ impl<S: CatSession> CatSession for SharedSession<S> {
 pub struct Ts570d<S: CatSession> {
     pub(crate) client: CatClient<Ts570dCommandId, SharedSession<S>>,
     session: SharedSession<S>,
+    /// The port's release-only modem lines, taken once at construction
+    /// (radio-cat-rs ADR 0022). See `crate::ptt_line::ReleaseLines`.
+    release: Rc<crate::ptt_line::ReleaseLines>,
 }
 
 impl<S: CatSession> Ts570d<S> {
     /// The shared session, for `crate::ptt_line`'s `&self` capability methods.
     pub(crate) fn shared_session(&self) -> &SharedSession<S> {
         &self.session
+    }
+
+    /// The release lines, for `crate::ptt_line`'s de-keying path.
+    pub(crate) fn release_lines(&self) -> &Rc<crate::ptt_line::ReleaseLines> {
+        &self.release
     }
 
     /// Take the session back out.
@@ -181,11 +189,17 @@ where
     S: CatSession<Error = TransportError>,
 {
     /// Create a new `Ts570d` wrapping the given session.
+    ///
+    /// Takes the session's release lines (`CatSession::release_lines`) here,
+    /// once, while nothing else can be holding the session -- so that a
+    /// PTT release never has to wait for a CAT command to hand it back.
     pub fn new(session: S) -> Self {
+        let release = Rc::new(crate::ptt_line::ReleaseLines::new(session.release_lines()));
         let session = SharedSession::new(session);
         Self {
             client: CatClient::new(session.clone(), &TS570D_COMMAND_TABLE),
             session,
+            release,
         }
     }
 

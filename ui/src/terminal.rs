@@ -115,8 +115,13 @@ use radio::NoPttLine;
 /// The `Drop` impl is the last resort, for the panic-unwind path. It cannot
 /// retry: this console is single-threaded, so if the radio task is holding
 /// the session at that instant, blocking here would guarantee it never lets
-/// go. Every path an operator can take — Esc, `[Q]` — releases the line
-/// through [`restore_ptt_idle`] first, which does retry. See
+/// go. It does not need to: a move to the idle level is a *release*, and
+/// `radio::Ts570d::ptt_line_handle` sends releases through the port's
+/// release lines (radio-cat-rs ADR 0022), which never wait for the session
+/// -- so the one attempt lands even mid-poll. Only a transport with no
+/// release lines can still answer `Busy` here (the radio crate logs that
+/// once). Every path an operator can take — Esc, `[Q]` — also releases the
+/// line through [`restore_ptt_idle`] first, which retries. See
 /// `docs/adr/0010` for what remains uncovered.
 struct PttLineGuard {
     ptt: Box<dyn PttLine>,

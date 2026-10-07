@@ -45,6 +45,28 @@
 //! p. 70). [`HandshakeState`] is what a console can read back; DTR and RTS are
 //! outputs and cannot be read back at all, which is why a caller that moves
 //! them must remember where it left them.
+//!
+//! # Releasing does not wait for the radio task
+//!
+//! Moving a line **to its idle level** -- DTR down, RTS up -- is a release:
+//! it takes the transmitter out of the state a keyed line put it in. A
+//! release goes through the port's *release lines*, an owned duplicate of
+//! its modem-control lines taken once when the [`Ts570d`] is built
+//! (`CatSession::release_lines`, radio-cat-rs ADR 0022). It therefore never
+//! needs the session, cannot be [`RadioError::Busy`], and lands even while
+//! the radio task has the session checked out for a CAT command -- which is
+//! exactly when a console's `Drop` guard, which cannot retry, tends to run.
+//! A line change never touches the byte stream, so taking it out of turn
+//! cannot corrupt a frame in flight.
+//!
+//! **Asserting** (any move away from idle) stays on the session: it keys
+//! the transmitter, and must not overtake the CAT command in progress.
+//!
+//! A transport with no release lines keeps the old path for releases too,
+//! and says so once in the log.
+
+use std::cell::Cell;
+use std::rc::Rc;
 
 use cat_transport_core::{CatSession, ModemControlLines, TransportError};
 
@@ -131,6 +153,49 @@ pub trait PttLine {
 /// from wherever the operator's keystroke is handled.
 pub struct PttLineHandle<S: CatSession<Error = TransportError>> {
     session: SharedSession<S>,
+    release: Rc<ReleaseLines>,
+}
+
+/// The port's release-only modem lines, shared by a [`Ts570d`] and every
+/// [`PttLineHandle`] made from it. See the module doc.
+///
+/// Holding it keeps one extra handle open on the port (an owned duplicate,
+/// so its number cannot be reused while held); it closes with the last
+/// owner.
+pub(crate) struct ReleaseLines {
+    lines: Option<Box<dyn ModemControlLines + Send + Sync>>,
+    /// Whether the "no release lines" warning has been logged.
+    warned: Cell<bool>,
+}
+
+impl ReleaseLines {
+    pub(crate) fn new(lines: Option<Box<dyn ModemControlLines + Send + Sync>>) -> Self {
+        Self {
+            lines,
+            warned: Cell::new(false),
+        }
+    }
+
+    /// Move `line` to its idle level on the release lines, or `None` if
+    /// there are none (after warning, once).
+    fn release(&self, line: PttLineKind) -> Option<RadioResult<()>> {
+        let Some(lines) = self.lines.as_ref() else {
+            if !self.warned.replace(true) {
+                tracing::warn!(
+                    "PTT: this port offers no release lines; a {} release must \
+                     wait for any CAT command in flight",
+                    line.name()
+                );
+            }
+            return None;
+        };
+        let idle = line.idle_level();
+        let moved = match line {
+            PttLineKind::Dtr => lines.set_dtr(idle),
+            PttLineKind::Rts => lines.set_rts(idle),
+        };
+        Some(moved.map_err(RadioError::Transport))
+    }
 }
 
 impl<S> PttLine for PttLineHandle<S>
@@ -138,7 +203,7 @@ where
     S: CatSession<Error = TransportError> + ModemControlLines,
 {
     fn set_ptt_line(&self, line: PttLineKind, asserted: bool) -> RadioResult<()> {
-        set_line(&self.session, line, asserted)
+        set_line(&self.session, &self.release, line, asserted)
     }
 
     fn read_handshake(&self) -> RadioResult<HandshakeState> {
@@ -155,7 +220,7 @@ where
     S: CatSession<Error = TransportError> + ModemControlLines,
 {
     fn set_ptt_line(&self, line: PttLineKind, asserted: bool) -> RadioResult<()> {
-        set_line(self.shared_session(), line, asserted)
+        set_line(self.shared_session(), self.release_lines(), line, asserted)
     }
 
     fn read_handshake(&self) -> RadioResult<HandshakeState> {
@@ -193,6 +258,7 @@ where
     pub fn ptt_line_handle(&self) -> Box<dyn PttLine> {
         Box::new(PttLineHandle {
             session: self.shared_session().clone(),
+            release: Rc::clone(self.release_lines()),
         })
     }
 }
@@ -201,10 +267,23 @@ where
 // The three operations, written once
 // ---------------------------------------------------------------------------
 
-fn set_line<S>(session: &SharedSession<S>, line: PttLineKind, asserted: bool) -> RadioResult<()>
+/// A move to the idle level is a release and goes through `release`;
+/// anything else is an assert and goes through the session. See the module
+/// doc.
+fn set_line<S>(
+    session: &SharedSession<S>,
+    release: &ReleaseLines,
+    line: PttLineKind,
+    asserted: bool,
+) -> RadioResult<()>
 where
     S: CatSession<Error = TransportError> + ModemControlLines,
 {
+    if asserted == line.idle_level() {
+        if let Some(released) = release.release(line) {
+            return released;
+        }
+    }
     session
         .try_with(|s| match line {
             PttLineKind::Dtr => s.set_dtr(asserted),
@@ -244,6 +323,8 @@ where
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use cat_transport_core::ResponseDisposition;
@@ -449,6 +530,196 @@ mod tests {
         assert!(!handle.ptt_line_available());
 
         // Put it back, the way the radio task does, and the line moves again.
+        radio.shared_session().put_back(checked_out);
+        handle.set_ptt_line(PttLineKind::Dtr, false).unwrap();
+    }
+
+    // -----------------------------------------------------------------
+    // Releases on the owned release lines (radio-cat-rs ADR 0022)
+    // -----------------------------------------------------------------
+
+    /// What the release lines saw, shared with the test. `Send + Sync`
+    /// because `CatSession::release_lines` hands out a `Send + Sync` box.
+    #[derive(Default)]
+    struct ReleaseRecord {
+        dtr: AtomicBool,
+        rts: AtomicBool,
+        moves: AtomicUsize,
+    }
+
+    struct RecordingReleaseLines(Arc<ReleaseRecord>);
+
+    impl ModemControlLines for RecordingReleaseLines {
+        fn set_rts(&self, asserted: bool) -> Result<(), TransportError> {
+            self.0.rts.store(asserted, Ordering::SeqCst);
+            self.0.moves.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn set_dtr(&self, asserted: bool) -> Result<(), TransportError> {
+            self.0.dtr.store(asserted, Ordering::SeqCst);
+            self.0.moves.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn read_cts(&self) -> Result<bool, TransportError> {
+            Ok(false)
+        }
+        fn read_dsr(&self) -> Result<bool, TransportError> {
+            Ok(false)
+        }
+        fn read_dcd(&self) -> Result<bool, TransportError> {
+            Ok(false)
+        }
+    }
+
+    /// A [`WiredSession`] whose transport also offers an owned duplicate
+    /// of its lines, the way `SerialCatSession` does.
+    #[derive(Default)]
+    struct DuplicatingSession {
+        wired: WiredSession,
+        record: Arc<ReleaseRecord>,
+        taken: Cell<usize>,
+    }
+
+    #[async_trait(?Send)]
+    impl CatSession for DuplicatingSession {
+        type Error = TransportError;
+
+        async fn execute(
+            &mut self,
+            _request: &[u8],
+            _response: &mut Vec<u8>,
+        ) -> Result<ResponseDisposition, Self::Error> {
+            Ok(ResponseDisposition::NoResponse)
+        }
+
+        async fn send(&mut self, _request: &[u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn flush_rx(&mut self) {}
+
+        fn release_lines(&self) -> Option<Box<dyn ModemControlLines + Send + Sync>> {
+            self.taken.set(self.taken.get() + 1);
+            Some(Box::new(RecordingReleaseLines(Arc::clone(&self.record))))
+        }
+    }
+
+    impl ModemControlLines for DuplicatingSession {
+        fn set_rts(&self, asserted: bool) -> Result<(), TransportError> {
+            self.wired.set_rts(asserted)
+        }
+        fn set_dtr(&self, asserted: bool) -> Result<(), TransportError> {
+            self.wired.set_dtr(asserted)
+        }
+        fn read_cts(&self) -> Result<bool, TransportError> {
+            self.wired.read_cts()
+        }
+        fn read_dsr(&self) -> Result<bool, TransportError> {
+            self.wired.read_dsr()
+        }
+        fn read_dcd(&self) -> Result<bool, TransportError> {
+            self.wired.read_dcd()
+        }
+    }
+
+    fn duplicating() -> (Ts570d<DuplicatingSession>, Arc<ReleaseRecord>) {
+        let session = DuplicatingSession::default();
+        let record = Arc::clone(&session.record);
+        (Ts570d::new(session), record)
+    }
+
+    #[test]
+    fn a_release_during_a_cat_command_lands_at_once_on_the_release_lines() {
+        // The gap this closes: the console's PTT guard tries once from
+        // `Drop` and ignored `Busy`, so a panic (or any exit) that landed
+        // mid-poll left DTR asserted -- the transmitter keyed.
+        let (radio, record) = duplicating();
+        let handle = radio.ptt_line_handle();
+        record.dtr.store(true, Ordering::SeqCst);
+        let checked_out = radio.shared_session().take();
+
+        handle
+            .set_ptt_line(PttLineKind::Dtr, false)
+            .expect("a release must not be Busy");
+        assert!(!record.dtr.load(Ordering::SeqCst), "DTR dropped at once");
+
+        radio.shared_session().put_back(checked_out);
+    }
+
+    #[test]
+    fn the_console_guards_drop_sequence_completes_mid_poll() {
+        // Exactly what `ui`'s `PttLineGuard::drop` does: one attempt per
+        // line, to its idle level, no retry. Both must land while the
+        // radio task holds the session.
+        let (radio, record) = duplicating();
+        let handle = radio.ptt_line_handle();
+        record.dtr.store(true, Ordering::SeqCst);
+        let checked_out = radio.shared_session().take();
+
+        for line in [PttLineKind::Dtr, PttLineKind::Rts] {
+            assert!(
+                handle.set_ptt_line(line, line.idle_level()).is_ok(),
+                "{} restore was refused mid-poll",
+                line.name()
+            );
+        }
+        assert!(!record.dtr.load(Ordering::SeqCst));
+        assert!(record.rts.load(Ordering::SeqCst), "RTS idles asserted");
+
+        radio.shared_session().put_back(checked_out);
+    }
+
+    #[test]
+    fn an_assert_stays_on_the_session_and_waits_its_turn() {
+        // Keying is not a safe-state action: it must not overtake a CAT
+        // command in flight, so it never uses the release lines.
+        let (radio, record) = duplicating();
+        let handle = radio.ptt_line_handle();
+        let checked_out = radio.shared_session().take();
+
+        assert!(matches!(
+            handle.set_ptt_line(PttLineKind::Dtr, true),
+            Err(RadioError::Busy)
+        ));
+        assert_eq!(record.moves.load(Ordering::SeqCst), 0);
+
+        radio.shared_session().put_back(checked_out);
+        handle.set_ptt_line(PttLineKind::Dtr, true).unwrap();
+        assert!(radio
+            .shared_session()
+            .try_with(|s| s.wired.dtr.get())
+            .unwrap());
+        assert_eq!(record.moves.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_release_with_the_session_free_still_uses_the_release_lines() {
+        let (radio, record) = duplicating();
+        radio.set_ptt_line(PttLineKind::Dtr, false).unwrap();
+        assert_eq!(record.moves.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_release_lines_are_taken_once_and_shared_with_every_handle() {
+        // One duplicate per radio: each `release_lines` call is another
+        // open handle on the port.
+        let (radio, _record) = duplicating();
+        let _a = radio.ptt_line_handle();
+        let _b = radio.ptt_line_handle();
+        assert_eq!(radio.shared_session().try_with(|s| s.taken.get()), Some(1));
+    }
+
+    #[test]
+    fn without_release_lines_a_release_mid_poll_is_still_busy() {
+        // The fallback is the old path (with a warning): honest `Busy`,
+        // which the console retries.
+        let radio = Ts570d::new(WiredSession::default());
+        let handle = radio.ptt_line_handle();
+        let checked_out = radio.shared_session().take();
+        assert!(matches!(
+            handle.set_ptt_line(PttLineKind::Dtr, false),
+            Err(RadioError::Busy)
+        ));
         radio.shared_session().put_back(checked_out);
         handle.set_ptt_line(PttLineKind::Dtr, false).unwrap();
     }
