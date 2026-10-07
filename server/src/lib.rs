@@ -46,9 +46,11 @@ pub mod spectrum;
 mod endpoint;
 
 pub use console::ConsoleTs570d;
-pub mod ptt_dtr;
-pub use ptt_dtr::{PttDtr, MAX_KEY_DOWN};
+pub mod ptt;
+pub use ptt::{Ptt, PttMethod, MAX_KEY_DOWN};
 pub use rigctl_radio::RigctlTs570d;
+#[cfg(test)]
+mod test_support;
 
 /// Which network listeners to bring up — re-exported unconditionally from
 /// `cat_rigctl`, which is itself cross-platform since
