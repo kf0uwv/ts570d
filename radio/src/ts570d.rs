@@ -1011,9 +1011,29 @@ where
     // CW keyer (inherent — TS-570D-specific)
     // -----------------------------------------------------------------------
 
-    /// Send a CW message via the keyer buffer.
+    /// Send one CW sentence through the keyer (`KY`, at most 24
+    /// characters; see [`crate::keyer`]).
+    ///
+    /// This keys the transmitter whenever the radio is set to (CW mode
+    /// with break-in on). Text the keyer cannot take is refused with
+    /// [`RadioError::InvalidCwText`] before anything is written.
     pub async fn send_cw(&mut self, message: &str) -> RadioResult<()> {
-        self.client.set("KY", message).await.map_err(Into::into)
+        let parameter = crate::keyer::ky_parameter(message)?;
+        self.client.set("KY", &parameter).await.map_err(Into::into)
+    }
+
+    /// Whether the keyer buffer has space for another sentence (`KY;` →
+    /// `KY0;`). **Not** "finished keying": the radio reports space while
+    /// it is still sending what it holds.
+    pub async fn keyer_buffer_free(&mut self) -> RadioResult<bool> {
+        let raw = self.client.query("KY").await?;
+        match ResponseParser::parse(&raw)? {
+            Response::KeyerBufferFull(full) => Ok(!full),
+            other => Err(RadioError::InvalidProtocolString(format!(
+                "expected KeyerBuffer, got {:?}",
+                other
+            ))),
+        }
     }
 
     /// Get keyer speed in WPM (10–60).
@@ -2762,7 +2782,80 @@ mod tests {
         let transport = FakeTransport::new();
         let mut radio = Ts570d::new(SerialCatSession::new(transport));
         radio.send_cw("CQ").await.unwrap();
-        assert_eq!(radio.session.borrow().transport.written_str(), "KYCQ;");
+        // The manual's KY set: `KY`, a space in byte 3, the message
+        // space-padded to 24 characters -- a 28-byte fixed-length command.
+        let written = radio.session.borrow().transport.written_str().to_string();
+        assert_eq!(written, format!("KY CQ{};", " ".repeat(22)));
+        assert_eq!(written.len(), 28);
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_send_cw_full_24_characters_fills_the_buffer_exactly() {
+        let transport = FakeTransport::new();
+        let mut radio = Ts570d::new(SerialCatSession::new(transport));
+        let msg = "CQ CQ DE N0CALL N0CALL K"; // 24
+        assert_eq!(msg.len(), 24);
+        radio.send_cw(msg).await.unwrap();
+        assert_eq!(
+            radio.session.borrow().transport.written_str(),
+            format!("KY {msg};")
+        );
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_send_cw_folds_lower_case() {
+        let transport = FakeTransport::new();
+        let mut radio = Ts570d::new(SerialCatSession::new(transport));
+        radio.send_cw("cq de n0call").await.unwrap();
+        assert_eq!(
+            radio.session.borrow().transport.written_str(),
+            format!("KY CQ DE N0CALL{};", " ".repeat(12))
+        );
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_send_cw_refuses_25_characters_and_writes_nothing() {
+        let transport = FakeTransport::new();
+        let mut radio = Ts570d::new(SerialCatSession::new(transport));
+        let err = radio.send_cw(&"E".repeat(25)).await.unwrap_err();
+        assert!(matches!(err, RadioError::InvalidCwText(_)), "{err:?}");
+        assert_eq!(radio.session.borrow().transport.written_str(), "");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_send_cw_refuses_a_character_the_keyer_cannot_send() {
+        let transport = FakeTransport::new();
+        let mut radio = Ts570d::new(SerialCatSession::new(transport));
+        for bad in ["CQ!", "SK#", "AR;", "\u{e9}"] {
+            let err = radio.send_cw(bad).await.unwrap_err();
+            assert!(
+                matches!(err, RadioError::InvalidCwText(_)),
+                "{bad}: {err:?}"
+            );
+        }
+        assert_eq!(radio.session.borrow().transport.written_str(), "");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_send_cw_refuses_an_empty_message() {
+        let transport = FakeTransport::new();
+        let mut radio = Ts570d::new(SerialCatSession::new(transport));
+        for empty in ["", "   "] {
+            assert!(matches!(
+                radio.send_cw(empty).await,
+                Err(RadioError::InvalidCwText(_))
+            ));
+        }
+        assert_eq!(radio.session.borrow().transport.written_str(), "");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_keyer_buffer_free_reads_ky() {
+        let mut radio = make_radio("KY0;");
+        assert!(radio.keyer_buffer_free().await.unwrap());
+        assert_eq!(radio.session.borrow().transport.written_str(), "KY;");
+        let mut radio = make_radio("KY1;");
+        assert!(!radio.keyer_buffer_free().await.unwrap());
     }
 
     #[monoio::test(driver = "legacy")]

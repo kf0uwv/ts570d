@@ -966,9 +966,9 @@ fn validate_text_input(action: &InputAction, buffer: &str) -> Result<ExecuteActi
             Ok(ExecuteAction::SetSemiBreakInDelay(v))
         }
         InputAction::SendCw => {
-            if buffer.len() > 24 {
-                return Err("Message must be at most 24 characters".to_string());
-            }
+            // The radio crate's own check, so the prompt and the `KY`
+            // command cannot disagree about what the keyer accepts.
+            radio::keyer::ky_parameter(buffer).map_err(|e| e.to_string())?;
             Ok(ExecuteAction::SendCw(buffer.to_string()))
         }
         InputAction::SetCtcssToneNumber => {
@@ -1405,6 +1405,15 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, radio: &RadioDisplay)
                         }
                         return KeyResult::Continue;
                     }
+                    if !trimmed.is_empty()
+                        && radio::keyer::ky_parameter(&format!("TEST {trimmed}")).is_err()
+                    {
+                        if let ControlState::TextInput { error, .. } = state {
+                            *error =
+                                Some("Callsign has a character the keyer cannot send".to_string());
+                        }
+                        return KeyResult::Continue;
+                    }
                     let callsign = if trimmed.is_empty() {
                         None
                     } else {
@@ -1803,6 +1812,89 @@ mod tests {
             state,
             ControlState::Diagnostic(DiagState::Running { .. })
         ));
+    }
+
+    /// Diagnostics step 82 keys the transmitter for real since the `KY`
+    /// form was fixed (it was silently malformed before). The ADR 0007
+    /// gate must still stand in front of it: from the menu, no single key
+    /// starts a run, and the warning screen itself never starts one -- only
+    /// warning, then callsign prompt, then Enter.
+    #[test]
+    fn test_diag_run_is_reachable_only_through_warning_then_callsign_prompt() {
+        let radio = RadioDisplay::default();
+        let mut keys: Vec<KeyCode> = (' '..='~').map(KeyCode::Char).collect();
+        keys.extend([
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Tab,
+            KeyCode::Backspace,
+        ]);
+
+        for &code in &keys {
+            let mut state = ControlState::Menu;
+            let result = handle_key(key(code), &mut state, &radio);
+            assert!(
+                !matches!(result, KeyResult::StartDiag(_)),
+                "menu + {code:?}"
+            );
+            assert!(
+                !matches!(state, ControlState::Diagnostic(_)),
+                "menu + {code:?}"
+            );
+
+            let mut state = ControlState::DiagWarning(WarnedAction::Diagnostics);
+            let result = handle_key(key(code), &mut state, &radio);
+            assert!(
+                !matches!(result, KeyResult::StartDiag(_)),
+                "warning + {code:?}"
+            );
+            assert!(
+                !matches!(state, ControlState::Diagnostic(_)),
+                "warning + {code:?}"
+            );
+        }
+
+        // The one path: D, acknowledge, type a callsign, Enter.
+        let mut state = ControlState::Menu;
+        handle_key(key(KeyCode::Char('d')), &mut state, &radio);
+        assert!(matches!(
+            state,
+            ControlState::DiagWarning(WarnedAction::Diagnostics)
+        ));
+        handle_key(key(KeyCode::Enter), &mut state, &radio);
+        for c in "N0CALL".chars() {
+            handle_key(key(KeyCode::Char(c)), &mut state, &radio);
+        }
+        match handle_key(key(KeyCode::Enter), &mut state, &radio) {
+            KeyResult::StartDiag(Some(cs)) => assert_eq!(cs, "N0CALL"),
+            _ => panic!("expected StartDiag(Some(\"N0CALL\"))"),
+        }
+    }
+
+    #[test]
+    fn test_callsign_prompt_refuses_a_character_the_keyer_cannot_send() {
+        // Refused at the prompt rather than discovered as a failed step 82.
+        let mut state = ControlState::TextInput {
+            prompt: "Callsign for CW test (blank to skip):".to_string(),
+            buffer: "N0CALL#".to_string(),
+            error: None,
+            action: InputAction::DiagCallsign,
+        };
+        let radio = RadioDisplay::default();
+        let result = handle_key(key(KeyCode::Enter), &mut state, &radio);
+        assert!(matches!(result, KeyResult::Continue));
+        assert!(matches!(
+            &state,
+            ControlState::TextInput { error: Some(_), .. }
+        ));
+    }
+
+    #[test]
+    fn test_send_cw_input_is_checked_against_the_keyer() {
+        assert!(validate_text_input(&InputAction::SendCw, "cq test").is_ok());
+        assert!(validate_text_input(&InputAction::SendCw, "CQ!").is_err());
+        assert!(validate_text_input(&InputAction::SendCw, &"E".repeat(25)).is_err());
+        assert!(validate_text_input(&InputAction::SendCw, "").is_err());
     }
 
     #[test]

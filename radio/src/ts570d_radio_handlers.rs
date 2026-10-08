@@ -48,6 +48,15 @@ fn set_menu_value(state: &mut RadioState, n: usize, v: u16) {
     }
 }
 
+/// Roughly how long the keyer takes to send `text` at `wpm`: PARIS timing
+/// (a dot is 1200/wpm ms) at about ten dot units per character including
+/// its gap, four more per word space. The emulator's approximation only --
+/// the CW supervisor makes its own conservative estimate.
+fn ky_keying_time(text: &str, wpm: u8) -> std::time::Duration {
+    let units: u64 = text.chars().map(|c| if c == ' ' { 4 } else { 10 }).sum();
+    std::time::Duration::from_millis(units * 1200 / u64::from(wpm.max(1)))
+}
+
 pub fn handle(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>) {
     handle_inner(cmd, state)
 }
@@ -801,16 +810,38 @@ fn handle_inner(cmd: &str, state: &mut RadioState) -> (String, Vec<StateChange>)
         }
 
         // ------------------------------------------------------------------
-        // KY — CW Keying / buffer status
-        // Read (KY;): returns buffer status KY0; (buffer available)
-        // Set (KY<space><message>;): silent
+        // KY — CW Keying / buffer status (parameters 43, 44)
+        // Read (KY;): KY0; buffer space available, KY1; not available.
+        // Set: `KY`, a space in byte 3, the message padded with spaces to
+        // 24 characters (28 bytes in all). Anything else is refused.
+        //
+        // Emulator assumptions, pending the dummy-load bench: a set while
+        // the buffer is full is refused (`?;`) rather than queued, and the
+        // buffer stays full for an estimate of the whole sentence's keying
+        // time at the current keyer speed.
         // ------------------------------------------------------------------
         "KY" => {
+            let busy = state
+                .keyer_busy_until
+                .is_some_and(|t| std::time::Instant::now() < t);
             if params.is_empty() {
-                query!("KY0;".to_string())
-            } else {
-                (String::new(), vec![])
+                return query!(format!("KY{};", u8::from(busy)));
             }
+            let well_formed = params.len() == 1 + crate::keyer::KY_MAX_CHARS
+                && params.starts_with(' ')
+                && params.chars().all(crate::keyer::ky_accepts);
+            if !well_formed || busy {
+                return query!("?;".to_string());
+            }
+            let text = params.trim();
+            if text.is_empty() {
+                // "The ' ' bytes will not send any character."
+                return no_response!();
+            }
+            state.keyer_busy_until =
+                Some(std::time::Instant::now() + ky_keying_time(text, state.keyer_speed));
+            state.keyer_log.push(text.to_string());
+            set_ok!("keyer_message", text)
         }
 
         // ------------------------------------------------------------------
@@ -1413,6 +1444,75 @@ mod tests {
 
     fn default_state() -> RadioState {
         RadioState::default()
+    }
+
+    // ------------------------------------------------------------------
+    // KY -- the manual's 28-byte form: `KY`, a space, 24 padded chars.
+    // ------------------------------------------------------------------
+
+    fn ky(text: &str) -> String {
+        format!("KY {text:<24}")
+    }
+
+    #[test]
+    fn test_ky_read_reports_space_when_idle() {
+        let mut s = default_state();
+        assert_eq!(handle("KY", &mut s).0, "KY0;");
+    }
+
+    #[test]
+    fn test_ky_set_records_the_sentence_and_fills_the_buffer() {
+        let mut s = default_state();
+        let (resp, _) = handle(&ky("CQ DE N0CALL"), &mut s);
+        assert_eq!(resp, "", "a KY set is silent");
+        assert_eq!(s.keyer_log, vec!["CQ DE N0CALL".to_string()]);
+        assert_eq!(handle("KY", &mut s).0, "KY1;", "busy while converting");
+    }
+
+    #[test]
+    fn test_ky_buffer_frees_once_the_sentence_has_had_time_to_key() {
+        let mut s = default_state();
+        handle(&ky("E"), &mut s);
+        s.keyer_busy_until = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        assert_eq!(handle("KY", &mut s).0, "KY0;");
+    }
+
+    #[test]
+    fn test_ky_set_while_busy_is_refused() {
+        // Emulator assumption, pending the bench: the manual says the next
+        // sentence "must be keyed after the current conversion is
+        // completed"; the emulator refuses rather than queueing, so a
+        // controller that ignores `KY1;` fails loudly here.
+        let mut s = default_state();
+        handle(&ky("CQ"), &mut s);
+        assert_eq!(handle(&ky("TEST"), &mut s).0, "?;");
+        assert_eq!(s.keyer_log, vec!["CQ".to_string()]);
+    }
+
+    #[test]
+    fn test_ky_malformed_sets_are_refused_and_send_nothing() {
+        let long = format!("KY {}", "E".repeat(25));
+        for bad in [
+            "KYCQ",                        // the pre-fix form: no space, no padding
+            "KY CQ",                       // not padded to 24
+            &long,                         // 25 characters
+            "KY CQ!                     ", // outside the charset
+            "KYXCQ                      ", // byte 3 not a space
+            "KY cq                      ", // the radio's charset is upper case
+        ] {
+            let mut s = default_state();
+            assert_eq!(handle(bad, &mut s).0, "?;", "{bad:?}");
+            assert!(s.keyer_log.is_empty(), "{bad:?}");
+            assert_eq!(handle("KY", &mut s).0, "KY0;", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_ky_all_blank_sends_nothing() {
+        let mut s = default_state();
+        assert_eq!(handle(&ky(""), &mut s).0, "");
+        assert!(s.keyer_log.is_empty());
+        assert_eq!(handle("KY", &mut s).0, "KY0;");
     }
 
     // ------------------------------------------------------------------
