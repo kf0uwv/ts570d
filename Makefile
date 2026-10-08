@@ -12,8 +12,7 @@ build:
 # The features the packaged program runs with (see packaging/build-deb.sh):
 # `make deb` builds here and then packages with --skip-build, so a bare
 # `cargo build --release` here shipped a binary with no sound card and no
-# local RTL-SDR -- and `ts570d cw copy` cannot play a note without
-# audio-device.
+# local RTL-SDR -- and ACC2 capture needs audio-device.
 RELEASE_FEATURES ?= sdr-device,audio-device
 
 release:

@@ -15,7 +15,7 @@ env:
   # two repositories out side by side (ts570d/ and radio-cat-rs/) and run
   # from ts570d/. This is the one place that says which radio-cat-rs to
   # build against; it must be a ref that contains everything ts570d uses
-  # (cat-morse, AudioPlayback, the Windows broker fixes).
+  # (AudioPlayback, the Windows broker fixes).
   RADIO_CAT_RS_REF: main
 
 jobs:
@@ -76,8 +76,8 @@ jobs:
 
       - name: Binary unit tests
         # `--lib` skips binary targets, and the root `ts570d` package has no
-        # lib target: without this, src/main.rs and src/cw/ tests (including
-        # `cw copy`'s read-only safety test) ran only on the Windows job.
+        # lib target: without this, src/main.rs's own tests ran only on the
+        # Windows job.
         run: cargo test --workspace --bins
 
       - name: Integration tests
@@ -161,7 +161,7 @@ jobs:
       - name: cargo test (workspace, excluding emulator)
         run: cargo test --workspace --exclude emulator
 
-      - name: cargo check with audio-device (cw copy's speaker, WASAPI)
+      - name: cargo check with audio-device (ACC2 capture, WASAPI)
         # The Windows release builds with this feature; nothing else here
         # compiles the cpal path on Windows.
         run: cargo check -p ts570d --features audio-device

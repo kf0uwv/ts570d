@@ -374,14 +374,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cat-morse"
-version = "0.8.0"
-dependencies = [
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "cat-native"
 version = "0.8.0"
 dependencies = [
@@ -3584,7 +3576,6 @@ name = "ts570d"
 version = "0.3.2"
 dependencies = [
  "async-trait",
- "cat-morse",
  "cat-native",
  "cat-signal",
  "cat-signal-audio",
@@ -3593,13 +3584,11 @@ dependencies = [
  "cat-transport-rfc2217",
  "cat-transport-serial",
  "cat-transport-tcp",
- "crossterm",
  "ctrlc",
  "emulator",
  "futures",
  "monoio",
  "radio",
- "serde",
  "serde_json",
  "server",
  "tempfile",
