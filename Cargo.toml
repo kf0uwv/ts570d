@@ -189,6 +189,14 @@ server = { path = "server" }
 # its meaning live in `radio::calibration`.
 serde_json = { workspace = true }
 
+# One Ctrl-C/SIGTERM/SIGHUP (Unix) and console close/logoff/shutdown
+# (Windows) handler for both platforms, no runtime. Already in the tree
+# through `emulator`. Kept for `ts570d server`, which must turn a signal
+# into `cat_rigctl::StopHandle::stop()` so a stopped server restores the
+# radio's CW power and break-in (radio-cat-rs ADR 0023); the wiring lands
+# with the 0.9.0 upgrade.
+ctrlc = { version = "3.0", features = ["termination"] }
+
 [dev-dependencies]
 radio    = { path = "radio" }
 # src/port_guard.rs's tests open a real file and look for themselves in

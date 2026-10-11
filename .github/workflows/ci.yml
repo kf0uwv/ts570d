@@ -74,6 +74,12 @@ jobs:
       - name: Unit tests
         run: cargo test --lib --all
 
+      - name: Binary unit tests
+        # `--lib` skips binary targets, and the root `ts570d` package has no
+        # lib target: without this, src/main.rs's own tests ran only on the
+        # Windows job.
+        run: cargo test --workspace --bins
+
       - name: Integration tests
         # Requires /dev/pts (ptmx) and io_uring (kernel 5.1+).
         # ubuntu-latest runs kernel 6.x so both are available.
@@ -154,3 +160,8 @@ jobs:
 
       - name: cargo test (workspace, excluding emulator)
         run: cargo test --workspace --exclude emulator
+
+      - name: cargo check with audio-device (ACC2 capture, WASAPI)
+        # The Windows release builds with this feature; nothing else here
+        # compiles the cpal path on Windows.
+        run: cargo check -p ts570d --features audio-device

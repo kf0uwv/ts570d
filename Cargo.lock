@@ -3593,6 +3593,7 @@ dependencies = [
  "cat-transport-rfc2217",
  "cat-transport-serial",
  "cat-transport-tcp",
+ "ctrlc",
  "emulator",
  "futures",
  "monoio",

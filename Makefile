@@ -9,8 +9,14 @@ all: build
 build:
 	cargo build
 
+# The features the packaged program runs with (see packaging/build-deb.sh):
+# `make deb` builds here and then packages with --skip-build, so a bare
+# `cargo build --release` here shipped a binary with no sound card and no
+# local RTL-SDR -- and ACC2 capture needs audio-device.
+RELEASE_FEATURES ?= sdr-device,audio-device
+
 release:
-	cargo build --release
+	cargo build --release --features $(RELEASE_FEATURES)
 	cargo build --release -p emulator
 	# pin-test is a shared cat-transport-serial `[[bin]]` in radio-cat-rs now
 	# (see docs/adr/0006-windows-concurrency-model.md), not a local binary --
@@ -22,6 +28,7 @@ test: test-unit test-integration
 
 test-unit:
 	cargo test --lib --all
+	cargo test --workspace --bins
 
 test-integration:
 	cargo test --test integration
@@ -88,7 +95,7 @@ help:
 	@echo "  build            Debug build (all crates)"
 	@echo "  release          Release build (all binaries)"
 	@echo "  test             Unit + integration tests"
-	@echo "  test-unit        Unit tests only (--lib)"
+	@echo "  test-unit        Unit tests only (--lib, then --bins)"
 	@echo "  test-integration Integration tests (requires PTY + io_uring)"
 	@echo "  check            fmt-check + clippy (matches CI)"
 	@echo "  fmt              Format all code"

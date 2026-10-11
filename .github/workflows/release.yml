@@ -33,6 +33,18 @@ on:
 # https://github.com/kf0uwv/radio-cat-rs -- see that repo's ADR 0008's own
 # explicit callout. This is expected, not a bug in this file.
 
+# Features (2026-10-06): released binaries need `audio-device` (ACC2
+# capture) and, on Linux, `sdr-device`.
+# `linux_features` / `windows_features` are new inputs of radio-cat-rs's
+# release-app.yml on its `fix/windows-build` branch: until that lands on
+# radio-cat-rs `main` (which this file calls), a run of this workflow will
+# fail with an unknown-input error rather than silently ship a featureless
+# binary. Windows gets `audio-device` only -- there is no librtlsdr there.
+#
+# The shared workflow checks out only this repository, so the
+# `../radio-cat-rs` path dependencies (see Cargo.toml) will not resolve
+# there either until they are back to tagged git dependencies.
+
 jobs:
   release:
     permissions:
@@ -42,7 +54,9 @@ jobs:
       app_name: "ts570d-radio-control"
       main_binary: "ts570d"
       extra_binaries: "emulator cat-transport-serial:pin-test"
-      apt_packages: "libudev-dev"
+      apt_packages: "libudev-dev libasound2-dev librtlsdr-dev"
+      linux_features: "sdr-device,audio-device"
+      windows_features: "audio-device"
 
   # Kept as its own job, `needs: release`, per ADR 0008 §4's note that the
   # version-bump policy is deliberately app-specific and left out of the

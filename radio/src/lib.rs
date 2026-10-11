@@ -63,8 +63,8 @@ mod ts570d_radio_handlers;
 pub use protocol::{Response, ResponseFramer, ResponseParser};
 pub use ptt_line::{HandshakeState, NoPttLine, PttLine, PttLineHandle, PttLineKind};
 pub use radio_trait::{
-    audio_passband_hz, Frequency, InformationResponse, MemoryChannelEntry, Mode, NopRadio, Radio,
-    RadioError, RadioResult,
+    audio_passband_hz, cw_pitch_hz, Frequency, InformationResponse, MemoryChannelEntry, Mode,
+    NopRadio, Radio, RadioError, RadioResult, CW_PITCH_INDEX_MAX,
 };
 pub use ts570d::Ts570d;
 pub use ts570d_radio::{
