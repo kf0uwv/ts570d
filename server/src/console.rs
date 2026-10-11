@@ -129,6 +129,9 @@ where
             // Filled in by the pump on its own slower clock, so this read
             // stays one `IF;` plus one `SM;`.
             levels: None,
+            // `capabilities` declares no CW control yet (ADR 0023), so
+            // there is no CW state to report.
+            cw: None,
         })
     }
 
@@ -199,6 +202,15 @@ where
             Command::SetIfShift { .. } | Command::SetFilterWidth { .. } => {
                 return Err("not wired to CAT on this radio yet".to_string())
             }
+            // CW control (radio-cat-rs ADR 0023) is not offered: this radio
+            // declares `cw: None`, so `cat_rigctl` refuses these before they
+            // reach the queue. Listed rather than swept into a `_` arm for
+            // the same reason as `AttachDevice`.
+            Command::SetKeyerSpeed { .. }
+            | Command::ArmCwTransmit { .. }
+            | Command::SendCwText { .. }
+            | Command::AbortCw
+            | Command::DisarmCw => return Err("no CW control on this radio yet".to_string()),
         };
         result.map_err(|e| e.to_string())
     }
