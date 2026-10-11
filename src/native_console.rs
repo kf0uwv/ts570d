@@ -716,7 +716,10 @@ impl AudioTap for RemoteAudio {
     }
 }
 
-#[cfg(test)]
+// Linux-only: these tests drive futures through `futures::executor`, a
+// Linux-only dev-dependency here (see Cargo.toml). The module itself is
+// cross-platform.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use cat_native::testing::{serve_stub, StubHost};

@@ -76,5 +76,7 @@ pub fn bare() -> CapabilitiesWire {
         layout: None,
         theme: None,
         installation: Installation::default(),
+        // A radio with nothing but a dial has no CW control either.
+        cw: None,
     }
 }

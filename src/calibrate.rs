@@ -306,7 +306,13 @@ where
             println!("\n\nAll {MENU_COUNT} menus captured.");
             return;
         }
+        // `monoio` is Linux-only. On Windows the app runs on a single-
+        // future `win_runtime::block_on` with nothing else to yield to, so
+        // a blocking sleep is the equivalent.
+        #[cfg(target_os = "linux")]
         monoio::time::sleep(POLL).await;
+        #[cfg(not(target_os = "linux"))]
+        std::thread::sleep(POLL);
     }
     println!();
 }

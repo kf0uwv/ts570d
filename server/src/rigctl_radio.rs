@@ -87,9 +87,11 @@ impl<S: CatSession> Drop for RigctlTs570d<S> {
     /// protocol requires a station to handle that, and a station with a
     /// transmitter on the end of it has to.
     ///
-    /// `Drop` cannot be async, so this spawns the release rather than
-    /// awaiting it. The watchdog armed in `PttDtr::key` is the backstop for
-    /// the case where the runtime is going away too and the spawn never runs.
+    /// `Drop` cannot be async, but it does not need to be: the release skips
+    /// the broker's queue (radio-cat-rs ADR 0022) and is done before
+    /// `release_on_disconnect` returns, on Linux and Windows alike. Only a
+    /// transport without release lines leaves it to finish in the
+    /// background; the watchdog armed in `PttDtr::key` is the backstop.
     fn drop(&mut self) {
         if let Some((ptt, session)) = &self.ptt {
             if ptt.is_keyed() {
