@@ -12,13 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Keying the transmitter on the **DTR line**, not with CAT `TX;`.
+//! Keying the transmitter for a rigctl client: on the **DTR line**, or with
+//! CAT `TX;`/`RX;` -- and, either way, making sure it is un-keyed again.
 //!
 //! On a station wired the way the ACC2-IF interface is, PTT is DTR through an
 //! opto onto ACC2 pin 9 (PKS). That is not interchangeable with CAT `TX;`:
 //! **pin 9 mutes the mic while keyed and `TX;` does not**, so a digital-mode
 //! client keying over rigctl gets different audio behaviour depending on which
-//! path is used. This module is the DTR path.
+//! path is used. [`PttMethod`] says which one a [`Ptt`] uses.
+//!
+//! Both methods get the same failsafes: a release when the client's
+//! connection drops while keyed, and the hard [`MAX_KEY_DOWN`] watchdog.
+//! They differ only in how the release reaches the radio -- see the next
+//! section and "Keying with CAT" below.
 //!
 //! # Why the two directions are not symmetric
 //!
@@ -50,7 +56,17 @@
 //! Linux and a plain OS thread on Windows (where there is no `monoio`; see
 //! `docs/adr/0006-windows-concurrency-model.md`), woken early by a
 //! cancellation channel. Both obey the same rule,
-//! [`PttDtr::watchdog_may_release`].
+//! [`Ptt::watchdog_may_release`].
+//!
+//! # Keying with CAT
+//!
+//! [`PttMethod::Cat`] keys with `TX;` and releases with `RX;`, both through
+//! the broker's **ordered** queue (`BrokerHandle::submit`). Unlike a line
+//! change, `RX;` is bytes on the wire: sent out of turn it would be
+//! interleaved into whatever frame is in flight. So a CAT release waits its
+//! turn; what this module adds is that it is always *sent* -- on `T 0`, on
+//! a dropped connection (handed to a background task, since it cannot
+//! complete inside `Drop`), and by the watchdog.
 //!
 //! # RTS is not an option on this radio
 //!
@@ -74,17 +90,29 @@ use cat_server::{BrokerCatSession, TaskFn};
 ///
 /// A rigctl client can send `T 1` and then have its TCP connection drop.
 /// Nothing in the rigctl protocol requires a station to survive that; this
-/// station does. Belt to the disconnect braces in [`PttDtr::release`].
+/// station does. Belt to the disconnect braces in [`Ptt::release`].
 pub const MAX_KEY_DOWN: Duration = Duration::from_secs(120);
 
-/// Keys and releases PTT on the DTR line.
-pub struct PttDtr {
+/// How a [`Ptt`] keys the transmitter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PttMethod {
+    /// Assert DTR (ordered); release it on the broker's release lines,
+    /// skipping the queue (radio-cat-rs ADR 0022).
+    Dtr,
+    /// Send CAT `TX;` / `RX;`, both in queue order.
+    Cat,
+}
+
+/// Keys and releases PTT, by [`PttMethod`], with a disconnect release and a
+/// hard key-down watchdog.
+pub struct Ptt {
+    method: PttMethod,
     /// Shared with the watchdog, which on Windows runs on its own thread --
     /// hence atomics rather than `Rc<Cell<_>>`.
     keyed: Arc<AtomicBool>,
     /// Which key-down we are on.
     ///
-    /// Incremented by every [`PttDtr::key`]. A watchdog captures the value
+    /// Incremented by every [`Ptt::key`]. A watchdog captures the value
     /// current when it was armed and refuses to act once it has moved, so
     /// it can only ever end the transmission it was armed for.
     ///
@@ -105,21 +133,32 @@ pub struct PttDtr {
     max_key_down: Duration,
     /// Wakes the armed watchdog thread so it re-checks whether its
     /// key-down is over, instead of sleeping out `max_key_down` and holding
-    /// a broker handle that long. Dropping it (with this `PttDtr`) wakes it
+    /// a broker handle that long. Dropping it (with this `Ptt`) wakes it
     /// too.
     #[cfg(not(target_os = "linux"))]
     watchdog_wake: std::sync::Mutex<Option<mpsc::Sender<()>>>,
 }
 
-impl Default for PttDtr {
+impl Default for Ptt {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PttDtr {
+impl Ptt {
+    /// Key on the DTR line.
     pub fn new() -> Self {
+        Self::with_method(PttMethod::Dtr)
+    }
+
+    /// Key with CAT `TX;` / `RX;`.
+    pub fn over_cat() -> Self {
+        Self::with_method(PttMethod::Cat)
+    }
+
+    fn with_method(method: PttMethod) -> Self {
         Self {
+            method,
             keyed: Arc::new(AtomicBool::new(false)),
             generation: Arc::new(AtomicU64::new(0)),
             max_key_down: MAX_KEY_DOWN,
@@ -128,14 +167,19 @@ impl PttDtr {
         }
     }
 
-    /// A `PttDtr` whose watchdog fires after `max_key_down` -- so a test
+    /// A `Ptt` whose watchdog fires after `max_key_down` -- so a test
     /// can watch it fire without waiting two minutes.
     #[cfg(test)]
-    fn with_max_key_down(max_key_down: Duration) -> Self {
+    fn with_max_key_down(self, max_key_down: Duration) -> Self {
         Self {
             max_key_down,
-            ..Self::new()
+            ..self
         }
+    }
+
+    /// Which way this keys the transmitter.
+    pub fn method(&self) -> PttMethod {
+        self.method
     }
 
     /// Whether this station believes PTT is currently asserted.
@@ -167,6 +211,44 @@ impl PttDtr {
         })
     }
 
+    /// Key the transmitter, in queue order.
+    async fn send_key(method: PttMethod, session: &BrokerCatSession) -> Option<Vec<u8>> {
+        match method {
+            PttMethod::Dtr => session.submit_task(Self::line_task(true)).await,
+            PttMethod::Cat => {
+                session
+                    .handle()
+                    .submit(session.client_id(), b"TX;".to_vec())
+                    .await
+            }
+        }
+    }
+
+    /// Un-key the transmitter: DTR skips the queue, `RX;` cannot.
+    async fn send_release(method: PttMethod, session: &BrokerCatSession) -> Option<Vec<u8>> {
+        match method {
+            PttMethod::Dtr => {
+                session
+                    .release_now_bypassing_queue(Self::line_task(false))
+                    .await
+            }
+            PttMethod::Cat => {
+                session
+                    .handle()
+                    .submit(session.client_id(), b"RX;".to_vec())
+                    .await
+            }
+        }
+    }
+
+    /// What was keyed, for the log.
+    fn keyed_how(method: PttMethod) -> &'static str {
+        match method {
+            PttMethod::Dtr => "DTR asserted",
+            PttMethod::Cat => "CAT TX;",
+        }
+    }
+
     /// Whether a watchdog armed at `armed_generation` may end the current
     /// key-down.
     ///
@@ -189,21 +271,25 @@ impl PttDtr {
     /// Takes an owned session so it can run from `Drop` or a watchdog,
     /// neither of which can borrow the caller's.
     ///
-    /// The bypassing release completes on its first poll whenever the
+    /// The bypassing DTR release completes on its first poll whenever the
     /// broker has release lines, so it is polled once here, synchronously:
-    /// by the time this returns, DTR is down. Only if the transport offered
-    /// no release lines -- the broker then falls back to its queue and the
-    /// first poll is `Pending` -- is the rest handed to [`detach`], which
-    /// still finishes it, just not promptly.
-    fn release_detached(keyed: Arc<AtomicBool>, session: BrokerCatSession, why: &'static str) {
+    /// by the time this returns, DTR is down. Otherwise -- a CAT `RX;`,
+    /// which must wait its turn in the queue, or a transport with no
+    /// release lines, where the broker falls back to its queue -- the first
+    /// poll is `Pending` and the rest is handed to [`detach`], which still
+    /// finishes it, just not promptly.
+    fn release_detached(
+        method: PttMethod,
+        keyed: Arc<AtomicBool>,
+        session: BrokerCatSession,
+        why: &'static str,
+    ) {
         if !keyed.load(Ordering::SeqCst) {
             return;
         }
         warn!("PTT: released ({why}) -- this was NOT a client asking to stop");
         let mut release = Box::pin(async move {
-            let out = session
-                .release_now_bypassing_queue(Self::line_task(false))
-                .await;
+            let out = Self::send_release(method, &session).await;
             match out {
                 Some(out) if out.starts_with(b"ERR ") => {
                     warn!(
@@ -232,11 +318,13 @@ impl PttDtr {
     /// Nothing in the rigctl protocol requires a station to survive that; a
     /// station with a transmitter on the end of it must.
     ///
-    /// Synchronous: DTR is down when this returns (see
-    /// [`Self::release_detached`]), so it is safe to call from `Drop` on
-    /// either platform.
+    /// For [`PttMethod::Dtr`], synchronous: DTR is down when this returns
+    /// (see [`Self::release_detached`]). For [`PttMethod::Cat`], `RX;` is
+    /// queued and sent in turn by a background task. Safe to call from
+    /// `Drop` on either platform.
     pub fn release_on_disconnect(&self, session: BrokerCatSession) {
         Self::release_detached(
+            self.method,
             Arc::clone(&self.keyed),
             session,
             "the client that keyed it disconnected",
@@ -244,10 +332,9 @@ impl PttDtr {
         self.wake_watchdog();
     }
 
-    /// Assert DTR, ordered against CAT traffic.
+    /// Key the transmitter, ordered against CAT traffic.
     pub async fn key(&self, session: &BrokerCatSession) -> Result<(), String> {
-        let out = session
-            .submit_task(Self::line_task(true))
+        let out = Self::send_key(self.method, session)
             .await
             .ok_or_else(|| "broker worker has shut down".to_string())?;
         if out.starts_with(b"ERR ") {
@@ -263,7 +350,7 @@ impl PttDtr {
         // receive part-way through a transmission" could only be guessed
         // at -- a client's `T 0`, a dropped connection and the watchdog
         // all look identical from outside.
-        info!("PTT: keyed (DTR asserted)");
+        info!("PTT: keyed ({})", Self::keyed_how(self.method));
 
         // Arm the hard timeout. Independent of the client: it fires whether
         // or not anything ever sends `T 0`, and whether or not the client is
@@ -282,6 +369,7 @@ impl PttDtr {
         // a watchdog that outlives its own key-down must do nothing.
         let mine = generation.load(Ordering::SeqCst);
         let max_key_down = self.max_key_down;
+        let method = self.method;
         let watchdog_session = BrokerCatSession::new(session.handle(), session.client_id());
         monoio::spawn(async move {
             monoio::time::sleep(max_key_down).await;
@@ -291,6 +379,7 @@ impl PttDtr {
                 mine,
             ) {
                 Self::release_detached(
+                    method,
                     keyed,
                     watchdog_session,
                     "the hard key-down timeout expired",
@@ -308,6 +397,7 @@ impl PttDtr {
         let generation = Arc::clone(&self.generation);
         let mine = generation.load(Ordering::SeqCst);
         let max_key_down = self.max_key_down;
+        let method = self.method;
         let (handle, client_id) = (session.handle(), session.client_id());
         let (wake, cancel) = mpsc::channel();
         // Replacing the previous sender wakes the previous watchdog, which
@@ -325,6 +415,7 @@ impl PttDtr {
                     mine,
                     move || {
                         Self::release_detached(
+                            method,
                             release_keyed,
                             BrokerCatSession::new(handle, client_id),
                             "the hard key-down timeout expired",
@@ -336,6 +427,7 @@ impl PttDtr {
             // No watchdog means no transmission: drop the key we just
             // asserted rather than leave it unguarded.
             Self::release_detached(
+                self.method,
                 Arc::clone(&self.keyed),
                 BrokerCatSession::new(session.handle(), session.client_id()),
                 "the key-down watchdog could not be started",
@@ -363,13 +455,12 @@ impl PttDtr {
         self.replace_watchdog_wake(None);
     }
 
-    /// De-assert DTR now, skipping the broker's queue (radio-cat-rs ADR
-    /// 0022) -- see this module's doc comment.
+    /// Un-key: de-assert DTR now, skipping the broker's queue (radio-cat-rs
+    /// ADR 0022), or send `RX;` in queue order -- see this module's doc
+    /// comment.
     pub async fn release(&self, session: &BrokerCatSession) -> Result<(), String> {
         info!("PTT: released (a client asked to stop transmitting)");
-        let result = session
-            .release_now_bypassing_queue(Self::line_task(false))
-            .await;
+        let result = Self::send_release(self.method, session).await;
         // Clear the flag even if the release reported failure: believing we
         // are still keyed when we may not be is the safer error, and the
         // caller is told.
@@ -390,9 +481,9 @@ impl PttDtr {
 /// released.
 ///
 /// `cancel` only wakes the thread early to re-check
-/// [`PttDtr::watchdog_may_release`]; it never by itself stands the watchdog
+/// [`Ptt::watchdog_may_release`]; it never by itself stands the watchdog
 /// down. A watchdog exits early only when the transmission it guards has
-/// ended, so a wake from a dropped `PttDtr` whose disconnect release did not
+/// ended, so a wake from a dropped `Ptt` whose disconnect release did not
 /// complete still leaves it to fire at the deadline.
 ///
 /// Compiled everywhere so it is tested on Linux too; only Windows arms it.
@@ -408,7 +499,7 @@ fn watch_key_down(
     let deadline = Instant::now() + max_key_down;
     let mut orphaned = false;
     loop {
-        if !PttDtr::watchdog_may_release(
+        if !Ptt::watchdog_may_release(
             keyed.load(Ordering::SeqCst),
             generation.load(Ordering::SeqCst),
             mine,
@@ -428,7 +519,7 @@ fn watch_key_down(
     }
 }
 
-/// A waker for the one synchronous poll in [`PttDtr::release_detached`].
+/// A waker for the one synchronous poll in [`Ptt::release_detached`].
 /// If that poll is `Pending`, the future is re-polled by its new owner with
 /// a real waker.
 struct NoopWake;
@@ -455,14 +546,14 @@ mod tests {
 
     #[test]
     fn a_new_ptt_is_not_keyed() {
-        assert!(!PttDtr::new().is_keyed());
+        assert!(!Ptt::new().is_keyed());
     }
 
     #[test]
     fn release_on_disconnect_is_a_no_op_when_not_keyed() {
         // Must not spawn work (or touch a line) for a connection that never
         // transmitted — the overwhelmingly common case.
-        let ptt = PttDtr::new();
+        let ptt = Ptt::new();
         assert!(!ptt.is_keyed());
         // No runtime is running here; if this tried to spawn, it would panic.
         // That it returns quietly is the assertion.
@@ -493,7 +584,7 @@ mod tests {
         // key-down at 06:09:00.390667. Within 1.6 ms of `MAX_KEY_DOWN`
         // measured from the *wrong* key-down.
         assert!(
-            !PttDtr::watchdog_may_release(true, 2, 1),
+            !Ptt::watchdog_may_release(true, 2, 1),
             "a watchdog armed for key-down 1 must not end key-down 2"
         );
     }
@@ -504,15 +595,15 @@ mod tests {
         // left keyed by a client that vanished, and narrowing it must not
         // disarm it.
         assert!(
-            PttDtr::watchdog_may_release(true, 7, 7),
+            Ptt::watchdog_may_release(true, 7, 7),
             "a watchdog must still end a key-down that is genuinely overrunning"
         );
     }
 
     #[test]
     fn a_watchdog_does_nothing_once_the_radio_is_unkeyed() {
-        assert!(!PttDtr::watchdog_may_release(false, 3, 3));
-        assert!(!PttDtr::watchdog_may_release(false, 4, 3));
+        assert!(!Ptt::watchdog_may_release(false, 3, 3));
+        assert!(!Ptt::watchdog_may_release(false, 4, 3));
     }
 
     #[test]
@@ -520,7 +611,7 @@ mod tests {
         // What makes the rule above able to tell them apart. If two
         // key-downs ever shared a generation, the stale watchdog would be
         // indistinguishable from the live one again.
-        let ptt = PttDtr::new();
+        let ptt = Ptt::new();
         let first = ptt.generation.load(Ordering::SeqCst);
         ptt.generation.fetch_add(1, Ordering::SeqCst);
         let second = ptt.generation.load(Ordering::SeqCst);
@@ -540,212 +631,14 @@ mod tests {
         assert!(MAX_KEY_DOWN.as_secs() <= 300);
     }
 
-    // -----------------------------------------------------------------
-    // Against a broker whose CAT exchange is stuck (radio-cat-rs ADR 0022)
-    // -----------------------------------------------------------------
-    //
-    // An in-crate session double (rule 6: never a real transport). Its
-    // `FA;` exchange never answers, like a radio that stopped talking
-    // mid-read, so the broker's worker holds the session until its request
-    // timeout. Every line change is logged with which handle made it:
-    // `primary` is the session's own borrowed lines (reachable only through
-    // the worker's queue), `release` the owned duplicate the broker keeps
-    // for de-keying (ADR 0022). Tests run on Linux under a monoio runtime
-    // and on Windows over the thread-based broker -- same assertions.
-
-    use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
-
-    use async_trait::async_trait;
-    use cat_framework::ResponseDisposition;
-    use cat_server::ClientId;
-    use cat_transport_core::{CatSession, ModemControlLines, TransportError};
-
-    /// How long the broker lets the stuck exchange run before giving up.
-    const STALL: Duration = Duration::from_millis(1500);
-    /// What "did not wait for the queue" means.
-    const PROMPT: Duration = Duration::from_millis(100);
-
-    type EventLog = Arc<Mutex<Vec<String>>>;
-
-    fn logged(log: &EventLog) -> Vec<String> {
-        log.lock().unwrap().clone()
-    }
-
-    fn position(events: &[String], entry: &str) -> Option<usize> {
-        events.iter().position(|e| e == entry)
-    }
-
-    struct RecordingLines {
-        tag: &'static str,
-        log: EventLog,
-    }
-
-    impl ModemControlLines for RecordingLines {
-        fn set_rts(&self, asserted: bool) -> Result<(), TransportError> {
-            let entry = format!("{} rts={asserted}", self.tag);
-            self.log.lock().unwrap().push(entry);
-            Ok(())
-        }
-        fn set_dtr(&self, asserted: bool) -> Result<(), TransportError> {
-            let entry = format!("{} dtr={asserted}", self.tag);
-            self.log.lock().unwrap().push(entry);
-            Ok(())
-        }
-        fn read_cts(&self) -> Result<bool, TransportError> {
-            Ok(false)
-        }
-        fn read_dsr(&self) -> Result<bool, TransportError> {
-            Ok(false)
-        }
-        fn read_dcd(&self) -> Result<bool, TransportError> {
-            Ok(false)
-        }
-    }
-
-    struct StallingSession {
-        log: EventLog,
-        primary: RecordingLines,
-        with_release_lines: bool,
-    }
-
-    impl StallingSession {
-        fn new(with_release_lines: bool) -> (Self, EventLog) {
-            let log = EventLog::default();
-            let session = Self {
-                with_release_lines,
-                primary: RecordingLines {
-                    tag: "primary",
-                    log: Arc::clone(&log),
-                },
-                log: Arc::clone(&log),
-            };
-            (session, log)
-        }
-    }
-
-    /// Logs `cat over` however the exchange ends -- answered or cancelled
-    /// by the broker's timeout.
-    struct ExchangeOver(EventLog, String);
-
-    impl Drop for ExchangeOver {
-        fn drop(&mut self) {
-            let entry = format!("cat over {}", self.1);
-            self.0.lock().unwrap().push(entry);
-        }
-    }
-
-    #[async_trait(?Send)]
-    impl CatSession for StallingSession {
-        type Error = TransportError;
-
-        async fn execute(
-            &mut self,
-            request: &[u8],
-            response: &mut Vec<u8>,
-        ) -> Result<ResponseDisposition, Self::Error> {
-            let req = String::from_utf8_lossy(request).into_owned();
-            self.log.lock().unwrap().push(format!("cat begin {req}"));
-            let _over = ExchangeOver(Arc::clone(&self.log), req);
-            if request == b"FA;" {
-                std::future::pending::<()>().await;
-            }
-            response.extend_from_slice(b"ID018;");
-            Ok(ResponseDisposition::ResponseWritten)
-        }
-
-        fn modem_lines(&self) -> Option<&dyn ModemControlLines> {
-            Some(&self.primary)
-        }
-
-        fn release_lines(&self) -> Option<Box<dyn ModemControlLines + Send + Sync>> {
-            self.with_release_lines.then(|| {
-                Box::new(RecordingLines {
-                    tag: "release",
-                    log: Arc::clone(&self.log),
-                }) as Box<dyn ModemControlLines + Send + Sync>
-            })
-        }
-    }
-
-    /// Build a broker over a fresh [`StallingSession`] and start its worker.
-    /// Must be called inside [`run`].
-    fn broker() -> (cat_server::BrokerHandle, EventLog) {
-        broker_with(true)
-    }
-
-    fn broker_with(release_lines: bool) -> (cat_server::BrokerHandle, EventLog) {
-        let (session, log) = StallingSession::new(release_lines);
-        let (worker, handle) =
-            cat_server::build_with_timeout(session, &radio::TS570D_COMMAND_TABLE, STALL);
-        #[cfg(target_os = "linux")]
-        monoio::spawn(worker.run());
-        #[cfg(not(target_os = "linux"))]
-        std::thread::spawn(move || worker.run());
-        (handle, log)
-    }
-
-    fn session(handle: &cat_server::BrokerHandle) -> BrokerCatSession {
-        BrokerCatSession::new(handle.clone(), ClientId::from_raw(1))
-    }
-
-    /// Drive a test body to completion on this platform's executor.
-    fn run<F: std::future::Future<Output = ()>>(body: F) {
-        #[cfg(target_os = "linux")]
-        monoio::RuntimeBuilder::<monoio::LegacyDriver>::new()
-            .enable_timer()
-            .build()
-            .expect("monoio runtime")
-            .block_on(body);
-        #[cfg(not(target_os = "linux"))]
-        cat_server::block_on::block_on(body);
-    }
-
-    /// Run `work` concurrently with the test body.
-    #[cfg(target_os = "linux")]
-    fn in_background<F: std::future::Future<Output = ()> + 'static>(work: F) {
-        monoio::spawn(work);
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn in_background<F: std::future::Future<Output = ()> + Send + 'static>(work: F) {
-        std::thread::spawn(move || cat_server::block_on::block_on(work));
-    }
-
-    async fn pause(d: Duration) {
-        #[cfg(target_os = "linux")]
-        monoio::time::sleep(d).await;
-        #[cfg(not(target_os = "linux"))]
-        std::thread::sleep(d);
-    }
-
-    /// Submit the `FA;` that hangs, and return once the worker is inside it.
-    async fn stall_the_wire(handle: &cat_server::BrokerHandle, log: &EventLog) {
-        let h = handle.clone();
-        in_background(async move {
-            let _ = h.submit(ClientId::from_raw(9), b"FA;".to_vec()).await;
-        });
-        until_logged(log, "cat begin FA;").await;
-    }
-
-    async fn until_logged(log: &EventLog, entry: &str) {
-        let give_up = Instant::now() + STALL * 2;
-        while position(&logged(log), entry).is_none() {
-            assert!(
-                Instant::now() < give_up,
-                "never logged {entry:?}: {:?}",
-                logged(log)
-            );
-            pause(Duration::from_millis(1)).await;
-        }
-    }
+    use crate::test_support::*;
 
     #[test]
     fn release_does_not_wait_behind_a_stalled_cat_exchange() {
         run(async {
             let (handle, log) = broker();
             let cat = session(&handle);
-            let ptt = PttDtr::new();
+            let ptt = Ptt::new();
             stall_the_wire(&handle, &log).await;
 
             let started = Instant::now();
@@ -772,7 +665,7 @@ mod tests {
         run(async move {
             let (handle, log) = broker();
             let cat = session(&handle);
-            let ptt = PttDtr::with_max_key_down(max);
+            let ptt = Ptt::new().with_max_key_down(max);
             let keyed_at = Instant::now();
             ptt.key(&cat).await.expect("key");
             stall_the_wire(&handle, &log).await;
@@ -795,7 +688,7 @@ mod tests {
         run(async {
             let (handle, log) = broker();
             let cat = session(&handle);
-            let ptt = PttDtr::new();
+            let ptt = Ptt::new();
             ptt.key(&cat).await.expect("key");
             stall_the_wire(&handle, &log).await;
 
@@ -827,7 +720,7 @@ mod tests {
             stall_the_wire(&handle, &log).await;
 
             in_background(async move {
-                let ptt = PttDtr::new();
+                let ptt = Ptt::new();
                 ptt.key(&cat).await.expect("key");
             });
             pause(PROMPT).await;
@@ -853,7 +746,7 @@ mod tests {
         run(async {
             let (handle, log) = broker_with(false);
             let cat = session(&handle);
-            let ptt = PttDtr::new();
+            let ptt = Ptt::new();
             ptt.key(&cat).await.expect("key");
 
             ptt.release_on_disconnect(session(&handle));
@@ -864,6 +757,147 @@ mod tests {
                 assert!(Instant::now() < give_up, "never cleared `keyed`");
                 pause(Duration::from_millis(1)).await;
             }
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // Keying with CAT `TX;`/`RX;` (no DTR interface)
+    // -----------------------------------------------------------------
+    //
+    // `RX;` is bytes on the wire, so unlike a line change it must stay in
+    // queue order -- but it gets every other protection the DTR path has:
+    // a disconnect release, and the hard key-down watchdog.
+
+    fn no_line_moved(events: &[String]) -> bool {
+        !events
+            .iter()
+            .any(|e| e.contains("dtr=") || e.contains("rts="))
+    }
+
+    #[test]
+    fn cat_keying_sends_tx_and_rx_and_never_touches_a_line() {
+        run(async {
+            let (handle, log) = broker();
+            let cat = session(&handle);
+            let ptt = Ptt::over_cat();
+            assert_eq!(ptt.method(), PttMethod::Cat);
+
+            ptt.key(&cat).await.expect("key");
+            assert!(ptt.is_keyed());
+            ptt.release(&cat).await.expect("release");
+            assert!(!ptt.is_keyed());
+
+            let events = logged(&log);
+            assert!(
+                position(&events, "cat begin TX;") < position(&events, "cat begin RX;"),
+                "{events:?}"
+            );
+            assert!(position(&events, "cat begin TX;").is_some(), "{events:?}");
+            assert!(no_line_moved(&events), "{events:?}");
+        });
+    }
+
+    #[test]
+    fn a_cat_release_stays_in_order_behind_a_queued_exchange() {
+        // Wire bytes: `RX;` must not be interleaved into a frame in flight.
+        run(async {
+            let (handle, log) = broker();
+            let cat = session(&handle);
+            let ptt = Ptt::over_cat();
+            ptt.key(&cat).await.expect("key");
+            stall_the_wire(&handle, &log).await;
+
+            ptt.release(&cat).await.expect("release");
+
+            let events = logged(&log);
+            assert!(
+                position(&events, "cat over FA;") < position(&events, "cat begin RX;"),
+                "RX; went out only after the earlier exchange: {events:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_cat_keyed_disconnect_sends_rx() {
+        // The gap: a rigctl connection keyed with `TX;` that dropped left
+        // the radio transmitting, because nothing sent `RX;`.
+        run(async {
+            let (handle, log) = broker();
+            let cat = session(&handle);
+            let ptt = Ptt::over_cat();
+            ptt.key(&cat).await.expect("key");
+
+            ptt.release_on_disconnect(session(&handle));
+
+            until_logged(&log, "cat begin RX;").await;
+            let give_up = Instant::now() + STALL;
+            while ptt.is_keyed() {
+                assert!(Instant::now() < give_up, "never cleared `keyed`");
+                pause(Duration::from_millis(1)).await;
+            }
+            assert!(no_line_moved(&logged(&log)));
+        });
+    }
+
+    #[test]
+    fn a_cat_disconnect_when_not_keyed_sends_nothing() {
+        run(async {
+            let (handle, log) = broker();
+            let ptt = Ptt::over_cat();
+            ptt.release_on_disconnect(session(&handle));
+            pause(PROMPT).await;
+            assert!(
+                position(&logged(&log), "cat begin RX;").is_none(),
+                "{:?}",
+                logged(&log)
+            );
+        });
+    }
+
+    #[test]
+    fn the_watchdog_ends_a_cat_key_down_with_rx() {
+        let max = Duration::from_millis(200);
+        run(async move {
+            let (handle, log) = broker();
+            let cat = session(&handle);
+            let ptt = Ptt::over_cat().with_max_key_down(max);
+            let keyed_at = Instant::now();
+            ptt.key(&cat).await.expect("key");
+
+            until_logged(&log, "cat begin RX;").await;
+            let took = keyed_at.elapsed();
+
+            assert!(took >= max, "watchdog fired early: {took:?}");
+            assert!(took < max + PROMPT, "watchdog released after {took:?}");
+            let give_up = Instant::now() + STALL;
+            while ptt.is_keyed() {
+                assert!(Instant::now() < give_up, "never cleared `keyed`");
+                pause(Duration::from_millis(1)).await;
+            }
+        });
+    }
+
+    #[test]
+    fn a_cat_watchdog_does_not_end_a_later_key_down() {
+        // Same generation rule as the DTR path.
+        let max = Duration::from_millis(200);
+        run(async move {
+            let (handle, log) = broker();
+            let cat = session(&handle);
+            let ptt = Ptt::over_cat().with_max_key_down(max);
+            ptt.key(&cat).await.expect("key 1");
+            ptt.release(&cat).await.expect("release 1");
+            pause(max / 2).await;
+            ptt.key(&cat).await.expect("key 2");
+            // The first watchdog's deadline passes during key-down 2.
+            pause(max * 3 / 4).await;
+            let rx = logged(&log)
+                .iter()
+                .filter(|e| *e == "cat begin RX;")
+                .count();
+            assert_eq!(rx, 1, "only the client's own release: {:?}", logged(&log));
+            assert!(ptt.is_keyed());
+            ptt.release(&cat).await.expect("release 2");
         });
     }
 
@@ -956,7 +990,7 @@ mod tests {
 
     #[test]
     fn an_orphaned_thread_watchdog_still_fires_if_still_keyed() {
-        // The `PttDtr` went away (sender dropped) but the disconnect
+        // The `Ptt` went away (sender dropped) but the disconnect
         // release did not clear `keyed`: the backstop must still fire.
         let keyed = Arc::new(AtomicBool::new(true));
         let generation = Arc::new(AtomicU64::new(1));
@@ -969,7 +1003,7 @@ mod tests {
 
     #[test]
     fn an_orphaned_thread_watchdog_exits_at_once_once_released() {
-        // The usual disconnect: released synchronously, then the `PttDtr`
+        // The usual disconnect: released synchronously, then the `Ptt`
         // dropped. The thread must not hang on for `MAX_KEY_DOWN` holding a
         // broker handle.
         let keyed = Arc::new(AtomicBool::new(true));

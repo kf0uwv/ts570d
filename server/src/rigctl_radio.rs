@@ -53,18 +53,25 @@ pub struct RigctlTs570d<S: CatSession> {
     /// The typed radio. Public and named `0`-like for continuity with the
     /// tuple struct this replaced.
     pub radio: Ts570d<S>,
-    /// How to key. `Some` when the station keys PTT on the DTR line, which
-    /// is what an ACC2-style opto interface does; `None` falls back to CAT
-    /// `TX;`/`RX;`.
+    /// How to key, and the broker handle the keying goes through: on the
+    /// DTR line, which is what an ACC2-style opto interface does, or with
+    /// CAT `TX;`/`RX;` ([`crate::PttMethod`]).
     ///
     /// The two are **not** interchangeable: ACC2 pin 9 (PKS) mutes the mic
     /// while keyed and CAT `TX;` does not, so a digital-mode client gets
     /// different audio behaviour depending on which path keys the radio.
-    ptt: Option<(crate::PttDtr, cat_server::BrokerCatSession)>,
+    /// Both get the disconnect release and the key-down watchdog.
+    ///
+    /// `None` only in tests ([`Self::new`]): a connection that can key
+    /// without either failsafe is not something this server builds.
+    ptt: Option<(crate::Ptt, cat_server::BrokerCatSession)>,
 }
 
 impl<S: CatSession> RigctlTs570d<S> {
-    /// Key with CAT `TX;`/`RX;` — the original behaviour.
+    /// Key with the radio's own `TX;`/`RX;`, with **no** disconnect release
+    /// and **no** watchdog. Test-only: production keying goes through
+    /// [`Self::with_dtr_ptt`] or [`Self::with_cat_ptt`].
+    #[cfg(test)]
     pub fn new(radio: Ts570d<S>) -> Self {
         Self { radio, ptt: None }
     }
@@ -73,7 +80,17 @@ impl<S: CatSession> RigctlTs570d<S> {
     pub fn with_dtr_ptt(radio: Ts570d<S>, session: cat_server::BrokerCatSession) -> Self {
         Self {
             radio,
-            ptt: Some((crate::PttDtr::new(), session)),
+            ptt: Some((crate::Ptt::new(), session)),
+        }
+    }
+
+    /// Key with CAT `TX;`/`RX;` through the broker's ordered queue, for a
+    /// station with no DTR keying interface -- with an `RX;` on a dropped
+    /// connection and the same [`crate::MAX_KEY_DOWN`] watchdog.
+    pub fn with_cat_ptt(radio: Ts570d<S>, session: cat_server::BrokerCatSession) -> Self {
+        Self {
+            radio,
+            ptt: Some((crate::Ptt::over_cat(), session)),
         }
     }
 }
@@ -87,11 +104,12 @@ impl<S: CatSession> Drop for RigctlTs570d<S> {
     /// protocol requires a station to handle that, and a station with a
     /// transmitter on the end of it has to.
     ///
-    /// `Drop` cannot be async, but it does not need to be: the release skips
-    /// the broker's queue (radio-cat-rs ADR 0022) and is done before
-    /// `release_on_disconnect` returns, on Linux and Windows alike. Only a
-    /// transport without release lines leaves it to finish in the
-    /// background; the watchdog armed in `PttDtr::key` is the backstop.
+    /// `Drop` cannot be async, but for DTR it does not need to be: the
+    /// release skips the broker's queue (radio-cat-rs ADR 0022) and is done
+    /// before `release_on_disconnect` returns, on Linux and Windows alike.
+    /// A CAT `RX;` is wire bytes and must wait its turn, so it -- like a DTR
+    /// release on a transport without release lines -- finishes in the
+    /// background; the watchdog armed in `Ptt::key` is the backstop.
     fn drop(&mut self) {
         if let Some((ptt, session)) = &self.ptt {
             if ptt.is_keyed() {
@@ -206,16 +224,16 @@ where
         // keying: then `IF;` genuinely is the only source, and a front
         // panel or another client may have keyed it.
         match &self.ptt {
-            Some((ptt, _)) => Ok(ptt.is_keyed()),
-            None => self.radio.get_information().await.map(|info| info.tx_rx),
+            Some((ptt, _)) if ptt.method() == crate::PttMethod::Dtr => Ok(ptt.is_keyed()),
+            _ => self.radio.get_information().await.map(|info| info.tx_rx),
         }
     }
 
     async fn transmit(&mut self) -> Result<(), Self::Error> {
         info!("rigctl: a client asked to TRANSMIT");
         match &self.ptt {
-            // DTR, ordered against CAT: keying must not overtake the command
-            // that set the mode or frequency.
+            // Ordered against CAT either way: keying must not overtake the
+            // command that set the mode or frequency.
             Some((ptt, session)) => ptt
                 .key(session)
                 .await
@@ -308,6 +326,78 @@ where
     /// the read to the wire rather than reporting a near miss.
     fn mode_from_id(id: cat_framework::capabilities::ModeId) -> Option<Self::Mode> {
         radio::capabilities::to_mode(id)
+    }
+}
+
+/// A dropped connection, over a real broker on both platforms.
+#[cfg(test)]
+mod disconnect_tests {
+    use std::time::{Duration, Instant};
+
+    use cat_rigctl::RigctlRadio;
+
+    use super::*;
+    use crate::test_support::*;
+
+    fn rigctl_over(
+        handle: &cat_server::BrokerHandle,
+        cat_keying: bool,
+    ) -> RigctlTs570d<cat_server::BrokerCatSession> {
+        let radio = Ts570d::new(session(handle));
+        if cat_keying {
+            RigctlTs570d::with_cat_ptt(radio, session(handle))
+        } else {
+            RigctlTs570d::with_dtr_ptt(radio, session(handle))
+        }
+    }
+
+    #[test]
+    fn a_cat_keyed_connection_that_drops_sends_rx() {
+        run(async {
+            let (handle, log) = broker();
+            let mut rigctl = rigctl_over(&handle, true);
+            rigctl.transmit().await.expect("T 1");
+            until_logged(&log, "cat begin TX;").await;
+
+            drop(rigctl);
+
+            until_logged(&log, "cat begin RX;").await;
+            let events = logged(&log);
+            assert!(
+                !events.iter().any(|e| e.contains("dtr=")),
+                "CAT keying never moves a line: {events:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_cat_keyed_connection_that_drops_unkeyed_sends_nothing() {
+        run(async {
+            let (handle, log) = broker();
+            let mut rigctl = rigctl_over(&handle, true);
+            rigctl.transmit().await.expect("T 1");
+            rigctl.receive().await.expect("T 0");
+            drop(rigctl);
+            pause(PROMPT).await;
+            let rx = logged(&log)
+                .iter()
+                .filter(|e| *e == "cat begin RX;")
+                .count();
+            assert_eq!(rx, 1, "{:?}", logged(&log));
+        });
+    }
+
+    #[test]
+    fn a_dtr_keyed_connection_that_drops_releases_dtr_at_once() {
+        run(async {
+            let (handle, log) = broker();
+            let mut rigctl = rigctl_over(&handle, false);
+            rigctl.transmit().await.expect("T 1");
+            let started = Instant::now();
+            drop(rigctl);
+            assert!(started.elapsed() < Duration::from_millis(100));
+            assert!(position(&logged(&log), "release dtr=false").is_some());
+        });
     }
 }
 

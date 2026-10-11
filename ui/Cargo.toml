@@ -14,6 +14,8 @@ radio = { path = "../radio" }
 
 # Error handling
 thiserror = { workspace = true }
+# Logging facade: an un-key the console could not confirm is logged.
+tracing = { workspace = true }
 
 # Terminal UI (for framework interface definitions only)
 ratatui = { workspace = true }
@@ -40,6 +42,8 @@ cat-ui-ratatui = { workspace = true }
 cat-framework = { workspace = true }
 
 [dev-dependencies]
+# Test-only: an in-crate `MockRadio` implements the `?Send` `Radio` trait.
+async-trait = "0.1"
 # `examples/screen.rs` can attach live sources, so it names the concrete
 # ones. An example is the wiring layer for itself.
 cat-signal-rtlsdr = { workspace = true }

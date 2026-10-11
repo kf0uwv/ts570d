@@ -26,6 +26,7 @@ pub(crate) mod diag;
 pub mod feeds;
 pub(crate) mod layout;
 mod terminal;
+pub(crate) mod unkey;
 // Not `#[cfg(target_os = "windows")]`-gated (see its own module doc): it has
 // no actual Windows-specific code and gets real test coverage on every
 // platform. Its only production caller is `terminal::run`'s Windows
