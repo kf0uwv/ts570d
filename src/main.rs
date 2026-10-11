@@ -54,7 +54,6 @@ mod port_guard;
 mod endpoint;
 
 /// The console, speaking the native protocol to a `ts570d server`.
-#[cfg(target_os = "linux")]
 mod native_console;
 
 use tracing::info;
