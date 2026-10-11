@@ -78,7 +78,10 @@ enum RadioCmd {
 
 /// Updates sent from the radio task to the UI task.
 enum RadioUpdate {
-    State(RadioDisplay),
+    // Boxed: `RadioDisplay` outgrew the other variants when it gained
+    // `cw` (radio-cat-rs ADR 0023), and clippy's `large_enum_variant`
+    // objects to every small update carrying its size.
+    State(Box<RadioDisplay>),
     ActionFeedback {
         ok: bool,
         msg: String,
@@ -2769,7 +2772,7 @@ async fn radio_task<R: Radio + 'static>(
         state.initializing = false;
 
         // 3. Send state snapshot to UI task.
-        ch_send(&update_tx, RadioUpdate::State(state.clone()));
+        ch_send(&update_tx, RadioUpdate::State(Box::new(state.clone())));
 
         // 4. Process all pending commands from the UI task.
         for cmd in ch_recv_all(&cmd_rx) {
@@ -2869,7 +2872,7 @@ async fn ui_task(
                     // startup, and restamped here.
                     state = RadioDisplay {
                         ptt_line_available: ptt_available,
-                        ..s
+                        ..*s
                     };
                 }
                 RadioUpdate::ActionFeedback { ok, msg } => {

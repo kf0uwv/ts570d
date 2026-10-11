@@ -135,6 +135,10 @@ impl ServerConfig {
             // Consoles are told what this radio is from the one
             // declaration, so the handshake cannot disagree with the
             // rigctl bridge about the same facts.
+
+            // Not yet wired to Ctrl-C / SIGTERM (ADR 0023 checklist step
+            // 3): with no CW control there is nothing to restore on exit.
+            stop: cat_rigctl::StopHandle::default(),
         }
     }
 }
