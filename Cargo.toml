@@ -74,27 +74,31 @@ tempfile = "3.10.1"
 mockall = "0.12.1"
 
 # Generic CAT engine + transports, extracted from this repo into
-# https://github.com/kf0uwv/radio-cat-rs (see docs/adr/0004, 0005). Pinned
-# to the v0.1.0 release tag (rather than floating on `branch = "main"`) so
-# this app's build is reproducible against a known-good, released snapshot
-# of the shared library.
-cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
-cat-native = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+# https://github.com/kf0uwv/radio-cat-rs (see docs/adr/0004, 0005).
+# Tracks `branch = "main"`: no released tag builds this app. v0.8.0 (the
+# newest tag) predates the CW capability (radio-cat-rs PR #19 --
+# `RadioCapabilities::cw`, `release_lines`) that the `radio` crate uses.
+# In practice the [patch] below redirects every crate here to the sibling
+# ../radio-cat-rs checkout, and CI checks out radio-cat-rs `main` there, so
+# `branch = "main"` states what is actually built. Re-pin to a tag (v0.9.0
+# or later) once radio-cat-rs releases one containing PR #19.
+cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-native = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 # How a radio's console is arranged. A path dependency for the same reason
 # as the others in this block: not in a tagged release yet.
 cat-layout = { path = "../radio-cat-rs/cat-layout" }
-cat-ui-egui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
-cat-signal = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
-cat-signal-rtlsdr = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-ui-egui = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-signal = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-signal-rtlsdr = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 # The ACC2 receive-audio client (radio-cat-rs ADR 0017). New alongside
 # cat-transport-rfc2217 and covered by the same temporary [patch].
 cat-signal-audio = { path = "../radio-cat-rs/cat-signal-audio" }
-cat-ui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
-cat-ui-ratatui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
-cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
-cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
-cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
-cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-ui = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-ui-ratatui = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 # RFC 2217: a serial port WITH its modem control lines, over TCP. New in
 # radio-cat-rs and not yet in a release, so it is a path dependency and the
 # [patch] below points every other radio-cat-rs crate at the same local
@@ -103,9 +107,9 @@ cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.
 # TEMPORARY: revert to a tagged git dependency once radio-cat-rs cuts the
 # release containing this crate.
 cat-transport-rfc2217 = { path = "../radio-cat-rs/cat-transport-rfc2217" }
-cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
-cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
-cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.7.3" }
+cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 
 # TEMPORARY local patch -- see cat-transport-rfc2217 above. Every
 # radio-cat-rs crate is redirected to the sibling checkout so exactly one
