@@ -166,7 +166,9 @@ static DEFINITIONS: &[CommandDefinition<Ts570dCommandId>] = &[
     definition!(Mc, "MC", "Memory Channel", QUERY, SET_ANY, NONE),
     definition!(An, "AN", "Antenna", QUERY, SET_1, NONE),
     definition!(Ks, "KS", "Keyer Speed", QUERY, SET_3, NONE),
-    definition!(Ky, "KY", "CW Keying", QUERY, SET_ANY, NONE, false, true),
+    // KY is readable: the manual documents `KY;` -> `KY<P2>;`, P2 0 = keyer
+    // buffer space available, 1 = not available (parameter 44).
+    definition!(Ky, "KY", "CW Keying", QUERY, SET_ANY, NONE),
     definition!(Pt, "PT", "CW Pitch", QUERY, SET_2, NONE),
     definition!(Ca, "CA", "CW Auto Zerobeat", QUERY, SET_1, NONE),
     definition!(Ac, "AC", "Antenna Tuner", QUERY, SET_2, NONE),
@@ -208,6 +210,10 @@ static DEFINITIONS: &[CommandDefinition<Ts570dCommandId>] = &[
     definition!(St, "ST", "Scan Type", QUERY, SET_1, NONE),
     definition!(Sp, "SP", "Split Operation", QUERY, SET_1, NONE),
     definition!(Os, "OS", "Offset", QUERY, SET_1, NONE),
+    // BK is NOT in the TS-570 manual's CAT reference. Kept so the table
+    // stays the single source of truth for what the emulator answers, but
+    // unverified on the radio and unused: nothing in this repo sends it.
+    // Break-in is VX (on/off) plus SD (delay).
     definition!(Bk, "BK", "Break-in On/Off", QUERY, SET_1, NONE),
     definition!(Qr, "QR", "Quick Memory Store", NONE, SET_1, NONE),
     definition!(Mf, "MF", "Memory Function", QUERY, SET_1, NONE),
@@ -301,6 +307,13 @@ pub struct Ts570dState {
     pub menu_values: [u16; 52],
     pub playback_channel: u8,
     pub memory_channels: [MemoryChannel; 100],
+    /// Every sentence a `KY` set handed the keyer, trimmed, in order -- what
+    /// a test asserts was (or was not) sent.
+    pub keyer_log: Vec<String>,
+    /// While `Some(t)` and `t` is in the future, `KY;` answers `KY1;`
+    /// (no buffer space). An approximation of the conversion time; see
+    /// the `KY` handler.
+    pub keyer_busy_until: Option<std::time::Instant>,
 }
 
 impl Default for Ts570dState {
@@ -373,6 +386,8 @@ impl Default for Ts570dState {
             menu_values: [0u16; 52],
             playback_channel: 0,
             memory_channels: [MemoryChannel::default(); 100],
+            keyer_log: Vec::new(),
+            keyer_busy_until: None,
         }
     }
 }
@@ -524,6 +539,25 @@ mod tests {
 
         framework.process_frame("FA;", &mut output).unwrap();
         assert_eq!(String::from_utf8(output).unwrap(), "FA00014250000;");
+    }
+
+    #[test]
+    fn framework_carries_the_ky_leading_space_to_the_radio() {
+        // The space in byte 3 is part of the command, not separator
+        // whitespace: the framework must hand it to the handler intact.
+        let mut framework = CatFramework::new(Ts570dRadio::new());
+        let mut output = Vec::new();
+        let frame = format!("KY{};", crate::keyer::ky_parameter("cq test").unwrap());
+        assert_eq!(frame.len(), 28);
+        framework.process_frame(&frame, &mut output).unwrap();
+        assert!(output.is_empty(), "{:?}", String::from_utf8_lossy(&output));
+        assert_eq!(
+            framework.radio().state().keyer_log,
+            vec!["CQ TEST".to_string()]
+        );
+
+        framework.process_frame("KY;", &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "KY1;");
     }
 
     #[test]

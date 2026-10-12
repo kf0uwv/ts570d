@@ -53,6 +53,11 @@ pub enum RadioError {
     Transport(#[from] TransportError),
     #[error("Not implemented")]
     NotImplemented,
+    /// CW text the radio's keyer cannot take as given: too long for one
+    /// sentence, empty, or a character it cannot send. Refused before
+    /// anything reaches the radio.
+    #[error("Invalid CW text: {0}")]
+    InvalidCwText(String),
     /// The link to the radio said something is wrong, in its own words.
     ///
     /// For a `Radio` that reaches its radio over a network protocol rather

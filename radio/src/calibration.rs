@@ -316,7 +316,11 @@ use cat_transport_core::{CatSession, TransportError};
 /// `"EX": "0000000"` would silently set menu 0 to zero. Menu values have
 /// their own section of the snapshot precisely so they are never confused
 /// with this.
-pub const VOLATILE: &[&str] = &["SM", "RM", "BY", "IF", "EX"];
+///
+/// `KY` is excluded because its read is keyer *buffer status* (`KY0;` /
+/// `KY1;`), not a setting -- and a restore writing it back would be a `KY`
+/// set: a CW sentence handed to the transmitter.
+pub const VOLATILE: &[&str] = &["SM", "RM", "BY", "IF", "EX", "KY"];
 
 /// Settings that are front-panel knobs, turned in the course of ordinary
 /// operating.
@@ -1589,6 +1593,35 @@ mod restore_against_a_stateful_radio {
         let seen: CommandLog = Default::default();
         let r = Ts570d::new(SerialCatSession::new(EmulatedRadio::new(seen.clone())));
         (r, seen)
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn capture_and_restore_never_hand_the_keyer_a_sentence() {
+        // `KY` became readable (buffer status). Were it captured, a restore
+        // would write it back -- a `KY` set, i.e. CW on the transmitter.
+        let (mut r, seen) = radio();
+        let mut before = Snapshot::new("TS-570D", "2026-10-08T00:00:00Z".to_string());
+        capture_settings(&mut r, &mut before)
+            .await
+            .expect("answers");
+        assert!(!before.settings.contains_key("KY"));
+        let _ = restore(&mut r, &before).await;
+        let keyed: Vec<_> = seen
+            .borrow()
+            .iter()
+            .filter(|c| c.starts_with("KY") && c.len() > 2)
+            .cloned()
+            .collect();
+        assert!(keyed.is_empty(), "a KY set was sent: {keyed:?}");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn send_cw_reaches_the_emulated_keyer_in_the_manuals_form() {
+        let (mut r, seen) = radio();
+        assert!(r.keyer_buffer_free().await.unwrap());
+        r.send_cw("test n0call").await.unwrap();
+        assert!(seen.borrow().contains(&format!("KY {:<24}", "TEST N0CALL")));
+        assert!(!r.keyer_buffer_free().await.unwrap(), "busy while keying");
     }
 
     #[monoio::test(driver = "legacy")]

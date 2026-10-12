@@ -43,6 +43,7 @@
 pub mod calibration;
 pub mod capabilities;
 pub mod console_layout;
+pub mod keyer;
 pub mod protocol;
 pub mod ptt_line;
 pub mod radio_trait;

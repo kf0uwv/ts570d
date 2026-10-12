@@ -72,6 +72,11 @@ impl ResponseParser {
             "XT" => Self::parse_one_digit_bool(params).map(Response::Xit),
             "SC" => Self::parse_one_digit_bool(params).map(Response::Scan),
             "VX" => Self::parse_one_digit_bool(params).map(Response::Vox),
+            "KY" => match params {
+                "0" => Ok(Response::KeyerBufferFull(false)),
+                "1" => Ok(Response::KeyerBufferFull(true)),
+                _ => Err(RadioError::InvalidProtocolString(params.to_string())),
+            },
             "VG" => Self::parse_three_digit_u8(params).map(Response::VoxGain),
             "VD" => Self::parse_four_digit_u16(params).map(Response::VoxDelay),
             "FR" => Self::parse_one_digit_u8(params).map(Response::RxVfo),

@@ -68,6 +68,9 @@ pub enum Response {
     Scan(bool),
     /// VX — VOX on/off
     Vox(bool),
+    /// `KY;` answer: `true` when the keyer buffer has **no** space
+    /// (`KY1;`). Space, not idle -- the radio may still be keying.
+    KeyerBufferFull(bool),
     /// VG — VOX gain (001–009)
     VoxGain(u8),
     /// VD — VOX delay in ms (0–3000)
