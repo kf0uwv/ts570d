@@ -237,9 +237,9 @@ pub const TS570D: RadioCapabilities = RadioCapabilities {
         if_center_hz: 73_050_000,
         inverted: true,
     },
-    // No CW over CAT yet (radio-cat-rs ADR 0023). Declaring it waits on
-    // `send_cw` being fixed and a `NativeCw` bridge existing -- planned
-    // work, planning/kenwood/task_plan.md T2-T5.
+    // No CW over CAT yet (radio-cat-rs ADR 0023). `send_cw` now sends the
+    // manual's 28-byte `KY` form; declaring CW still waits on a `NativeCw`
+    // bridge existing -- planned work, planning/kenwood/task_plan.md T2-T5.
     cw: None,
 };
 
